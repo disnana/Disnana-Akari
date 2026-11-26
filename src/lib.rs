@@ -47,7 +47,7 @@ const BUSY_MESSAGE: &str = "現在混雑しています。少し待ってから�
 type NoMessageHandler = fn(Context<'_>) -> std::future::Ready<Result<()>>;
 
 /// Akari とメッセージハンドラーで使う結果型です。
-pub type Result<T>   = std::result::Result<T, Box<dyn Error + Send + Sync>>;
+pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 /// テスト用サーバー向けの、単一シャードの Discord Bot です。
 pub struct Bot {
