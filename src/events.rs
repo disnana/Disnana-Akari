@@ -6,7 +6,7 @@ pub use twilight_model::gateway::payload::incoming::Ready;
 
 use crate::{
     ButtonContext, ChannelSelectContext, MentionableSelectContext, ModalContext, Result,
-    RoleSelectContext, SelectContext, UserSelectContext, buttons::Buttons,
+    RoleSelectContext, SelectContext, UserSelectContext, interactions::InteractionHandlers,
 };
 
 /// Gateway イベントごとに非同期ハンドラーを登録します。
@@ -14,7 +14,7 @@ use crate::{
 pub struct Events {
     ready: Vec<Box<dyn Handler<Ready>>>,
     message: Vec<Box<dyn Handler<Message>>>,
-    pub(crate) buttons: Buttons,
+    pub(crate) interaction_handlers: InteractionHandlers,
 }
 
 impl Events {
@@ -49,7 +49,8 @@ impl Events {
         custom_id: &str,
         handler: impl AsyncFn(&mut ButtonContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        self.buttons.register(custom_id, handler)
+        self.interaction_handlers
+            .register_button(custom_id, handler)
     }
 
     /// 指定した ID の文字列 Select Menu が選択されたときに呼ぶ関数を登録します。
@@ -61,7 +62,8 @@ impl Events {
         custom_id: &str,
         handler: impl AsyncFn(&mut SelectContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        self.buttons.register_select(custom_id, handler)
+        self.interaction_handlers
+            .register_select(custom_id, handler)
     }
 
     /// 指定した ID のユーザー選択を処理する関数を登録します。
@@ -73,7 +75,8 @@ impl Events {
         custom_id: &str,
         handler: impl AsyncFn(&mut UserSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        self.buttons.register_user_select(custom_id, handler)
+        self.interaction_handlers
+            .register_user_select(custom_id, handler)
     }
 
     /// 指定した ID のロール選択を処理する関数を登録します。
@@ -85,7 +88,8 @@ impl Events {
         custom_id: &str,
         handler: impl AsyncFn(&mut RoleSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        self.buttons.register_role_select(custom_id, handler)
+        self.interaction_handlers
+            .register_role_select(custom_id, handler)
     }
 
     /// 指定した ID のチャンネル選択を処理する関数を登録します。
@@ -97,7 +101,8 @@ impl Events {
         custom_id: &str,
         handler: impl AsyncFn(&mut ChannelSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        self.buttons.register_channel_select(custom_id, handler)
+        self.interaction_handlers
+            .register_channel_select(custom_id, handler)
     }
 
     /// 指定した ID のメニューでユーザーやロールを選んだときに呼ぶ関数を登録します。
@@ -109,7 +114,8 @@ impl Events {
         custom_id: &str,
         handler: impl AsyncFn(&mut MentionableSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        self.buttons.register_mentionable_select(custom_id, handler)
+        self.interaction_handlers
+            .register_mentionable_select(custom_id, handler)
     }
 
     /// 指定した ID の Modal が送信されたときに呼ぶ関数を登録します。
@@ -121,7 +127,7 @@ impl Events {
         custom_id: &str,
         handler: impl AsyncFn(&mut ModalContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        self.buttons.register_modal(custom_id, handler)
+        self.interaction_handlers.register_modal(custom_id, handler)
     }
 
     pub(crate) fn has_message_handlers(&self) -> bool {

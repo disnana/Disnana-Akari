@@ -1,10 +1,10 @@
 #![doc = include_str!("../docs/api.md")]
 
-mod buttons;
 mod commands;
 mod cooldown;
 mod events;
 mod hybrid;
+mod interactions;
 mod slash;
 mod timing;
 pub mod ui;
@@ -23,14 +23,14 @@ use twilight_model::{
     },
 };
 
-pub use buttons::{
-    ButtonContext, ChannelSelectContext, EntitySelectContext, Mentionable,
-    MentionableSelectContext, ModalContext, RoleSelectContext, SelectContext, UserSelectContext,
-};
 pub use commands::{CommandContext, Commands};
 pub use cooldown::Cooldown;
 pub use events::{Events, Ready};
 pub use hybrid::{CommandSource, HybridContext, register_hybrid};
+pub use interactions::{
+    ButtonContext, ChannelSelectContext, EntitySelectContext, Mentionable,
+    MentionableSelectContext, ModalContext, RoleSelectContext, SelectContext, UserSelectContext,
+};
 pub use slash::{SlashCommands, SlashContext};
 pub use timing::Timing;
 pub use twilight_http as http;
@@ -179,7 +179,7 @@ impl Bot {
             None => None,
         };
 
-        if events.buttons.has_handlers() {
+        if events.interaction_handlers.has_handlers() {
             event_types |= EventTypeFlags::INTERACTION_CREATE;
         }
 
@@ -263,7 +263,10 @@ impl Bot {
                     interaction.kind,
                     InteractionType::MessageComponent | InteractionType::ModalSubmit
                 ) {
-                    events.buttons.dispatch(&http, &interaction, timing).await;
+                    events
+                        .interaction_handlers
+                        .dispatch(&http, &interaction, timing)
+                        .await;
                 } else if let Some(commands) = slash {
                     commands.dispatch(&http, &interaction, timing).await;
                 }
@@ -323,7 +326,7 @@ impl Bot {
                         }
                     }
                     Ok(Event::InteractionCreate(interaction))
-                        if events.buttons.accepts(&interaction.0)
+                        if events.interaction_handlers.accepts(&interaction.0)
                             || slash.is_some_and(|commands| commands.accepts(&interaction.0)) =>
                     {
                         if let Err(error) =
