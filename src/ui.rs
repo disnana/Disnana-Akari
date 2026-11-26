@@ -128,7 +128,7 @@ impl SelectOption {
     }
 }
 
-/// 文字列の選択肢を一つ選べるメニューです。
+/// 文字列の選択肢から、指定した個数を選べるメニューです。既定では一つ選びます。
 #[derive(Clone, Debug)]
 #[must_use]
 pub struct StringSelect(SelectMenu);
@@ -154,6 +154,24 @@ impl StringSelect {
     /// 未選択の状態で表示する案内を設定します。
     pub fn placeholder(mut self, text: impl Into<String>) -> Self {
         self.0.placeholder = Some(text.into());
+        self
+    }
+
+    /// 選ぶ必要がある最小数を 0〜25 個で指定します。既定では 1 個です。
+    pub fn min_values(mut self, min: u8) -> Self {
+        self.0.min_values = Some(min);
+        self
+    }
+
+    /// 選べる最大数を 1〜25 個で指定します。選択肢の総数以下にします。
+    pub fn max_values(mut self, max: u8) -> Self {
+        self.0.max_values = Some(max);
+        self
+    }
+
+    /// `true` を指定するとメニューを操作できなくします。
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.0.disabled = disabled;
         self
     }
 }
@@ -202,6 +220,25 @@ impl TextInput {
     /// 入力を必須にするかどうかを設定します。既定では必須です。
     pub fn required(mut self, required: bool) -> Self {
         self.input.required = Some(required);
+        self
+    }
+
+    /// 入力の最小文字数を 0〜4000 文字で指定します。既定では 0 文字です。
+    pub fn min_length(mut self, min: u16) -> Self {
+        self.input.min_length = Some(min);
+        self
+    }
+
+    /// 入力の最大文字数を 1〜4000 文字で指定します。既定では 4000 文字です。
+    pub fn max_length(mut self, max: u16) -> Self {
+        self.input.max_length = Some(max);
+        self
+    }
+
+    /// フォームを開いた時点で入力されている文字列を指定します。
+    /// 空でない文字列は指定した最小・最大文字数に収めます。
+    pub fn value(mut self, value: impl Into<String>) -> Self {
+        self.input.value = Some(value.into());
         self
     }
 }
@@ -258,6 +295,19 @@ impl Modal {
                 return Err("入力欄には空でないラベルが必要です。".into());
             }
             check_custom_id(&mut ids, &input.custom_id)?;
+
+            let min = usize::from(input.min_length.unwrap_or_default());
+            let max = input
+                .max_length
+                .map_or(component::TEXT_INPUT_LENGTH_MAX, usize::from);
+            if min > max {
+                return Err("入力欄の最小文字数は最大文字数以下にしてください。".into());
+            }
+            if let Some(value) = input.value.as_deref().filter(|value| !value.is_empty())
+                && !(min..=max).contains(&value.chars().count())
+            {
+                return Err("入力欄の初期値を指定した文字数の範囲に収めてください。".into());
+            }
         }
 
         Ok(InteractionResponse {
@@ -400,9 +450,14 @@ fn check_button<'a>(button: &'a RawButton, ids: &mut HashSet<&'a str>) -> Result
 
 fn check_select<'a>(select: &'a SelectMenu, ids: &mut HashSet<&'a str>) -> Result<()> {
     check_custom_id(ids, &select.custom_id)?;
+    let min = select.min_values.unwrap_or(1);
+    let max = select.max_values.unwrap_or(1);
+    if min > max {
+        return Err("選択できる最小数は最大数以下にしてください。".into());
+    }
     if select.kind == SelectMenuType::Text {
         let options = select.options.as_deref().unwrap_or_default();
-        if options.is_empty() || usize::from(select.max_values.unwrap_or(1)) > options.len() {
+        if options.is_empty() || usize::from(max) > options.len() {
             return Err("選択メニューには選択できる数以上の選択肢が必要です。".into());
         }
         let mut values = HashSet::new();
@@ -414,9 +469,6 @@ fn check_select<'a>(select: &'a SelectMenu, ids: &mut HashSet<&'a str>) -> Resul
                 return Err("選択肢の値は重複できません。".into());
             }
         }
-    }
-    if select.min_values.unwrap_or(1) > select.max_values.unwrap_or(1) {
-        return Err("選択できる最小数は最大数以下にしてください。".into());
     }
     Ok(())
 }
@@ -557,6 +609,31 @@ mod tests {
     }
 
     #[test]
+    fn string_select_checks_configured_bounds_and_keeps_disabled_state() {
+        let select = StringSelect::new(
+            "color",
+            vec![
+                SelectOption::new("青", "blue"),
+                SelectOption::new("緑", "green"),
+            ],
+        );
+        let configured = select.clone().min_values(0).max_values(2).disabled(true);
+        assert_eq!(configured.0.min_values, Some(0));
+        assert_eq!(configured.0.max_values, Some(2));
+        assert!(configured.0.disabled);
+        assert!(UiMessage::new().select(configured).validate().is_ok());
+
+        for invalid in [
+            select.clone().min_values(2),
+            select.clone().max_values(3),
+            select.clone().min_values(0).max_values(0),
+            select.min_values(26).max_values(26),
+        ] {
+            assert!(UiMessage::new().select(invalid).validate().is_err());
+        }
+    }
+
+    #[test]
     fn builds_modal_with_labels_and_rejects_duplicate_input_ids() {
         let modal = Modal::new("feedback", "感想を書く")
             .text_input(TextInput::new("body", "感想").paragraph().required(false));
@@ -581,5 +658,30 @@ mod tests {
                 .response()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn modal_text_input_checks_length_bounds_and_prefill() {
+        let input = || TextInput::new("body", "感想");
+        let modal = |input| Modal::new("feedback", "感想を書く").text_input(input);
+
+        let configured = input().min_length(2).max_length(4).value("日本");
+        assert_eq!(configured.input.min_length, Some(2));
+        assert_eq!(configured.input.max_length, Some(4));
+        assert_eq!(configured.input.value.as_deref(), Some("日本"));
+        assert!(modal(configured).response().is_ok());
+        assert!(modal(input().min_length(2).value("")).response().is_ok());
+
+        for invalid in [
+            input().min_length(2).max_length(1),
+            input().min_length(4_001),
+            input().max_length(0),
+            input().max_length(4_001),
+            input().min_length(2).value("日"),
+            input().max_length(1).value("日本"),
+            input().value("あ".repeat(4_001)),
+        ] {
+            assert!(modal(invalid).response().is_err());
+        }
     }
 }

@@ -167,7 +167,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | --- | --- |
 | `ctx.custom_id() -> &str` | ボタンの識別子を取得します。 |
 | `ctx.author_id() -> Option<Id<UserMarker>>` | ボタンを押したユーザーの ID を取得します。 |
-| `ctx.invoker_id() -> Option<Id<UserMarker>>` | ボタンが付いたメッセージの操作メタデータに記録されたユーザー ID を取得します。記録がなければ `None` です。 |
+| `ctx.invoker_id() -> Option<Id<UserMarker>>` | 元のメッセージの操作メタデータに記録された実行者 ID を取得します。記録がなく、Bot の返信が参照したユーザー投稿を照合できる場合は、その投稿者 ID を返します。どちらも確認できない場合は `None` です。 |
 | `ctx.guild_id() -> Option<Id<GuildMarker>>` | ボタンが押されたサーバーの ID を取得します。 |
 | `ctx.message() -> Option<&Message>` | ボタンが付いた元のメッセージを借ります。 |
 | `ctx.timing() -> Timing` | ボタン操作の受信時点と処理開始時点をもとにした測定値を取得します。 |
@@ -182,6 +182,8 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 
 `update_message` は本文、埋め込み、ボタンの行をまとめて置き換えます。次の表示にも残したい埋め込みやボタンは、新しい `UiMessage` に含めます。更新は一回のクリックにつき一度です。時間のかかる処理では、先に `defer_update` を呼んで 3 秒以内に初回応答を送り、処理の完了後に `update_message` で表示を変更します。
 
+発行者本人に操作を限定する場合は、`invoker_id()` と現在の `author_id()` をハンドラーで照合します。両方の ID が取得できた場合に比較し、操作の対象や必要な権限も確認します。選択メニューも同じ方法で確認できます。
+
 ハンドラーが初回応答を送らずに成功した場合は、Akari が確認応答を試みます。初回応答の前にエラーを返した場合は、本人にだけ見える初回応答を試みます。`defer_update` 後にハンドラーが失敗した場合は、元のメッセージを保ったまま、本人にだけ追加でエラーを知らせます。[埋め込みとボタンのチュートリアル](tutorial.md)
 
 ## `ComponentsV2` と入力フォーム
@@ -191,13 +193,39 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | ビルダー | 動作 |
 | --- | --- |
 | `SelectOption::new(label, value)` | メニューに表示するラベルと、選択時に返す値を設定します。`description` で選択肢の説明を設定できます。 |
-| `StringSelect::new(custom_id, options)` | 選択メニューを作ります。`placeholder` で選択する前の表示を指定できます。 |
+| `StringSelect::new(custom_id, options)` | 選択メニューを作ります。`placeholder` で選択する前の表示、`min_values` と `max_values` で選べる個数、`disabled` で無効状態を指定できます。 |
 | `Modal::new(custom_id, title)` | 入力フォームを作ります。 |
-| `form.text_input(TextInput::new(custom_id, label))` | フォームに入力欄を追加します。`paragraph` で複数行入力、`required` で必須かどうかを設定できます。 |
+| `form.text_input(TextInput::new(custom_id, label))` | フォームに入力欄を追加します。`paragraph` で複数行入力、`required` で必須かどうか、`min_length` と `max_length` で文字数、`value` で初期値を設定できます。 |
+
+選択メニューの既定値は一項目です。最小選択数は 0～25、最大選択数は 1～25 で、最小値は最大値以下、最大値は用意した選択肢の数以下にします。入力文字数の最小値は 0～4,000、最大値は 1～4,000 です。空でない初期値は設定した文字数の範囲に収めます。入力欄を空で始めたい場合は、初期値を省略するか空文字列にします。
 
 `SelectContext` には、メニューの `custom_id()` と選択結果の `values() -> &[String]` が渡ります。`author_id()`、`guild_id()`、`message()`、`invoker_id()` で操作者や元のメッセージを確認でき、ボタンと同じように `reply_ephemeral`、`defer_update`、`update_message`、`update_v2`、`show_modal` を呼べます。
 
-`show_modal` はスラッシュコマンド、ボタン、選択メニューの初回応答として呼びます。フォームを送信すると、フォームの識別子に対応する `on_modal` の関数が呼ばれます。`ModalContext::text_input(custom_id)` は、入力欄の識別子に対応する値を `Option<&str>` で返します。`custom_id()` はフォームの識別子を返し、`author_id()` と `guild_id()` は送信者とサーバーの情報を返します。送信への返事は `reply_ephemeral` で本人に表示できます。[Components V2 のチュートリアル](tutorial.md)
+`show_modal` はスラッシュコマンド、ボタン、選択メニューの初回応答として呼びます。フォームを送信すると、フォームの識別子に対応する `on_modal` の関数が呼ばれます。`ModalContext::text_input(custom_id)` は、入力欄の識別子に対応する値を `Option<&str>` で返します。`custom_id()` はフォームの識別子を返し、`author_id()` と `guild_id()` は送信者とサーバーの情報を返します。
+
+### フォーム送信に応答する
+
+| メソッド | 動作 |
+| --- | --- |
+| `ctx.reply(content).await -> Result<()>` | チャンネルに返信します。遅延応答の後は、公開範囲を維持して処理中の表示を置き換えます。 |
+| `ctx.reply_ephemeral(content).await -> Result<()>` | 本人にだけ見える初回応答を送ります。`defer_ephemeral` の後は、処理中の表示を置き換えます。 |
+| `ctx.defer().await -> Result<()>` | 最初に処理中の応答をチャンネルに送ります。 |
+| `ctx.defer_ephemeral().await -> Result<()>` | 最初に本人にだけ見える処理中の応答を送ります。 |
+| `ctx.followup(content).await -> Result<()>` | 最初の本文を送った後、チャンネルに追加のメッセージを送ります。 |
+| `ctx.followup_ephemeral(content).await -> Result<()>` | 最初の本文を送った後、本人にだけ追加のメッセージを送ります。 |
+
+時間がかかる処理では、3 秒の初回応答期限までに `defer` または `defer_ephemeral` を明示的に呼び、完了時に `reply` を呼びます。公開の `defer` の後に `reply_ephemeral` を呼ぶとエラーになります。ハンドラーが本文を送らずに成功した場合は、Akari が「入力を受け付けました。」と知らせます。初回応答前なら本人にだけ表示し、遅延応答済みならその表示を受け取り通知に置き換えます。本文を送る前にハンドラーが失敗した場合は、同じ経路でエラー応答を試みます。[Components V2 のチュートリアル](tutorial.md) · [Discord の Interaction 応答仕様](https://docs.discord.com/developers/interactions/receiving-and-responding)
+
+```rust,no_run
+use disnana_akari::{ModalContext, Result};
+
+async fn submit(ctx: &mut ModalContext<'_>) -> Result<()> {
+    ctx.defer_ephemeral().await?;
+    // ここでフォーム送信後の処理を待ちます。
+    ctx.reply("入力を受け付けました。").await?;
+    ctx.followup_ephemeral("受け取り番号は 1234 です。").await
+}
+```
 
 ## `Context<'_>` と `Result<T>`
 

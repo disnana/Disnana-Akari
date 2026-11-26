@@ -130,6 +130,10 @@ Playground の **更新** ボタンは `update_message` で、クリックされ
 
 フォーム送信はボタンのクリックとは別の操作です。サンプルの送信ハンドラーは `reply_ephemeral` で受け取りだけを本人に知らせます。[Playground の Components V2 実装](../examples/ping/components.rs) · [イベントの登録](../examples/ping/events.rs)
 
+選択する個数を変える場合は、メニューに `.min_values(1).max_values(2)` のように上限と下限を設定します。フォームでは `.min_length(1).max_length(200)` で入力の長さを指定し、`.value("下書き")` で入力欄に初期値を入れられます。
+
+フォーム送信後の処理に時間がかかる場合は、先に `ctx.defer_ephemeral().await?` で本人に処理中と伝え、処理を終えてから `ctx.reply("保存しました。").await?` で表示を書き換えます。別の通知を続ける場合は `followup_ephemeral` を使います。[フォーム送信への応答](api.md)
+
 ## 自分のライブラリを組み込む
 
 Playground も Cargo プロジェクトなので、公開クレートはリポジトリのルートから `cargo add --manifest-path playground/Cargo.toml クレート名` で追加できます。`クレート名` を使いたいライブラリの名前に置き換えます。ローカルのライブラリは、その `Cargo.toml` があるディレクトリへの相対パスを `playground/Cargo.toml` の `[dependencies]` に指定できます。

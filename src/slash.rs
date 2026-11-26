@@ -452,34 +452,15 @@ impl<'a> SlashContext<'a> {
     }
 
     async fn defer_with_visibility(&mut self, ephemeral: bool) -> Result<()> {
-        if *self.response_state != ResponseState::Pending {
-            return Err("このスラッシュコマンドにはすでに初回応答を送りました".into());
-        }
-        let response = initial_response(InitialResponse::Deferred, ephemeral);
-        self.http
-            .interaction(self.interaction.application_id)
-            .create_response(self.interaction.id, &self.interaction.token, &response)
-            .await?;
-        *self.response_state = ResponseState::Deferred { ephemeral };
-        Ok(())
+        self.response_state
+            .defer(self.http, self.interaction, ephemeral)
+            .await
     }
 
     async fn respond(&mut self, content: &str, ephemeral: bool) -> Result<()> {
-        match self.response_state.reply_action(ephemeral)? {
-            ReplyAction::Initial => {
-                send_initial_message(self.http, self.interaction, content, ephemeral).await?;
-            }
-            ReplyAction::EditDeferred => {
-                self.http
-                    .interaction(self.interaction.application_id)
-                    .update_response(&self.interaction.token)
-                    .content(Some(content))
-                    .allowed_mentions(Some(&AllowedMentions::default()))
-                    .await?;
-            }
-        }
-        *self.response_state = ResponseState::Replied;
-        Ok(())
+        self.response_state
+            .reply(self.http, self.interaction, content, ephemeral)
+            .await
     }
 
     async fn respond_ui(&mut self, message: &UiMessage, ephemeral: bool) -> Result<()> {
@@ -501,10 +482,9 @@ impl<'a> SlashContext<'a> {
     }
 
     async fn send_followup(&self, content: &str, ephemeral: bool) -> Result<()> {
-        if *self.response_state != ResponseState::Replied {
-            return Err("追加メッセージを送る前に reply で初回メッセージを送ってください".into());
-        }
-        send_followup_message(self.http, self.interaction, content, ephemeral).await
+        self.response_state
+            .followup(self.http, self.interaction, content, ephemeral)
+            .await
     }
 
     async fn respond_v2(&mut self, message: &ComponentsV2, ephemeral: bool) -> Result<()> {
@@ -527,7 +507,7 @@ impl<'a> SlashContext<'a> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ResponseState {
+pub(crate) enum ResponseState {
     Pending,
     Deferred { ephemeral: bool },
     Replied,
@@ -542,10 +522,52 @@ impl ResponseState {
                 Err("遅延応答の公開範囲は変更できません".into())
             }
             Self::Deferred { .. } => Ok(ReplyAction::EditDeferred),
-            Self::Replied | Self::ModalOpened => {
-                Err("このスラッシュコマンドにはすでに応答しました".into())
-            }
+            Self::Replied | Self::ModalOpened => Err("この操作にはすでに応答しました".into()),
         }
+    }
+
+    pub(crate) async fn defer(
+        &mut self,
+        http: &Client,
+        interaction: &Interaction,
+        ephemeral: bool,
+    ) -> Result<()> {
+        if *self != Self::Pending {
+            return Err("この操作にはすでに初回応答を送りました".into());
+        }
+        send_deferred_message(http, interaction, ephemeral).await?;
+        *self = Self::Deferred { ephemeral };
+        Ok(())
+    }
+
+    pub(crate) async fn reply(
+        &mut self,
+        http: &Client,
+        interaction: &Interaction,
+        content: &str,
+        ephemeral: bool,
+    ) -> Result<()> {
+        match self.reply_action(ephemeral)? {
+            ReplyAction::Initial => {
+                send_initial_message(http, interaction, content, ephemeral).await?
+            }
+            ReplyAction::EditDeferred => edit_text_response(http, interaction, content).await?,
+        }
+        *self = Self::Replied;
+        Ok(())
+    }
+
+    pub(crate) async fn followup(
+        &self,
+        http: &Client,
+        interaction: &Interaction,
+        content: &str,
+        ephemeral: bool,
+    ) -> Result<()> {
+        if *self != Self::Replied {
+            return Err("追加メッセージを送る前に reply で初回メッセージを送ってください".into());
+        }
+        send_followup_message(http, interaction, content, ephemeral).await
     }
 }
 
@@ -635,6 +657,27 @@ pub(crate) async fn send_initial_message(
     let response = initial_response(InitialResponse::Message(content), ephemeral);
     http.interaction(interaction.application_id)
         .create_response(interaction.id, &interaction.token, &response)
+        .await?;
+    Ok(())
+}
+
+async fn send_deferred_message(
+    http: &Client,
+    interaction: &Interaction,
+    ephemeral: bool,
+) -> Result<()> {
+    let response = initial_response(InitialResponse::Deferred, ephemeral);
+    http.interaction(interaction.application_id)
+        .create_response(interaction.id, &interaction.token, &response)
+        .await?;
+    Ok(())
+}
+
+async fn edit_text_response(http: &Client, interaction: &Interaction, content: &str) -> Result<()> {
+    http.interaction(interaction.application_id)
+        .update_response(&interaction.token)
+        .content(Some(content))
+        .allowed_mentions(Some(&AllowedMentions::default()))
         .await?;
     Ok(())
 }

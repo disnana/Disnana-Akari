@@ -13,7 +13,10 @@ use twilight_model::{
     },
     channel::{
         Message,
-        message::{AllowedMentions, MessageFlags, component::ComponentType},
+        message::{
+            AllowedMentions, MessageFlags, MessageReferenceType, MessageType,
+            component::ComponentType,
+        },
     },
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
@@ -25,8 +28,8 @@ use twilight_model::{
 use crate::{
     Result, Timing,
     slash::{
-        edit_ui_response, edit_v2_response, send_followup_message, send_initial_message,
-        v2_update_response,
+        ResponseState, edit_ui_response, edit_v2_response, send_followup_message,
+        send_initial_message, v2_update_response,
     },
     ui::{ComponentsV2, Modal, UiMessage},
 };
@@ -34,6 +37,7 @@ use crate::{
 const BUTTON_FAILED: &str = "ボタンを処理できませんでした。";
 const SELECT_FAILED: &str = "選択内容を処理できませんでした。";
 const MODAL_FAILED: &str = "入力内容を処理できませんでした。";
+const MODAL_ACCEPTED: &str = "入力を受け付けました。";
 
 #[derive(Default)]
 pub(crate) struct Buttons {
@@ -110,17 +114,37 @@ impl Buttons {
                     interaction,
                     data,
                     timing,
-                    replied: false,
+                    response: ResponseState::Pending,
                 };
-                if let Err(error) = handler.call(&mut ctx).await {
+                let result = handler.call(&mut ctx).await;
+                if let Err(error) = &result {
                     eprintln!("モーダルの処理に失敗しました ({error})");
                 }
-                if !ctx.replied && ctx.reply_ephemeral(MODAL_FAILED).await.is_err() {
-                    eprintln!("モーダルのエラー応答に失敗しました");
+                if let Some((content, ephemeral)) = modal_fallback(ctx.response, result.is_ok())
+                    && ctx
+                        .response
+                        .reply(http, interaction, content, ephemeral)
+                        .await
+                        .is_err()
+                {
+                    eprintln!("モーダルの自動応答に失敗しました");
                 }
             }
             None => {}
         }
+    }
+}
+
+fn modal_fallback(state: ResponseState, succeeded: bool) -> Option<(&'static str, bool)> {
+    let content = if succeeded {
+        MODAL_ACCEPTED
+    } else {
+        MODAL_FAILED
+    };
+    match state {
+        ResponseState::Pending => Some((content, true)),
+        ResponseState::Deferred { .. } => Some((content, false)),
+        ResponseState::Replied | ResponseState::ModalOpened => None,
     }
 }
 
@@ -225,12 +249,11 @@ impl<'a> ButtonContext<'a> {
         self.interaction.author_id()
     }
 
-    /// 元メッセージを作るきっかけになった Interaction のユーザー ID を返します。
-    /// 通常のメッセージや Interaction の情報が付いていない場合は `None` です。
+    /// 元メッセージを作るきっかけになったユーザーの ID を返します。
+    /// Interaction の情報、または Bot が返信した実際の人間のメッセージが必要です。
     /// ボタンを押したユーザーは [`Self::author_id`] で取得できます。
     pub fn invoker_id(&self) -> Option<Id<UserMarker>> {
-        let metadata = self.message()?.interaction_metadata.as_deref()?;
-        message_invoker(metadata)
+        message_owner(self.message()?)
     }
 
     /// ボタンが押されたサーバーの ID を返します。DM では `None` です。
@@ -398,6 +421,25 @@ fn message_invoker(metadata: &InteractionMetadata) -> Option<Id<UserMarker>> {
     }
 }
 
+fn message_owner(message: &Message) -> Option<Id<UserMarker>> {
+    if let Some(metadata) = &message.interaction_metadata {
+        return message_invoker(metadata);
+    }
+
+    if message.kind != MessageType::Reply || !message.author.bot || message.webhook_id.is_some() {
+        return None;
+    }
+    let reference = message.reference.as_ref()?;
+    let target = message.referenced_message.as_deref()?;
+    (reference.kind == MessageReferenceType::Default
+        && reference.message_id == Some(target.id)
+        && reference.channel_id == Some(target.channel_id)
+        && message.channel_id == target.channel_id
+        && !target.author.bot
+        && target.webhook_id.is_none())
+    .then_some(target.author.id)
+}
+
 /// 文字列セレクトを一回選んだときにハンドラーへ渡す情報です。
 pub struct SelectContext<'a> {
     inner: ButtonContext<'a>,
@@ -420,7 +462,8 @@ impl<'a> SelectContext<'a> {
         self.inner.author_id()
     }
 
-    /// 元メッセージを作るきっかけになった Interaction のユーザー ID を返します。
+    /// 元メッセージを作るきっかけになったユーザーの ID を返します。
+    /// 判定方法は [`ButtonContext::invoker_id`] と同じです。
     pub fn invoker_id(&self) -> Option<Id<UserMarker>> {
         self.inner.invoker_id()
     }
@@ -492,7 +535,7 @@ pub struct ModalContext<'a> {
     interaction: &'a Interaction,
     data: &'a ModalInteractionData,
     timing: Timing,
-    replied: bool,
+    response: ResponseState,
 }
 
 impl<'a> ModalContext<'a> {
@@ -529,17 +572,62 @@ impl<'a> ModalContext<'a> {
         self.http
     }
 
-    /// モーダルを送信した本人にだけ表示する初回応答を送ります。
+    /// チャンネルに初回応答を送るか、遅延応答を元の公開範囲のまま完成させます。
     ///
     /// # エラー
     /// 応答済み、または Discord が受け付けなかった場合に失敗します。
+    pub async fn reply(&mut self, content: &str) -> Result<()> {
+        self.response
+            .reply(self.http, self.interaction, content, false)
+            .await
+    }
+
+    /// モーダルを送信した本人にだけ応答するか、非公開の遅延応答を完成させます。
+    ///
+    /// # エラー
+    /// 応答済み、公開の遅延応答済み、または Discord が受け付けなかった場合に失敗します。
     pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
-        if self.replied {
-            return Err("このモーダル送信にはすでに初回応答を送りました".into());
-        }
-        send_initial_message(self.http, self.interaction, content, true).await?;
-        self.replied = true;
-        Ok(())
+        self.response
+            .reply(self.http, self.interaction, content, true)
+            .await
+    }
+
+    /// チャンネルに処理中の表示を出します。作業が終わったら [`Self::reply`] で完成させます。
+    ///
+    /// # エラー
+    /// 初回応答済み、または Discord が受け付けなかった場合に失敗します。
+    pub async fn defer(&mut self) -> Result<()> {
+        self.response
+            .defer(self.http, self.interaction, false)
+            .await
+    }
+
+    /// 送信した本人にだけ処理中の表示を出します。
+    ///
+    /// # エラー
+    /// 初回応答済み、または Discord が受け付けなかった場合に失敗します。
+    pub async fn defer_ephemeral(&mut self) -> Result<()> {
+        self.response.defer(self.http, self.interaction, true).await
+    }
+
+    /// 初回メッセージを完成させた後、チャンネルに追加メッセージを送ります。
+    ///
+    /// # エラー
+    /// 初回メッセージが未完成、または Discord が受け付けなかった場合に失敗します。
+    pub async fn followup(&self, content: &str) -> Result<()> {
+        self.response
+            .followup(self.http, self.interaction, content, false)
+            .await
+    }
+
+    /// 初回メッセージを完成させた後、送信した本人にだけ追加メッセージを送ります。
+    ///
+    /// # エラー
+    /// 初回メッセージが未完成、または Discord が受け付けなかった場合に失敗します。
+    pub async fn followup_ephemeral(&self, content: &str) -> Result<()> {
+        self.response
+            .followup(self.http, self.interaction, content, true)
+            .await
     }
 }
 
@@ -635,9 +723,10 @@ handler_for!(ModalHandler, ModalContext);
 mod tests {
     use super::{
         ButtonContext, ButtonResponse, Buttons, ComponentType, Id, Interaction, InteractionData,
-        InteractionMetadata, InteractionResponseType, InteractionType,
-        MessageComponentInteractionData, ModalContext, ModalInteractionComponent,
-        ModalInteractionData, Result, SelectContext, UiMessage, UpdateAction, message_invoker,
+        InteractionMetadata, InteractionResponseType, InteractionType, MODAL_ACCEPTED,
+        MODAL_FAILED, Message, MessageComponentInteractionData, MessageReferenceType, MessageType,
+        ModalContext, ModalInteractionComponent, ModalInteractionData, ResponseState, Result,
+        SelectContext, UiMessage, UpdateAction, message_invoker, message_owner, modal_fallback,
         submitted_text, update_response,
     };
     use crate::ui::{Button, Embed};
@@ -645,8 +734,10 @@ mod tests {
         application::interaction::modal::{
             ModalInteractionActionRow, ModalInteractionLabel, ModalInteractionTextInput,
         },
+        channel::message::MessageReference,
         oauth::ApplicationIntegrationMap,
         user::User,
+        util::Timestamp,
     };
 
     async fn click(_: &mut ButtonContext<'_>) -> Result<()> {
@@ -783,31 +874,128 @@ mod tests {
             target_message_id: None,
             target_user: None,
             triggering_interaction_metadata: None,
-            user: User {
-                accent_color: None,
-                avatar: None,
-                avatar_decoration: None,
-                avatar_decoration_data: None,
-                banner: None,
-                bot: false,
-                discriminator: 0,
-                email: None,
-                flags: None,
-                global_name: None,
-                id: Id::new(42),
-                locale: None,
-                mfa_enabled: None,
-                name: "Invoker".into(),
-                premium_type: None,
-                primary_guild: None,
-                public_flags: None,
-                system: None,
-                verified: None,
-            },
+            user: user(42, false),
         };
         assert_eq!(message_invoker(&metadata), Some(Id::new(42)));
         metadata.kind = InteractionType::Ping;
         assert_eq!(message_invoker(&metadata), None);
+    }
+
+    #[test]
+    fn modal_fallback_respects_outcome_and_visibility() {
+        assert_eq!(
+            modal_fallback(ResponseState::Pending, true),
+            Some((MODAL_ACCEPTED, true))
+        );
+        assert_eq!(
+            modal_fallback(ResponseState::Pending, false),
+            Some((MODAL_FAILED, true))
+        );
+        for ephemeral in [false, true] {
+            let deferred = ResponseState::Deferred { ephemeral };
+            assert_eq!(
+                modal_fallback(deferred, true),
+                Some((MODAL_ACCEPTED, false))
+            );
+            assert_eq!(modal_fallback(deferred, false), Some((MODAL_FAILED, false)));
+        }
+        assert_eq!(modal_fallback(ResponseState::Replied, true), None);
+        assert_eq!(modal_fallback(ResponseState::Replied, false), None);
+    }
+
+    #[test]
+    fn invoker_from_reply_requires_a_matching_embedded_human_message() {
+        let command = message(50, user(42, false));
+        let mut response = message(60, user(99, true));
+        response.kind = MessageType::Reply;
+        response.reference = Some(MessageReference {
+            kind: MessageReferenceType::Default,
+            channel_id: Some(command.channel_id),
+            guild_id: command.guild_id,
+            message_id: Some(command.id),
+            fail_if_not_exists: None,
+        });
+        assert_eq!(message_owner(&response), None);
+
+        response.referenced_message = Some(Box::new(command));
+        assert_eq!(message_owner(&response), Some(Id::new(42)));
+
+        let reference = response.reference.as_mut().unwrap();
+        reference.kind = MessageReferenceType::Forward;
+        assert_eq!(message_owner(&response), None);
+
+        let reference = response.reference.as_mut().unwrap();
+        reference.kind = MessageReferenceType::Default;
+        reference.message_id = Some(Id::new(90));
+        assert_eq!(message_owner(&response), None);
+
+        response.reference.as_mut().unwrap().message_id = Some(Id::new(50));
+        response.referenced_message.as_mut().unwrap().author.bot = true;
+        assert_eq!(message_owner(&response), None);
+    }
+
+    fn user(id: u64, bot: bool) -> User {
+        User {
+            accent_color: None,
+            avatar: None,
+            avatar_decoration: None,
+            avatar_decoration_data: None,
+            banner: None,
+            bot,
+            discriminator: 0,
+            email: None,
+            flags: None,
+            global_name: None,
+            id: Id::new(id),
+            locale: None,
+            mfa_enabled: None,
+            name: "fixture".into(),
+            premium_type: None,
+            primary_guild: None,
+            public_flags: None,
+            system: None,
+            verified: None,
+        }
+    }
+
+    #[allow(deprecated)]
+    fn message(id: u64, author: User) -> Message {
+        Message {
+            activity: None,
+            application: None,
+            application_id: None,
+            attachments: vec![],
+            author,
+            call: None,
+            channel_id: Id::new(3),
+            components: vec![],
+            content: String::new(),
+            edited_timestamp: None,
+            embeds: vec![],
+            flags: None,
+            guild_id: Some(Id::new(4)),
+            id: Id::new(id),
+            interaction: None,
+            interaction_metadata: None,
+            kind: MessageType::Regular,
+            member: None,
+            mention_channels: vec![],
+            mention_everyone: false,
+            mention_roles: vec![],
+            mentions: vec![],
+            message_snapshots: vec![],
+            pinned: false,
+            poll: None,
+            reactions: vec![],
+            reference: None,
+            referenced_message: None,
+            role_subscription_data: None,
+            sticker_items: vec![],
+            timestamp: Timestamp::from_micros(1_580_608_922_020_000).unwrap(),
+            thread: None,
+            tts: false,
+            webhook_id: None,
+        }
     }
 
     #[test]
