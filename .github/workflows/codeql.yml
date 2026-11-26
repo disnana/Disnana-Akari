@@ -27,8 +27,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Rust、ワークフロー自体 (actions)、サイトの設定（TypeScript）を解析する。いずれもビルド不要。
-        language: [rust, actions, javascript-typescript]
+        # Rust と、ワークフロー自体 (actions) を解析する。どちらもビルド不要。
+        # サイトの TypeScript は設定ファイルだけで、隠しディレクトリ (.vitepress) にあるため、CodeQL の対象外にする。
+        language: [rust, actions]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
