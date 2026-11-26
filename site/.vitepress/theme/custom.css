@@ -1,0 +1,38 @@
+/* 標準テーマに、色と日本語フォントだけを足す。 */
+:root {
+  --vp-font-family-base: 'Inter', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Yu Gothic UI', 'Meiryo', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --vp-c-brand-1: #b45309;
+  --vp-c-brand-2: #c2630a;
+  --vp-c-brand-3: #d97706;
+  --vp-c-brand-soft: rgba(217, 119, 6, 0.12);
+  --vp-home-hero-name-color: var(--vp-c-brand-1);
+  --vp-home-hero-name-background: none;
+}
+
+.dark {
+  --vp-c-brand-1: #fbbf24;
+  --vp-c-brand-2: #f59e0b;
+  --vp-c-brand-3: #d97706;
+  --vp-c-brand-soft: rgba(251, 191, 36, 0.16);
+}
+
+/* 本文は日本語が読みやすい行間にする。 */
+.vp-doc p,
+.vp-doc li {
+  line-height: 1.85;
+}
+
+.vp-doc table {
+  display: table;
+}
+
+/* 日本語を単語の途中で折り返さない（対応ブラウザーのみ）。 */
+.VPHero .text,
+.VPHero .tagline,
+.VPFeature .title,
+.VPFeature .details,
+.vp-doc p,
+.vp-doc li {
+  word-break: auto-phrase;
+  overflow-wrap: anywhere;
+}
