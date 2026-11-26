@@ -17,10 +17,13 @@ use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt
 use twilight_http::Client;
 use twilight_model::{
     application::interaction::{Interaction, InteractionType},
-    channel::{Message, message::AllowedMentions},
+    channel::{
+        Message,
+        message::{AllowedMentions, MessageFlags},
+    },
 };
 
-pub use buttons::ButtonContext;
+pub use buttons::{ButtonContext, ModalContext, SelectContext};
 pub use commands::{CommandContext, Commands};
 pub use cooldown::Cooldown;
 pub use events::{Events, Ready};
@@ -253,7 +256,10 @@ impl Bot {
             INTERACTION_WORKERS,
             |pending| async {
                 let (interaction, timing) = Pending::begin(pending);
-                if interaction.kind == InteractionType::MessageComponent {
+                if matches!(
+                    interaction.kind,
+                    InteractionType::MessageComponent | InteractionType::ModalSubmit
+                ) {
                     events.buttons.dispatch(&http, &interaction, timing).await;
                 } else if let Some(commands) = slash {
                     commands.dispatch(&http, &interaction, timing).await;
@@ -426,6 +432,22 @@ impl<'a> Context<'a> {
             request = request.components(&message.components);
         }
         request.await?;
+        Ok(())
+    }
+
+    /// Components V2 のメッセージを元の投稿への返信として送ります。
+    ///
+    /// # エラー
+    /// 無効なコンポーネント、または Discord が送信を受け付けない場合に失敗します。
+    pub async fn reply_v2(&self, message: &ui::ComponentsV2) -> Result<()> {
+        message.validate()?;
+        self.http
+            .create_message(self.message.channel_id)
+            .reply(self.message.id)
+            .allowed_mentions(Some(&AllowedMentions::default()))
+            .flags(MessageFlags::IS_COMPONENTS_V2)
+            .components(&message.components)
+            .await?;
         Ok(())
     }
 }

@@ -9,7 +9,8 @@ use twilight_model::{
 };
 
 use crate::{
-    CommandContext, Commands, Cooldown, Result, SlashCommands, SlashContext, Timing, ui::UiMessage,
+    CommandContext, Commands, Cooldown, Result, SlashCommands, SlashContext, Timing,
+    ui::{ComponentsV2, UiMessage},
 };
 
 /// 同じ関数をテキストコマンドと、指定した場合はスラッシュコマンドに登録します。
@@ -209,6 +210,17 @@ impl<'a> HybridContext<'a> {
         match &mut self.inner {
             SourceContext::Text { ctx, .. } => ctx.reply_ui(message).await,
             SourceContext::Slash(ctx) => ctx.reply_ui(message).await,
+        }
+    }
+
+    /// テキストとスラッシュの両方で Components V2 を使って返信します。
+    ///
+    /// # エラー
+    /// 無効なコンポーネント、スラッシュ応答済み、または Discord が受け付けない場合に失敗します。
+    pub async fn reply_v2(&mut self, message: &ComponentsV2) -> Result<()> {
+        match &mut self.inner {
+            SourceContext::Text { ctx, .. } => ctx.reply_v2(message).await,
+            SourceContext::Slash(ctx) => ctx.reply_v2(message).await,
         }
     }
 }

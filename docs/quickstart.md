@@ -41,6 +41,8 @@ cargo run --locked --manifest-path playground/Cargo.toml --target-dir target
 | 同じ Bot の `/ui` を実行して、表示された **Ping** ボタンを押す | 埋め込みとボタンがチャンネルに表示され、`Pong!` は押した人にだけ表示されます。 |
 | `/ui` の **更新** ボタンを押す | ボタンが付いているメッセージの表示が変わります。 |
 | `/ui` の **遅延更新** ボタンを押す | 約 4 秒後に元のメッセージが更新され、完了の通知は押した人にだけ表示されます。 |
+| 同じ Bot の `/components` を実行し、選択メニューで **概要** または **詳細** を選ぶ | Components V2 の文章、区切り線、選択メニューとボタンが表示されます。選択への返信は操作した人にだけ表示されます。 |
+| `/components` の **フォームを開く** を押し、**メモ** を入力して送信する | フォームが開き、送信すると「入力を受け取りました。」が本人にだけ表示されます。 |
 
 遅延はミリ秒（ms）で表示されます。接続直後など、Gateway からハートビートの応答をまだ受け取っていない場合は、Gateway RTT が「未計測」と表示されます。[測定値の定義](api.md#timing)
 
@@ -73,7 +75,7 @@ cargo run --locked --example ping
 
 `playground/` は `.gitignore` に登録済みです。Akari を `path = ".."` で参照する独立した Cargo プロジェクトなので、Akari 本体の変更もそのまま試せます。
 
-作成済みなら、`playground/src/commands.rs` でコマンド、`playground/src/events.rs` でイベント、`playground/src/ui.rs` で `/ui` の表示やボタン操作を編集して **Akari Playground** を実行します。自作のコードがある場合は、`examples/ping/` と `playground/src/` の差分を見ながら新しいサンプルを取り込めます。
+作成済みなら、`playground/src/commands.rs` でコマンド、`playground/src/events.rs` でイベントを編集して **Akari Playground** を実行します。`/ui` は `playground/src/ui.rs`、`/components` は `playground/src/components.rs` にあります。自作のコードがある場合は、`examples/ping/` と `playground/src/` の差分を見ながら新しいサンプルを取り込めます。
 
 新しくクローンした環境では、ルートで次のコマンドを実行してフォルダを作ります。既存の `playground/` がある場合はこの手順を飛ばしてください。
 

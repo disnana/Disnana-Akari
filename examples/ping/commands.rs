@@ -6,7 +6,7 @@ use disnana_akari::{
     SlashContext, Timing, register_hybrid,
 };
 
-use crate::ui;
+use crate::{components, ui};
 
 // pub は、この関数を別モジュール（今回は main.rs）から呼べるようにします。
 pub fn register(guild_id: Option<Id<GuildMarker>>) -> Result<(Commands, Option<SlashCommands>)> {
@@ -24,6 +24,12 @@ pub fn register(guild_id: Option<Id<GuildMarker>>) -> Result<(Commands, Option<S
         // 3 番目の引数は Discord に表示する入力欄の一覧です。vec![] は空の一覧です。
         slash.register("ping", "Bot の応答を確認する", vec![], slash_ping)?;
         slash.register("ui", "Embed とボタンを表示する", vec![], ui::show)?;
+        slash.register(
+            "components",
+            "Components V2 と入力フォームを試す",
+            vec![],
+            components::show,
+        )?;
     }
 
     // 第 1 の文字列引数を「text」と定義します。!echo では残りの本文がそこに入ります。

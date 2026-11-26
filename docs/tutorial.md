@@ -9,6 +9,7 @@
 | `commands.rs` | `!ping` と `/ping` を個別の関数に結び付けます。`echo` と `latency` は、それぞれテキストとスラッシュで関数を共有します。 |
 | `events.rs` | Gateway が準備できたときや、メッセージを受け取ったときの処理を定義します。 |
 | `ui.rs` | `/ui` の埋め込み、ボタン、クリック時の処理を定義します。 |
+| `components.rs` | `/components` の Components V2、選択メニューと入力フォームを定義します。 |
 
 ## `!ping` の実行を追う
 
@@ -118,6 +119,16 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 ### ボタンが付いているメッセージを更新する
 
 Playground の **更新** ボタンは `update_message` で、クリックされたボタンの元メッセージを更新します。**遅延更新** ボタンは、先に `defer_update` で応答してから 4 秒待ち、元の表示を更新して、`followup_ephemeral` で押した人にだけ完了を知らせます。表示の作成は共通の関数にまとめているので、どちらの更新でもボタンが残ります。[Playground の UI 実装](../examples/ping/ui.rs)
+
+## Components V2 と入力フォームを使う
+
+`/components` は `ComponentsV2::new().text(...)` で文章を載せ、`separator()` で区切り線を入れます。`StringSelect::new(...)` では、メニュー自身の識別子と選択肢を渡します。選択肢のラベルは画面に表示され、値は選択されたときに `ctx.values()` で取得できます。
+
+1. `events.on_select(SELECT_ID, choose)?` で、メニューの識別子と選択時の関数を結び付けます。
+2. **フォームを開く** ボタンが押されたら、`show_modal(&form).await` をクリックへの最初の応答として送ります。
+3. フォームが送信されると、フォーム自身の識別子に対して `events.on_modal(MODAL_ID, submit)?` で登録した関数が呼ばれます。入力欄の識別子を `ctx.text_input(NOTE_ID)` に渡すと、入力を参照できます。
+
+フォーム送信はボタンのクリックとは別の操作です。サンプルの送信ハンドラーは `reply_ephemeral` で受け取りだけを本人に知らせます。[Playground の Components V2 実装](../examples/ping/components.rs) · [イベントの登録](../examples/ping/events.rs)
 
 ## 自分のライブラリを組み込む
 

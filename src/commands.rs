@@ -1,6 +1,9 @@
 use std::{collections::HashMap, future::Future, pin::Pin};
 
-use crate::{Context, Result, Timing, ui::UiMessage};
+use crate::{
+    Context, Result, Timing,
+    ui::{ComponentsV2, UiMessage},
+};
 
 /// 共通のプレフィックスを使うテキストコマンドの登録先です。
 pub struct Commands {
@@ -128,6 +131,12 @@ impl<'a> CommandContext<'a> {
     /// 詳細は [`Context::reply_ui`] を参照してください。
     pub async fn reply_ui(&self, message: &UiMessage) -> Result<()> {
         self.ctx.reply_ui(message).await
+    }
+
+    /// 元のコマンドに Components V2 で返信します。
+    /// 詳細は [`Context::reply_v2`] を参照してください。
+    pub async fn reply_v2(&self, message: &ComponentsV2) -> Result<()> {
+        self.ctx.reply_v2(message).await
     }
 }
 

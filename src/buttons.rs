@@ -6,10 +6,14 @@ use std::{
 
 use twilight_http::Client;
 use twilight_model::{
-    application::interaction::{Interaction, InteractionData, InteractionType},
+    application::interaction::{
+        Interaction, InteractionData, InteractionMetadata, InteractionType,
+        message_component::MessageComponentInteractionData,
+        modal::{ModalInteractionComponent, ModalInteractionData},
+    },
     channel::{
         Message,
-        message::{AllowedMentions, component::ComponentType},
+        message::{AllowedMentions, MessageFlags, component::ComponentType},
     },
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
@@ -20,15 +24,22 @@ use twilight_model::{
 
 use crate::{
     Result, Timing,
-    slash::{edit_ui_response, send_followup_message, send_initial_message},
-    ui::UiMessage,
+    slash::{
+        edit_ui_response, edit_v2_response, send_followup_message, send_initial_message,
+        v2_update_response,
+    },
+    ui::{ComponentsV2, Modal, UiMessage},
 };
 
 const BUTTON_FAILED: &str = "ボタンを処理できませんでした。";
+const SELECT_FAILED: &str = "選択内容を処理できませんでした。";
+const MODAL_FAILED: &str = "入力内容を処理できませんでした。";
 
 #[derive(Default)]
 pub(crate) struct Buttons {
     handlers: HashMap<String, Box<dyn ButtonHandler>>,
+    selects: HashMap<String, Box<dyn SelectHandler>>,
+    modals: HashMap<String, Box<dyn ModalHandler>>,
 }
 
 impl Buttons {
@@ -37,64 +48,141 @@ impl Buttons {
         custom_id: &str,
         handler: impl AsyncFn(&mut ButtonContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        if !(1..=100).contains(&custom_id.chars().count()) {
-            return Err("ボタン ID は 1 文字以上 100 文字以下で指定してください".into());
-        }
-        match self.handlers.entry(custom_id.into()) {
-            Entry::Vacant(entry) => {
-                entry.insert(Box::new(handler));
-                Ok(())
-            }
-            Entry::Occupied(_) => Err(format!("ボタン ID `{custom_id}` は登録済みです").into()),
-        }
+        register_handler(&mut self.handlers, "ボタン", custom_id, Box::new(handler))
+    }
+
+    pub(crate) fn register_select(
+        &mut self,
+        custom_id: &str,
+        handler: impl AsyncFn(&mut SelectContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        register_handler(&mut self.selects, "セレクト", custom_id, Box::new(handler))
+    }
+
+    pub(crate) fn register_modal(
+        &mut self,
+        custom_id: &str,
+        handler: impl AsyncFn(&mut ModalContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        register_handler(&mut self.modals, "モーダル", custom_id, Box::new(handler))
     }
 
     pub(crate) fn has_handlers(&self) -> bool {
-        !self.handlers.is_empty()
+        !(self.handlers.is_empty() && self.selects.is_empty() && self.modals.is_empty())
     }
 
     pub(crate) fn accepts(&self, interaction: &Interaction) -> bool {
-        button_id(interaction).is_some_and(|custom_id| self.handlers.contains_key(custom_id))
+        match ui_input(interaction) {
+            Some(UiInput::Button(id)) => self.handlers.contains_key(id),
+            Some(UiInput::Select(data)) => self.selects.contains_key(&data.custom_id),
+            Some(UiInput::Modal(data)) => self.modals.contains_key(&data.custom_id),
+            None => false,
+        }
     }
 
     pub(crate) async fn dispatch(&self, http: &Client, interaction: &Interaction, timing: Timing) {
-        let Some(custom_id) = button_id(interaction) else {
-            return;
-        };
-        let Some(handler) = self.handlers.get(custom_id) else {
-            return;
-        };
-        let mut ctx = ButtonContext {
-            http,
-            interaction,
-            custom_id,
-            timing,
-            response: ButtonResponse::Pending,
-        };
-        if let Err(error) = handler.call(&mut ctx).await {
-            eprintln!("ボタンの処理に失敗しました ({error})");
-            let fallback = match ctx.response {
-                ButtonResponse::Pending => ctx.reply_ephemeral(BUTTON_FAILED).await,
-                ButtonResponse::DeferredUpdate => ctx.followup_ephemeral(BUTTON_FAILED).await,
-                ButtonResponse::Sent => Ok(()),
-            };
-            if fallback.is_err() {
-                eprintln!("ボタンのエラー応答に失敗しました");
+        match ui_input(interaction) {
+            Some(UiInput::Button(id)) => {
+                let Some(handler) = self.handlers.get(id) else {
+                    return;
+                };
+                let mut ctx = ButtonContext::new(http, interaction, id, timing);
+                let result = handler.call(&mut ctx).await;
+                finish_component(&mut ctx, result, "ボタン", BUTTON_FAILED).await;
             }
-        } else if ctx.response == ButtonResponse::Pending && ctx.acknowledge().await.is_err() {
-            eprintln!("ボタンの確認応答に失敗しました");
+            Some(UiInput::Select(data)) => {
+                let Some(handler) = self.selects.get(&data.custom_id) else {
+                    return;
+                };
+                let mut ctx = SelectContext {
+                    inner: ButtonContext::new(http, interaction, &data.custom_id, timing),
+                    values: &data.values,
+                };
+                let result = handler.call(&mut ctx).await;
+                finish_component(&mut ctx.inner, result, "セレクト", SELECT_FAILED).await;
+            }
+            Some(UiInput::Modal(data)) => {
+                let Some(handler) = self.modals.get(&data.custom_id) else {
+                    return;
+                };
+                let mut ctx = ModalContext {
+                    http,
+                    interaction,
+                    data,
+                    timing,
+                    replied: false,
+                };
+                if let Err(error) = handler.call(&mut ctx).await {
+                    eprintln!("モーダルの処理に失敗しました ({error})");
+                }
+                if !ctx.replied && ctx.reply_ephemeral(MODAL_FAILED).await.is_err() {
+                    eprintln!("モーダルのエラー応答に失敗しました");
+                }
+            }
+            None => {}
         }
     }
 }
 
-fn button_id(interaction: &Interaction) -> Option<&str> {
-    if interaction.kind != InteractionType::MessageComponent {
-        return None;
+fn register_handler<T: ?Sized>(
+    handlers: &mut HashMap<String, Box<T>>,
+    label: &str,
+    custom_id: &str,
+    handler: Box<T>,
+) -> Result<()> {
+    if !(1..=100).contains(&custom_id.chars().count()) {
+        return Err(format!("{label} ID は 1 文字以上 100 文字以下で指定してください").into());
     }
-    let Some(InteractionData::MessageComponent(data)) = &interaction.data else {
-        return None;
-    };
-    (data.component_type == ComponentType::Button).then_some(data.custom_id.as_str())
+    match handlers.entry(custom_id.into()) {
+        Entry::Vacant(entry) => {
+            entry.insert(handler);
+            Ok(())
+        }
+        Entry::Occupied(_) => Err(format!("{label} ID `{custom_id}` は登録済みです").into()),
+    }
+}
+
+async fn finish_component(
+    ctx: &mut ButtonContext<'_>,
+    result: Result<()>,
+    label: &str,
+    failure: &str,
+) {
+    if let Err(error) = result {
+        eprintln!("{label}の処理に失敗しました ({error})");
+        let fallback = match ctx.response {
+            ButtonResponse::Pending => ctx.reply_ephemeral(failure).await,
+            ButtonResponse::DeferredUpdate => ctx.followup_ephemeral(failure).await,
+            ButtonResponse::Sent => Ok(()),
+        };
+        if fallback.is_err() {
+            eprintln!("{label}のエラー応答に失敗しました");
+        }
+    } else if ctx.response == ButtonResponse::Pending && ctx.acknowledge().await.is_err() {
+        eprintln!("{label}の確認応答に失敗しました");
+    }
+}
+
+enum UiInput<'a> {
+    Button(&'a str),
+    Select(&'a MessageComponentInteractionData),
+    Modal(&'a ModalInteractionData),
+}
+
+fn ui_input(interaction: &Interaction) -> Option<UiInput<'_>> {
+    match (interaction.kind, interaction.data.as_ref()) {
+        (InteractionType::MessageComponent, Some(InteractionData::MessageComponent(data))) => {
+            match data.component_type {
+                ComponentType::Button => Some(UiInput::Button(&data.custom_id)),
+                ComponentType::TextSelectMenu => Some(UiInput::Select(data)),
+                _ => None,
+            }
+        }
+        (InteractionType::ModalSubmit, Some(InteractionData::ModalSubmit(data))) => {
+            Some(UiInput::Modal(data))
+        }
+        _ => None,
+    }
 }
 
 /// ボタンが一回押されたときにハンドラーへ渡す情報です。
@@ -107,6 +195,21 @@ pub struct ButtonContext<'a> {
 }
 
 impl<'a> ButtonContext<'a> {
+    fn new(
+        http: &'a Client,
+        interaction: &'a Interaction,
+        custom_id: &'a str,
+        timing: Timing,
+    ) -> Self {
+        Self {
+            http,
+            interaction,
+            custom_id,
+            timing,
+            response: ButtonResponse::Pending,
+        }
+    }
+
     /// Akari が使用している Twilight の REST クライアントを借ります。
     pub fn http(&self) -> &'a Client {
         self.http
@@ -120,6 +223,14 @@ impl<'a> ButtonContext<'a> {
     /// ボタンを押したユーザーの ID を返します。
     pub fn author_id(&self) -> Option<Id<UserMarker>> {
         self.interaction.author_id()
+    }
+
+    /// 元メッセージを作るきっかけになった Interaction のユーザー ID を返します。
+    /// 通常のメッセージや Interaction の情報が付いていない場合は `None` です。
+    /// ボタンを押したユーザーは [`Self::author_id`] で取得できます。
+    pub fn invoker_id(&self) -> Option<Id<UserMarker>> {
+        let metadata = self.message()?.interaction_metadata.as_deref()?;
+        message_invoker(metadata)
     }
 
     /// ボタンが押されたサーバーの ID を返します。DM では `None` です。
@@ -177,13 +288,16 @@ impl<'a> ButtonContext<'a> {
         Ok(())
     }
 
-    /// ボタンが付いたメッセージの本文、Embed、ボタンを置き換えます。
-    /// 省略した本文や Embed、ボタンは取り除かれます。`defer_update` 後にも一度呼べます。
+    /// ボタンが付いたメッセージの本文、Embed、コンポーネントを置き換えます。
+    /// 省略した本文や Embed、コンポーネントは取り除かれます。`defer_update` 後にも一度呼べます。
     ///
     /// # エラー
     /// 更新できない応答状態、無効なメッセージ、または Discord が受け付けない場合に失敗します。
     pub async fn update_message(&mut self, message: &UiMessage) -> Result<()> {
         let action = self.response.update_action()?;
+        if self.uses_components_v2() {
+            return Err("Components V2 のメッセージには update_v2 を使ってください".into());
+        }
         message.validate()?;
         match action {
             UpdateAction::Initial => {
@@ -200,6 +314,55 @@ impl<'a> ButtonContext<'a> {
         }
         self.response = ButtonResponse::Sent;
         Ok(())
+    }
+
+    /// 元の Components V2 メッセージのコンポーネントを置き換えます。
+    /// `defer_update` 後にも一度呼べます。
+    ///
+    /// # エラー
+    /// 更新できない応答状態、元メッセージが Components V2 以外、無効なコンポーネント、または通信の失敗でエラーになります。
+    pub async fn update_v2(&mut self, message: &ComponentsV2) -> Result<()> {
+        let action = self.response.update_action()?;
+        if !self.uses_components_v2() {
+            return Err("Components V2 で作られた元メッセージが必要です".into());
+        }
+        message.validate()?;
+        match action {
+            UpdateAction::Initial => {
+                self.http
+                    .interaction(self.interaction.application_id)
+                    .create_response(
+                        self.interaction.id,
+                        &self.interaction.token,
+                        &v2_update_response(message),
+                    )
+                    .await?;
+            }
+            UpdateAction::Edit => edit_v2_response(self.http, self.interaction, message).await?,
+        }
+        self.response = ButtonResponse::Sent;
+        Ok(())
+    }
+
+    /// 初回応答としてモーダルを開きます。
+    ///
+    /// # エラー
+    /// 初回応答済み、無効なモーダル、または Discord が受け付けなかった場合に失敗します。
+    pub async fn show_modal(&mut self, modal: &Modal) -> Result<()> {
+        self.response.require_pending()?;
+        let response = modal.response()?;
+        self.http
+            .interaction(self.interaction.application_id)
+            .create_response(self.interaction.id, &self.interaction.token, &response)
+            .await?;
+        self.response = ButtonResponse::Sent;
+        Ok(())
+    }
+
+    fn uses_components_v2(&self) -> bool {
+        self.message()
+            .and_then(|message| message.flags)
+            .is_some_and(|flags| flags.contains(MessageFlags::IS_COMPONENTS_V2))
     }
 
     /// 操作を受け付けた後、全員に見える追加メッセージを送ります。
@@ -226,6 +389,177 @@ impl<'a> ButtonContext<'a> {
     }
 }
 
+fn message_invoker(metadata: &InteractionMetadata) -> Option<Id<UserMarker>> {
+    match metadata.kind {
+        InteractionType::ApplicationCommand
+        | InteractionType::MessageComponent
+        | InteractionType::ModalSubmit => Some(metadata.user.id),
+        _ => None,
+    }
+}
+
+/// 文字列セレクトを一回選んだときにハンドラーへ渡す情報です。
+pub struct SelectContext<'a> {
+    inner: ButtonContext<'a>,
+    values: &'a [String],
+}
+
+impl<'a> SelectContext<'a> {
+    /// セレクトメニューの ID を返します。
+    pub fn custom_id(&self) -> &'a str {
+        self.inner.custom_id()
+    }
+
+    /// ユーザーが選択した値を借ります。何も選ばれていなければ空です。
+    pub fn values(&self) -> &'a [String] {
+        self.values
+    }
+
+    /// セレクトを操作したユーザーの ID を返します。
+    pub fn author_id(&self) -> Option<Id<UserMarker>> {
+        self.inner.author_id()
+    }
+
+    /// 元メッセージを作るきっかけになった Interaction のユーザー ID を返します。
+    pub fn invoker_id(&self) -> Option<Id<UserMarker>> {
+        self.inner.invoker_id()
+    }
+
+    /// セレクトが操作されたサーバーの ID を返します。DM では `None` です。
+    pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
+        self.inner.guild_id()
+    }
+
+    /// セレクトが付いた Discord メッセージを借ります。
+    pub fn message(&self) -> Option<&'a Message> {
+        self.inner.message()
+    }
+
+    /// Gateway の往復時間と、セレクト操作を処理するまでの時間を返します。
+    pub fn timing(&self) -> Timing {
+        self.inner.timing()
+    }
+
+    /// Akari が使用している Twilight の REST クライアントを借ります。
+    pub fn http(&self) -> &'a Client {
+        self.inner.http()
+    }
+
+    /// セレクトを操作した本人にだけ表示する初回応答を送ります。
+    ///
+    /// # エラー
+    /// 応答済み、または Discord が受け付けなかった場合に失敗します。
+    pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
+        self.inner.reply_ephemeral(content).await
+    }
+
+    /// セレクトが付いたメッセージの本文、Embed、コンポーネントを置き換えます。
+    ///
+    /// # エラー
+    /// 更新できない応答状態、無効なメッセージ、または Discord が受け付けなかった場合に失敗します。
+    pub async fn update_message(&mut self, message: &UiMessage) -> Result<()> {
+        self.inner.update_message(message).await
+    }
+
+    /// 元の Components V2 メッセージのコンポーネントを置き換えます。
+    ///
+    /// # エラー
+    /// 更新できない応答状態、元メッセージが Components V2 以外、無効なコンポーネント、または通信の失敗でエラーになります。
+    pub async fn update_v2(&mut self, message: &ComponentsV2) -> Result<()> {
+        self.inner.update_v2(message).await
+    }
+
+    /// セレクト操作を先に受け付け、元のメッセージを後から変更できるようにします。
+    ///
+    /// # エラー
+    /// 初回応答済み、または Discord が受け付けなかった場合に失敗します。
+    pub async fn defer_update(&mut self) -> Result<()> {
+        self.inner.defer_update().await
+    }
+
+    /// 初回応答としてモーダルを開きます。
+    ///
+    /// # エラー
+    /// 初回応答済み、無効なモーダル、または Discord が受け付けなかった場合に失敗します。
+    pub async fn show_modal(&mut self, modal: &Modal) -> Result<()> {
+        self.inner.show_modal(modal).await
+    }
+}
+
+/// モーダルを一回送信したときにハンドラーへ渡す情報です。
+pub struct ModalContext<'a> {
+    http: &'a Client,
+    interaction: &'a Interaction,
+    data: &'a ModalInteractionData,
+    timing: Timing,
+    replied: bool,
+}
+
+impl<'a> ModalContext<'a> {
+    /// モーダルの ID を返します。
+    pub fn custom_id(&self) -> &'a str {
+        &self.data.custom_id
+    }
+
+    /// 指定した入力欄に送信されたテキストを借ります。該当の入力欄がない場合は `None` です。
+    pub fn text_input(&self, custom_id: &str) -> Option<&'a str> {
+        self.data
+            .components
+            .iter()
+            .find_map(|input| submitted_text(input, custom_id))
+    }
+
+    /// モーダルを送信したユーザーの ID を返します。
+    pub fn author_id(&self) -> Option<Id<UserMarker>> {
+        self.interaction.author_id()
+    }
+
+    /// モーダルが送信されたサーバーの ID を返します。DM では `None` です。
+    pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
+        self.interaction.guild_id
+    }
+
+    /// Gateway の往復時間と、モーダル送信を処理するまでの時間を返します。
+    pub fn timing(&self) -> Timing {
+        self.timing
+    }
+
+    /// Akari が使用している Twilight の REST クライアントを借ります。
+    pub fn http(&self) -> &'a Client {
+        self.http
+    }
+
+    /// モーダルを送信した本人にだけ表示する初回応答を送ります。
+    ///
+    /// # エラー
+    /// 応答済み、または Discord が受け付けなかった場合に失敗します。
+    pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
+        if self.replied {
+            return Err("このモーダル送信にはすでに初回応答を送りました".into());
+        }
+        send_initial_message(self.http, self.interaction, content, true).await?;
+        self.replied = true;
+        Ok(())
+    }
+}
+
+fn submitted_text<'a>(
+    component: &'a ModalInteractionComponent,
+    custom_id: &str,
+) -> Option<&'a str> {
+    match component {
+        ModalInteractionComponent::ActionRow(row) => row
+            .components
+            .iter()
+            .find_map(|child| submitted_text(child, custom_id)),
+        ModalInteractionComponent::Label(label) => submitted_text(&label.component, custom_id),
+        ModalInteractionComponent::TextInput(input) if input.custom_id == custom_id => {
+            Some(&input.value)
+        }
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ButtonResponse {
     Pending,
@@ -238,7 +572,7 @@ impl ButtonResponse {
         if self == Self::Pending {
             Ok(())
         } else {
-            Err("このボタン操作にはすでに初回応答を送りました".into())
+            Err("この操作にはすでに初回応答を送りました".into())
         }
     }
 
@@ -246,7 +580,7 @@ impl ButtonResponse {
         match self {
             Self::Pending => Ok(UpdateAction::Initial),
             Self::DeferredUpdate => Ok(UpdateAction::Edit),
-            Self::Sent => Err("このボタン操作では元のメッセージを更新できません".into()),
+            Self::Sent => Err("この操作では元のメッセージを更新できません".into()),
         }
     }
 }
@@ -270,35 +604,210 @@ fn update_response(message: &UiMessage) -> InteractionResponse {
     }
 }
 
-trait ButtonHandler: Send + Sync {
-    fn call<'a, 'ctx>(
-        &'a self,
-        ctx: &'a mut ButtonContext<'ctx>,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
+macro_rules! handler_for {
+    ($handler:ident, $context:ident) => {
+        trait $handler: Send + Sync {
+            fn call<'a, 'ctx>(
+                &'a self,
+                ctx: &'a mut $context<'ctx>,
+            ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
+        }
+
+        impl<F> $handler for F
+        where
+            F: AsyncFn(&mut $context<'_>) -> Result<()> + Send + Sync,
+        {
+            fn call<'a, 'ctx>(
+                &'a self,
+                ctx: &'a mut $context<'ctx>,
+            ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+                Box::pin(self(ctx))
+            }
+        }
+    };
 }
 
-impl<F> ButtonHandler for F
-where
-    F: AsyncFn(&mut ButtonContext<'_>) -> Result<()> + Send + Sync,
-{
-    fn call<'a, 'ctx>(
-        &'a self,
-        ctx: &'a mut ButtonContext<'ctx>,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        Box::pin(self(ctx))
-    }
-}
+handler_for!(ButtonHandler, ButtonContext);
+handler_for!(SelectHandler, SelectContext);
+handler_for!(ModalHandler, ModalContext);
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ButtonContext, ButtonResponse, Buttons, InteractionResponseType, Result, UiMessage,
-        UpdateAction, update_response,
+        ButtonContext, ButtonResponse, Buttons, ComponentType, Id, Interaction, InteractionData,
+        InteractionMetadata, InteractionResponseType, InteractionType,
+        MessageComponentInteractionData, ModalContext, ModalInteractionComponent,
+        ModalInteractionData, Result, SelectContext, UiMessage, UpdateAction, message_invoker,
+        submitted_text, update_response,
     };
     use crate::ui::{Button, Embed};
+    use twilight_model::{
+        application::interaction::modal::{
+            ModalInteractionActionRow, ModalInteractionLabel, ModalInteractionTextInput,
+        },
+        oauth::ApplicationIntegrationMap,
+        user::User,
+    };
 
     async fn click(_: &mut ButtonContext<'_>) -> Result<()> {
         Ok(())
+    }
+
+    async fn select(_: &mut SelectContext<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn submit(_: &mut ModalContext<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    #[allow(deprecated)]
+    fn interaction(kind: InteractionType, data: InteractionData) -> Interaction {
+        Interaction {
+            app_permissions: None,
+            application_id: Id::new(10),
+            attachment_size_limit: 0,
+            authorizing_integration_owners: ApplicationIntegrationMap {
+                guild: None,
+                user: None,
+            },
+            channel: None,
+            channel_id: None,
+            context: None,
+            data: Some(data),
+            entitlements: vec![],
+            guild: None,
+            guild_id: None,
+            guild_locale: None,
+            id: Id::new(1),
+            kind,
+            locale: None,
+            member: None,
+            message: None,
+            token: String::new(),
+            user: None,
+        }
+    }
+
+    fn component_payload(component_type: ComponentType, id: &str) -> InteractionData {
+        InteractionData::MessageComponent(Box::new(MessageComponentInteractionData {
+            component_type,
+            custom_id: id.into(),
+            resolved: None,
+            values: vec![],
+        }))
+    }
+
+    #[test]
+    fn routes_only_matching_kinds_and_exact_ids() -> Result<()> {
+        let mut handlers = Buttons::default();
+        handlers.register_select("shared", select)?;
+        handlers.register_modal("shared", submit)?;
+        assert!(handlers.has_handlers());
+        assert!(handlers.register_select("shared", select).is_err());
+        assert!(handlers.register_modal("shared", submit).is_err());
+        assert!(handlers.register_select("", select).is_err());
+        assert!(handlers.register_modal(&"a".repeat(101), submit).is_err());
+        let menu = interaction(
+            InteractionType::MessageComponent,
+            component_payload(ComponentType::TextSelectMenu, "shared"),
+        );
+        assert!(handlers.accepts(&menu));
+        let menu = interaction(
+            InteractionType::MessageComponent,
+            component_payload(ComponentType::TextSelectMenu, "Shared"),
+        );
+        assert!(!handlers.accepts(&menu));
+        let menu = interaction(
+            InteractionType::MessageComponent,
+            component_payload(ComponentType::UserSelectMenu, "shared"),
+        );
+        assert!(!handlers.accepts(&menu));
+        let button = interaction(
+            InteractionType::MessageComponent,
+            component_payload(ComponentType::Button, "shared"),
+        );
+        assert!(!handlers.accepts(&button));
+        handlers.register("shared", click)?;
+        assert!(handlers.accepts(&button));
+        let modal = interaction(
+            InteractionType::ModalSubmit,
+            InteractionData::ModalSubmit(Box::new(ModalInteractionData {
+                components: vec![],
+                custom_id: "shared".into(),
+                resolved: None,
+            })),
+        );
+        assert!(handlers.accepts(&modal));
+        let malformed = interaction(
+            InteractionType::ModalSubmit,
+            component_payload(ComponentType::TextSelectMenu, "shared"),
+        );
+        assert!(!handlers.accepts(&malformed));
+        Ok(())
+    }
+
+    #[test]
+    fn finds_text_inputs_in_label_and_legacy_row() {
+        let field = |value: &str| {
+            ModalInteractionComponent::TextInput(ModalInteractionTextInput {
+                custom_id: "description".into(),
+                id: 1,
+                value: value.into(),
+            })
+        };
+        let label = ModalInteractionComponent::Label(ModalInteractionLabel {
+            component: Box::new(field("new")),
+            id: 2,
+        });
+        let legacy = ModalInteractionComponent::ActionRow(ModalInteractionActionRow {
+            components: vec![field("legacy")],
+            id: 2,
+        });
+        assert_eq!(submitted_text(&label, "description"), Some("new"));
+        assert_eq!(submitted_text(&legacy, "description"), Some("legacy"));
+        assert_eq!(submitted_text(&label, "Description"), None);
+    }
+
+    #[test]
+    fn invoker_comes_from_supported_message_metadata() {
+        let mut metadata = InteractionMetadata {
+            authorizing_integration_owners: ApplicationIntegrationMap {
+                guild: None,
+                user: None,
+            },
+            id: Id::new(1),
+            interacted_message_id: None,
+            kind: InteractionType::ApplicationCommand,
+            original_response_message_id: None,
+            target_message_id: None,
+            target_user: None,
+            triggering_interaction_metadata: None,
+            user: User {
+                accent_color: None,
+                avatar: None,
+                avatar_decoration: None,
+                avatar_decoration_data: None,
+                banner: None,
+                bot: false,
+                discriminator: 0,
+                email: None,
+                flags: None,
+                global_name: None,
+                id: Id::new(42),
+                locale: None,
+                mfa_enabled: None,
+                name: "Invoker".into(),
+                premium_type: None,
+                primary_guild: None,
+                public_flags: None,
+                system: None,
+                verified: None,
+            },
+        };
+        assert_eq!(message_invoker(&metadata), Some(Id::new(42)));
+        metadata.kind = InteractionType::Ping;
+        assert_eq!(message_invoker(&metadata), None);
     }
 
     #[test]

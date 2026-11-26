@@ -27,10 +27,10 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | 処理 | 同時実行枠 | 受信キュー | 混雑時 |
 | --- | --- | --- | --- |
 | `Bot::run_commands` のテキストコマンド | 8 件 | 64 件 | メンション通知を抑止した返信を試みます。 |
-| スラッシュコマンドと登録済みのボタン操作 | 合計 8 件 | 合計 64 件 | 本人にだけ見える返信を試みます。 |
+| スラッシュコマンドと登録済みのボタン、選択メニュー、フォーム送信 | 合計 8 件 | 合計 64 件 | 本人にだけ見える返信を試みます。 |
 | `on_ready`、`on_message` と `Bot::run` の自前ハンドラー | 1 件 | 64 件 | 新しく届いたイベントを破棄し、標準エラー出力に記録します。 |
 
-テキストコマンド用のキューには、登録名に一致したメッセージだけが入ります。`on_ready` と `on_message` は受信順に処理し、一件のイベントに対する関数は登録順に呼びます。ボタン操作はスラッシュコマンドと同じ枠で並行して処理します。`Bot::run` の自前ハンドラーは、そのメッセージに対する `Events::on_message` より先に実行します。`Bot::run_commands` のコマンドと `on_message` は独立して進むため、どちらが先に完了するかは処理時間によって変わります。
+テキストコマンド用のキューには、登録名に一致したメッセージだけが入ります。`on_ready` と `on_message` は受信順に処理し、一件のイベントに対する関数は登録順に呼びます。フォーム送信を含むコンポーネント操作は、スラッシュコマンドと同じ枠で並行して処理します。`Bot::run` の自前ハンドラーは、そのメッセージに対する `Events::on_message` より先に実行します。`Bot::run_commands` のコマンドと `on_message` は独立して進むため、どちらが先に完了するかは処理時間によって変わります。
 
 混雑時の返信には、テキストとスラッシュ・ボタンで別々の処理枠を使います。それぞれ同時に 8 件、キューは 64 件までです。混雑返信用のキューが満杯の場合や返信に失敗した場合は、標準エラー出力に記録します。Gateway のイベントストリームが終わると、処理中と保留中のイベントも中止します。
 
@@ -48,6 +48,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.timing() -> Timing` | このテキストコマンド呼び出しの測定値を取得します。 |
 | `ctx.reply(content).await -> Result<()>` | コマンドのメッセージに返信し、返信先の投稿者や本文中のメンションへの通知を抑止します。 |
 | `ctx.reply_ui(&message).await -> Result<()>` | `UiMessage` を元のメッセージに返信します。 |
+| `ctx.reply_v2(&message).await -> Result<()>` | `ComponentsV2` を元のメッセージに返信します。 |
 
 名前は大文字と小文字を区別します。最初の空白までがコマンド名です。`! ping` のようにプレフィックスの直後が空白の投稿、未登録の名前、通常の投稿は無視されます。
 
@@ -71,6 +72,9 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.reply(content).await -> Result<()>` | チャンネルに初回応答を送ります。`defer` または `defer_ephemeral` の後は、公開範囲を維持して処理中の表示を本文に置き換えます。 |
 | `ctx.reply_ui(&message).await -> Result<()>` | `UiMessage` を初回応答として返します。遅延応答の後は、公開範囲を維持して元の応答を編集します。 |
 | `ctx.reply_ui_ephemeral(&message).await -> Result<()>` | `UiMessage` を本人にだけ見える初回応答として返します。`defer_ephemeral` の後は、処理中の表示を置き換えます。 |
+| `ctx.reply_v2(&message).await -> Result<()>` | `ComponentsV2` を初回応答として返します。遅延応答の後は、公開範囲を維持して元の応答を編集します。 |
+| `ctx.reply_v2_ephemeral(&message).await -> Result<()>` | `ComponentsV2` を本人にだけ見える初回応答として返します。`defer_ephemeral` の後は、処理中の表示を置き換えます。 |
+| `ctx.show_modal(&form).await -> Result<()>` | コマンドの初回応答として入力フォームを開きます。 |
 | `ctx.reply_ephemeral(content).await -> Result<()>` | 呼び出したユーザーだけに初回応答を送ります。`defer_ephemeral` の後は、その処理中の表示を本文に置き換えます。 |
 | `ctx.followup(content).await -> Result<()>` | 最初の本文を送った後に、チャンネルに追加のメッセージを送ります。 |
 | `ctx.followup_ephemeral(content).await -> Result<()>` | 最初の本文を送った後に、呼び出したユーザーだけに追加のメッセージを送ります。 |
@@ -105,6 +109,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.timing() -> Timing` | 呼び出し元に応じた測定値を取得します。 |
 | `ctx.reply(content).await -> Result<()>` | テキストなら元の投稿に返信し、スラッシュなら公開の初回応答を送ります。 |
 | `ctx.reply_ui(&message).await -> Result<()>` | `UiMessage` をテキストコマンドまたはスラッシュコマンドへの返信に使います。 |
+| `ctx.reply_v2(&message).await -> Result<()>` | `ComponentsV2` をテキストコマンドまたはスラッシュコマンドへの返信に使います。 |
 
 テキスト側の `text_arg` は、コマンド名の後ろ全体を最初のトップレベルの文字列引数に割り当てます。たとえば `count`（整数）と `text`（文字列）を定義した場合、`!cmd 3 hello` の `text_arg("text")` は `3 hello` 全体を返します。`/cmd count:3 text:hello` では `option("count")` が整数の `3` を返し、`text_arg("text")` は `hello` を返します。テキスト側で整数などの型付き引数が必要な場合は、ハンドラーで `args()` を分割・変換します。
 
@@ -134,6 +139,8 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `events.on_ready(handler)` | Gateway が新規セッションを確立したときに受け取る `&Ready` を渡します。 |
 | `events.on_message(handler)` | 人が送った新着メッセージの `&Message` を渡します。通常の投稿とテキストコマンドの両方を受け取ります。 |
 | `events.on_button(custom_id, handler) -> Result<()>` | 指定した識別子に完全一致するボタンが押されたときに `&mut ButtonContext<'_>` を渡します。識別子は 1～100 文字で、Bot の登録一覧全体で、同じ識別子に関数を一つ登録できます。 |
+| `events.on_select(custom_id, handler) -> Result<()>` | 指定した識別子の文字列選択メニューが操作されたときに `&mut SelectContext<'_>` を渡します。 |
+| `events.on_modal(custom_id, handler) -> Result<()>` | 指定した識別子のフォームが送信されたときに `&mut ModalContext<'_>` を渡します。 |
 
 `on_ready` と `on_message` には複数の関数を登録できます。各関数が返したエラーは標準エラー出力に記録され、次のハンドラーへ進みます。コマンドとイベントの順序は [ハンドラーの実行順](#ハンドラーの実行順) を参照してください。
 
@@ -146,6 +153,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `UiMessage::new().content(text)` | メッセージ本文を指定します。 |
 | `message.embed(embed)` | 埋め込みを一つ追加します。 |
 | `message.buttons(vec![button])` | ボタンを一行追加します。一行は最大五つで、メッセージには最大五行を追加できます。 |
+| `message.select(select)` | 文字列選択メニューを一行追加します。 |
 | `Embed::new(title).description(text).color(rgb)` | 埋め込みの見出しと説明、`0x5865F2` のような RGB の色を指定します。 |
 | `embed.field(name, value, inline)` | 項目を一つ追加します。`inline` が `true` の項目は、表示幅に応じて横に並びます。 |
 | `Button::primary(custom_id, label)` | Discord に表示するラベルと、クリック時に使う識別子を指定します。 |
@@ -159,11 +167,14 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | --- | --- |
 | `ctx.custom_id() -> &str` | ボタンの識別子を取得します。 |
 | `ctx.author_id() -> Option<Id<UserMarker>>` | ボタンを押したユーザーの ID を取得します。 |
+| `ctx.invoker_id() -> Option<Id<UserMarker>>` | ボタンが付いたメッセージの操作メタデータに記録されたユーザー ID を取得します。記録がなければ `None` です。 |
 | `ctx.guild_id() -> Option<Id<GuildMarker>>` | ボタンが押されたサーバーの ID を取得します。 |
 | `ctx.message() -> Option<&Message>` | ボタンが付いた元のメッセージを借ります。 |
 | `ctx.timing() -> Timing` | ボタン操作の受信時点と処理開始時点をもとにした測定値を取得します。 |
 | `ctx.reply_ephemeral(content).await -> Result<()>` | ボタンを押した本人にだけ見える初回応答を送ります。 |
 | `ctx.update_message(&message).await -> Result<()>` | ボタンの元メッセージを `UiMessage` で更新します。その場で初回応答として更新するか、`defer_update` 後に更新できます。 |
+| `ctx.update_v2(&message).await -> Result<()>` | Components V2 の元メッセージを `ComponentsV2` で更新します。 |
+| `ctx.show_modal(&form).await -> Result<()>` | このクリックの初回応答として入力フォームを開きます。 |
 | `ctx.defer_update().await -> Result<()>` | 追加メッセージを表示せず、操作を先に受け付けます。処理後に `update_message` を呼べます。 |
 | `ctx.acknowledge().await -> Result<()>` | `defer_update` と同じ確認応答を送ります。 |
 | `ctx.followup(content).await -> Result<()>` | 初回応答の後、チャンネルに追加のメッセージを送ります。 |
@@ -173,15 +184,30 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 
 ハンドラーが初回応答を送らずに成功した場合は、Akari が確認応答を試みます。初回応答の前にエラーを返した場合は、本人にだけ見える初回応答を試みます。`defer_update` 後にハンドラーが失敗した場合は、元のメッセージを保ったまま、本人にだけ追加でエラーを知らせます。[埋め込みとボタンのチュートリアル](tutorial.md)
 
+## `ComponentsV2` と入力フォーム
+
+`disnana_akari::ui::ComponentsV2` は、`text`、`separator`、`buttons`、`select` などでメッセージを組み立てます。`reply_v2` は送信時に Discord の `IS_COMPONENTS_V2` フラグを付けます。Components V2 の文章は `text(...)` で追加し、従来の本文や埋め込みを付ける場合は `UiMessage` を使います。既存の Components V2 メッセージを更新する場合は `update_v2` を使います。この更新は初回応答として送るか、`defer_update` の後に送れます。[Discord の Components V2](https://docs.discord.com/developers/components/overview)
+
+| ビルダー | 動作 |
+| --- | --- |
+| `SelectOption::new(label, value)` | メニューに表示するラベルと、選択時に返す値を設定します。`description` で選択肢の説明を設定できます。 |
+| `StringSelect::new(custom_id, options)` | 選択メニューを作ります。`placeholder` で選択する前の表示を指定できます。 |
+| `Modal::new(custom_id, title)` | 入力フォームを作ります。 |
+| `form.text_input(TextInput::new(custom_id, label))` | フォームに入力欄を追加します。`paragraph` で複数行入力、`required` で必須かどうかを設定できます。 |
+
+`SelectContext` には、メニューの `custom_id()` と選択結果の `values() -> &[String]` が渡ります。`author_id()`、`guild_id()`、`message()`、`invoker_id()` で操作者や元のメッセージを確認でき、ボタンと同じように `reply_ephemeral`、`defer_update`、`update_message`、`update_v2`、`show_modal` を呼べます。
+
+`show_modal` はスラッシュコマンド、ボタン、選択メニューの初回応答として呼びます。フォームを送信すると、フォームの識別子に対応する `on_modal` の関数が呼ばれます。`ModalContext::text_input(custom_id)` は、入力欄の識別子に対応する値を `Option<&str>` で返します。`custom_id()` はフォームの識別子を返し、`author_id()` と `guild_id()` は送信者とサーバーの情報を返します。送信への返事は `reply_ephemeral` で本人に表示できます。[Components V2 のチュートリアル](tutorial.md)
+
 ## `Context<'_>` と `Result<T>`
 
-`Context` は `Bot::run` に渡すメッセージ処理用の型です。`ctx.message()` で元の `&Message` を借りられます。`ctx.reply(content).await` と `ctx.reply_ui(&message).await` は元のメッセージへの返信を送ります。`ctx.timing()` で受信から処理までの測定値を取得できます。
+`Context` は `Bot::run` に渡すメッセージ処理用の型です。`ctx.message()` で元の `&Message` を借りられます。`ctx.reply(content).await`、`ctx.reply_ui(&message).await`、`ctx.reply_v2(&message).await` は元のメッセージへの返信を送ります。`ctx.timing()` で受信から処理までの測定値を取得できます。
 
 `Result<T>` は `std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>` の別名です。関数内で `?` を使うと、失敗時にそのエラーを呼び出し元へ返します。
 
 ## Twilight の型と REST クライアントを使う
 
-`disnana_akari::model` は Twilight のモデル型、`disnana_akari::http` は Twilight の HTTP API です。`Context`、`CommandContext`、`SlashContext`、`HybridContext`、`ButtonContext` の `http()` は、Bot と同じ `&http::Client` を返します。Akari の返信と同じ接続やレート制限の処理を利用できます。
+`disnana_akari::model` は Twilight のモデル型、`disnana_akari::http` は Twilight の HTTP API です。`Context`、`CommandContext`、`SlashContext`、`HybridContext`、`ButtonContext`、`SelectContext`、`ModalContext` の `http()` は、Bot と同じ `&http::Client` を返します。Akari の返信と同じ接続やレート制限の処理を利用できます。
 
 ```rust,no_run
 use disnana_akari::{Context, Result, model::channel::Channel};

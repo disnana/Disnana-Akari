@@ -4,7 +4,7 @@ use twilight_model::channel::Message;
 
 pub use twilight_model::gateway::payload::incoming::Ready;
 
-use crate::{ButtonContext, Result, buttons::Buttons};
+use crate::{ButtonContext, ModalContext, Result, SelectContext, buttons::Buttons};
 
 /// Gateway イベントごとに非同期ハンドラーを登録します。
 #[derive(Default)]
@@ -47,6 +47,30 @@ impl Events {
         handler: impl AsyncFn(&mut ButtonContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
         self.buttons.register(custom_id, handler)
+    }
+
+    /// 指定した ID の文字列 Select Menu が選択されたときに呼ぶ関数を登録します。
+    ///
+    /// # エラー
+    /// ID が無効、または同じ Select Menu ID を登録済みの場合に失敗します。
+    pub fn on_select(
+        &mut self,
+        custom_id: &str,
+        handler: impl AsyncFn(&mut SelectContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.buttons.register_select(custom_id, handler)
+    }
+
+    /// 指定した ID の Modal が送信されたときに呼ぶ関数を登録します。
+    ///
+    /// # エラー
+    /// ID が無効、または同じ Modal ID を登録済みの場合に失敗します。
+    pub fn on_modal(
+        &mut self,
+        custom_id: &str,
+        handler: impl AsyncFn(&mut ModalContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.buttons.register_modal(custom_id, handler)
     }
 
     pub(crate) fn has_message_handlers(&self) -> bool {

@@ -3,6 +3,7 @@ use disnana_akari::Result;
 
 // mod は、別ファイルに分けたコードをこのプログラムの一部として読み込みます。
 mod commands;
+mod components;
 mod config;
 mod events;
 mod ui;

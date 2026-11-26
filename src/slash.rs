@@ -22,7 +22,10 @@ use twilight_model::{
 };
 use twilight_validate::command;
 
-use crate::{Result, Timing, ui::UiMessage};
+use crate::{
+    Result, Timing,
+    ui::{ComponentsV2, Modal, UiMessage},
+};
 
 const COMMAND_FAILED: &str = "コマンドを処理できませんでした。";
 
@@ -267,7 +270,7 @@ impl ActiveSlashCommands {
         let fallback = match *ctx.response_state {
             ResponseState::Pending => ctx.reply_ephemeral(COMMAND_FAILED).await,
             ResponseState::Deferred { .. } => ctx.reply(COMMAND_FAILED).await,
-            ResponseState::Replied => Ok(()),
+            ResponseState::Replied | ResponseState::ModalOpened => Ok(()),
         };
         if fallback.is_err() {
             eprintln!("スラッシュコマンドのエラー応答に失敗しました");
@@ -379,6 +382,39 @@ impl<'a> SlashContext<'a> {
         self.respond_ui(message, true).await
     }
 
+    /// Components V2 の初回応答を送るか、`defer` 済みの応答を完成させます。
+    ///
+    /// # エラー
+    /// 無効なコンポーネント、応答済み、または Discord が受け付けない場合に失敗します。
+    pub async fn reply_v2(&mut self, message: &ComponentsV2) -> Result<()> {
+        self.respond_v2(message, false).await
+    }
+
+    /// Components V2 を使い、実行者だけに見える応答を送ります。`defer_ephemeral` 後にも呼べます。
+    ///
+    /// # エラー
+    /// 公開の遅延応答済み、応答済み、無効なコンポーネント、または送信失敗時にエラーになります。
+    pub async fn reply_v2_ephemeral(&mut self, message: &ComponentsV2) -> Result<()> {
+        self.respond_v2(message, true).await
+    }
+
+    /// 初回応答として入力フォームを開きます。送信後の処理は `Events::on_modal` に登録します。
+    ///
+    /// # エラー
+    /// 応答済み、無効なフォーム、または Discord が受け付けない場合に失敗します。
+    pub async fn show_modal(&mut self, modal: &Modal) -> Result<()> {
+        if *self.response_state != ResponseState::Pending {
+            return Err("フォームはスラッシュコマンドの初回応答で開いてください".into());
+        }
+        let response = modal.response()?;
+        self.http
+            .interaction(self.interaction.application_id)
+            .create_response(self.interaction.id, &self.interaction.token, &response)
+            .await?;
+        *self.response_state = ResponseState::ModalOpened;
+        Ok(())
+    }
+
     /// 初回応答としてチャンネルに処理中の表示を出します。作業が終わったら `reply` で完成させます。
     ///
     /// # エラー
@@ -470,6 +506,24 @@ impl<'a> SlashContext<'a> {
         }
         send_followup_message(self.http, self.interaction, content, ephemeral).await
     }
+
+    async fn respond_v2(&mut self, message: &ComponentsV2, ephemeral: bool) -> Result<()> {
+        message.validate()?;
+        match self.response_state.reply_action(ephemeral)? {
+            ReplyAction::Initial => {
+                let response = initial_response(InitialResponse::V2(message), ephemeral);
+                self.http
+                    .interaction(self.interaction.application_id)
+                    .create_response(self.interaction.id, &self.interaction.token, &response)
+                    .await?;
+            }
+            ReplyAction::EditDeferred => {
+                edit_v2_response(self.http, self.interaction, message).await?
+            }
+        }
+        *self.response_state = ResponseState::Replied;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -477,6 +531,7 @@ enum ResponseState {
     Pending,
     Deferred { ephemeral: bool },
     Replied,
+    ModalOpened,
 }
 
 impl ResponseState {
@@ -487,7 +542,9 @@ impl ResponseState {
                 Err("遅延応答の公開範囲は変更できません".into())
             }
             Self::Deferred { .. } => Ok(ReplyAction::EditDeferred),
-            Self::Replied => Err("このスラッシュコマンドにはすでに応答しました".into()),
+            Self::Replied | Self::ModalOpened => {
+                Err("このスラッシュコマンドにはすでに応答しました".into())
+            }
         }
     }
 }
@@ -501,6 +558,7 @@ enum ReplyAction {
 enum InitialResponse<'a> {
     Message(&'a str),
     Ui(&'a UiMessage),
+    V2(&'a ComponentsV2),
     Deferred,
 }
 
@@ -527,6 +585,17 @@ fn initial_response(response: InitialResponse<'_>, ephemeral: bool) -> Interacti
                 ..Default::default()
             }),
         },
+        InitialResponse::V2(message) => InteractionResponse {
+            kind: InteractionResponseType::ChannelMessageWithSource,
+            data: Some(InteractionResponseData {
+                components: Some(message.components.clone()),
+                allowed_mentions: Some(AllowedMentions::default()),
+                flags: Some(
+                    flags.unwrap_or(MessageFlags::empty()) | MessageFlags::IS_COMPONENTS_V2,
+                ),
+                ..Default::default()
+            }),
+        },
         InitialResponse::Deferred => InteractionResponse {
             kind: InteractionResponseType::DeferredChannelMessageWithSource,
             data: flags.map(|flags| InteractionResponseData {
@@ -535,6 +604,26 @@ fn initial_response(response: InitialResponse<'_>, ephemeral: bool) -> Interacti
             }),
         },
     }
+}
+
+pub(crate) fn v2_update_response(message: &ComponentsV2) -> InteractionResponse {
+    let mut response = initial_response(InitialResponse::V2(message), false);
+    response.kind = InteractionResponseType::UpdateMessage;
+    response
+}
+
+pub(crate) async fn edit_v2_response(
+    http: &Client,
+    interaction: &Interaction,
+    message: &ComponentsV2,
+) -> Result<()> {
+    http.interaction(interaction.application_id)
+        .update_response(&interaction.token)
+        .flags(MessageFlags::IS_COMPONENTS_V2)
+        .components(Some(&message.components))
+        .allowed_mentions(Some(&AllowedMentions::default()))
+        .await?;
+    Ok(())
 }
 
 pub(crate) async fn send_initial_message(
@@ -608,12 +697,39 @@ mod tests {
     use super::{
         AllowedMentions, CommandOptionType, CommandType, Id, InitialResponse,
         InteractionResponseType, MessageFlags, ReplyAction, ResponseState, Result, SlashCommands,
-        SlashContext, initial_response,
+        SlashContext, initial_response, v2_update_response,
     };
-    use crate::ui::{Button, Embed, UiMessage};
+    use crate::ui::{Button, ComponentsV2, Embed, UiMessage};
 
     async fn handler(_: &mut SlashContext<'_>) -> Result<()> {
         Ok(())
+    }
+
+    #[test]
+    fn v2_responses_use_components_and_preserve_visibility_rules() {
+        let message = ComponentsV2::new().text("V2 パネル");
+        let private = initial_response(InitialResponse::V2(&message), true);
+        assert_eq!(
+            private.kind,
+            InteractionResponseType::ChannelMessageWithSource
+        );
+        let data = private.data.unwrap();
+        assert_eq!(
+            data.flags,
+            Some(MessageFlags::IS_COMPONENTS_V2 | MessageFlags::EPHEMERAL)
+        );
+        assert!(data.content.is_none());
+        assert!(data.embeds.is_none());
+        assert_eq!(data.components.unwrap(), message.components);
+        assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
+
+        let update = v2_update_response(&message);
+        assert_eq!(update.kind, InteractionResponseType::UpdateMessage);
+        assert_eq!(
+            update.data.unwrap().flags,
+            Some(MessageFlags::IS_COMPONENTS_V2)
+        );
+        assert!(ResponseState::ModalOpened.reply_action(false).is_err());
     }
 
     #[test]
