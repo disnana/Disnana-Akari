@@ -179,6 +179,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.custom_id() -> &str` | ボタンの識別子を取得します。 |
 | `ctx.author_id() -> Option<Id<UserMarker>>` | ボタンを押したユーザーの ID を取得します。 |
 | `ctx.invoker_id() -> Option<Id<UserMarker>>` | 元のメッセージの操作メタデータに記録された実行者 ID を取得します。記録がなく、Bot の返信が参照したユーザー投稿を照合できる場合は、その投稿者 ID を返します。どちらも確認できない場合は `None` です。 |
+| `ctx.resolve_invoker_id().await -> Result<Option<Id<UserMarker>>>` | 返信先の投稿が操作データに含まれていない場合、同じチャンネルの返信先を Discord REST API から取得して照合します。 |
 | `ctx.guild_id() -> Option<Id<GuildMarker>>` | ボタンが押されたサーバーの ID を取得します。 |
 | `ctx.message() -> Option<&Message>` | ボタンが付いた元のメッセージを借ります。 |
 | `ctx.timing() -> Timing` | ボタン操作の受信時点と処理開始時点をもとにした測定値を取得します。 |
@@ -194,6 +195,8 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 `update_message` は本文、埋め込み、ボタンの行をまとめて置き換えます。次の表示にも残したい埋め込みやボタンは、新しい `UiMessage` に含めます。更新は一回のクリックにつき一度です。時間のかかる処理では、先に `defer_update` を呼んで 3 秒以内に初回応答を送り、処理の完了後に `update_message` で表示を変更します。
 
 発行者本人に操作を限定する場合は、`invoker_id()` と現在の `author_id()` をハンドラーで照合します。両方の ID が取得できた場合に比較し、操作の対象や必要な権限も確認します。選択メニューも同じ方法で確認できます。
+
+テキストコマンドへの返信では、Discord が返信先の投稿を操作データから省略する場合があります。`resolve_invoker_id().await` を使う場合は、先に `defer_update().await?` で操作を受け付けておくと、REST の完了を待ってから結果を返せます。返信先が削除されていれば `Ok(None)` を返し、履歴の閲覧権限不足などで取得が失敗した場合は `Err` を返します。[Discord のメッセージ仕様](https://docs.discord.com/developers/resources/message#message-object)
 
 ハンドラーが初回応答を送らずに成功した場合は、Akari が確認応答を試みます。初回応答の前にエラーを返した場合は、本人にだけ見える初回応答を試みます。`defer_update` 後にハンドラーが失敗した場合は、元のメッセージを保ったまま、本人にだけ追加でエラーを知らせます。[埋め込みとボタンのチュートリアル](tutorial.md)
 

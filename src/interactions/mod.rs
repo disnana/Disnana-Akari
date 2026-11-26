@@ -7,17 +7,13 @@ use std::{
 use twilight_http::Client;
 use twilight_model::{
     application::interaction::{
-        Interaction, InteractionData, InteractionDataResolved, InteractionMetadata,
-        InteractionType,
+        Interaction, InteractionData, InteractionDataResolved, InteractionType,
         message_component::MessageComponentInteractionData,
         modal::{ModalInteractionComponent, ModalInteractionData},
     },
     channel::{
         Message,
-        message::{
-            AllowedMentions, MessageFlags, MessageReferenceType, MessageType,
-            component::ComponentType,
-        },
+        message::{AllowedMentions, MessageFlags, component::ComponentType},
     },
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
@@ -25,6 +21,8 @@ use twilight_model::{
         marker::{ChannelMarker, GenericMarker, GuildMarker, RoleMarker, UserMarker},
     },
 };
+
+mod owner;
 
 use crate::{
     Result, Timing,
@@ -436,7 +434,20 @@ impl<'a> ButtonContext<'a> {
     /// Interaction の情報、または Bot が返信した実際の人間のメッセージが必要です。
     /// ボタンを押したユーザーは [`Self::author_id`] で取得できます。
     pub fn invoker_id(&self) -> Option<Id<UserMarker>> {
-        message_owner(self.message()?)
+        owner::message_owner(self.message()?)
+    }
+
+    /// 元の実行者 ID を確認します。操作データに返信先の投稿がなければ Discord から取得します。
+    /// HTTP の完了を待つ前に [`Self::defer_update`] で操作を受け付けられます。
+    ///
+    /// # エラー
+    /// 閲覧権限不足や通信エラーで返信先の取得に失敗した場合にエラーを返します。
+    /// 返信先が削除されている場合や返信先を照合できない場合は `Ok(None)` です。
+    pub async fn resolve_invoker_id(&self) -> Result<Option<Id<UserMarker>>> {
+        let Some(message) = self.message() else {
+            return Ok(None);
+        };
+        owner::resolve_owner(self.http, message).await
     }
 
     /// ボタンが押されたサーバーの ID を返します。DM では `None` です。
@@ -595,34 +606,6 @@ impl<'a> ButtonContext<'a> {
     }
 }
 
-fn message_invoker(metadata: &InteractionMetadata) -> Option<Id<UserMarker>> {
-    match metadata.kind {
-        InteractionType::ApplicationCommand
-        | InteractionType::MessageComponent
-        | InteractionType::ModalSubmit => Some(metadata.user.id),
-        _ => None,
-    }
-}
-
-fn message_owner(message: &Message) -> Option<Id<UserMarker>> {
-    if let Some(metadata) = &message.interaction_metadata {
-        return message_invoker(metadata);
-    }
-
-    if message.kind != MessageType::Reply || !message.author.bot || message.webhook_id.is_some() {
-        return None;
-    }
-    let reference = message.reference.as_ref()?;
-    let target = message.referenced_message.as_deref()?;
-    (reference.kind == MessageReferenceType::Default
-        && reference.message_id == Some(target.id)
-        && reference.channel_id == Some(target.channel_id)
-        && message.channel_id == target.channel_id
-        && !target.author.bot
-        && target.webhook_id.is_none())
-    .then_some(target.author.id)
-}
-
 /// 文字列セレクトを一回選んだときにハンドラーへ渡す情報です。
 pub struct SelectContext<'a> {
     inner: ButtonContext<'a>,
@@ -649,6 +632,14 @@ impl<'a> SelectContext<'a> {
     /// 判定方法は [`ButtonContext::invoker_id`] と同じです。
     pub fn invoker_id(&self) -> Option<Id<UserMarker>> {
         self.inner.invoker_id()
+    }
+
+    /// 返信先の投稿が省略されていれば取得します。詳細は [`ButtonContext::resolve_invoker_id`] を参照してください。
+    ///
+    /// # エラー
+    /// Discord から返信先の投稿を取得できない場合にエラーを返します。
+    pub async fn resolve_invoker_id(&self) -> Result<Option<Id<UserMarker>>> {
+        self.inner.resolve_invoker_id().await
     }
 
     /// セレクトが操作されたサーバーの ID を返します。DM では `None` です。
@@ -765,6 +756,14 @@ macro_rules! typed_select_methods {
         /// 判定方法は [`ButtonContext::invoker_id`] と同じです。
         pub fn invoker_id(&self) -> Option<Id<UserMarker>> {
             self.inner.invoker_id()
+        }
+
+        /// 返信先の投稿が省略されていれば取得します。詳細は [`ButtonContext::resolve_invoker_id`] を参照してください。
+        ///
+        /// # エラー
+        /// Discord から返信先の投稿を取得できない場合にエラーを返します。
+        pub async fn resolve_invoker_id(&self) -> Result<Option<Id<UserMarker>>> {
+            self.inner.resolve_invoker_id().await
         }
 
         /// セレクトが操作されたサーバーの ID を返します。DM では `None` です。
