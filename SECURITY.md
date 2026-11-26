@@ -23,3 +23,9 @@ Akari は Bot のプロセス内で動き、Twilight を通して Discord のイ
 - リリースは指定された GitHub ワークフローと公開環境から行われ、署名付き来歴証明が配布アーカイブと対応すること。
 
 依存関係が原因と思われる場合も、Akari で影響が出る条件が分かれば記載してください。
+
+## 自動検査
+
+- RustSec は `Cargo.lock` を毎日およびコード変更時に監査します。`cargo-deny` は依存関係のライセンスと取得元を検査し、重複バージョンを警告します。
+- CodeQL は Rust と GitHub Actions を解析します。zizmor はワークフローの権限や使い方を検査し、依存関係レビューは pull request で追加された依存を確認します。
+- Dependabot は Cargo と GitHub Actions の更新を提案します。
