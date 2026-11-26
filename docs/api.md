@@ -143,6 +143,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `events.on_user_select(custom_id, handler) -> Result<()>` | ユーザー選択時に `&mut UserSelectContext<'_>` を渡します。 |
 | `events.on_role_select(custom_id, handler) -> Result<()>` | ロール選択時に `&mut RoleSelectContext<'_>` を渡します。 |
 | `events.on_channel_select(custom_id, handler) -> Result<()>` | チャンネル選択時に `&mut ChannelSelectContext<'_>` を渡します。 |
+| `events.on_mentionable_select(custom_id, handler) -> Result<()>` | ユーザーとロールを候補に持つメニューの選択時に `&mut MentionableSelectContext<'_>` を渡します。 |
 | `events.on_modal(custom_id, handler) -> Result<()>` | 指定した識別子のフォームが送信されたときに `&mut ModalContext<'_>` を渡します。 |
 
 `on_ready` と `on_message` には複数の関数を登録できます。各関数が返したエラーは標準エラー出力に記録され、次のハンドラーへ進みます。コマンドとイベントの順序は [ハンドラーの実行順](#ハンドラーの実行順) を参照してください。
@@ -215,13 +216,18 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 
 候補を Discord が用意するメニューは `UserSelect::new(custom_id)`、`RoleSelect::new(custom_id)`、`ChannelSelect::new(custom_id)` で作ります。`UiMessage` と `ComponentsV2` に `user_select`、`role_select`、`channel_select` でそれぞれ追加できます。各ビルダーは `placeholder`、`min_values`、`max_values`、`disabled` を持ちます。`ChannelSelect::channel_types(Vec<ChannelType>)` でチャンネルの種類を絞れます。
 
+同じメニューからユーザーとロールを選ぶ場合は、`MentionableSelect::new(custom_id)` で作り、`UiMessage` または `ComponentsV2` に `mentionable_select` で追加します。選択した項目は Discord が送った順で `Mentionable::User(Id<UserMarker>)` または `Mentionable::Role(Id<RoleMarker>)` として受け取ります。
+
 | コンテキスト | `values()` の型 |
 | --- | --- |
 | `UserSelectContext<'_>` | `&[Id<UserMarker>]` |
 | `RoleSelectContext<'_>` | `&[Id<RoleMarker>]` |
 | `ChannelSelectContext<'_>` | `&[Id<ChannelMarker>]` |
+| `MentionableSelectContext<'_>` | `&[Mentionable]` |
 
 `values()` で対象ごとに型の付いた ID を取得できます。Discord が選択対象の情報を同梱した場合は、`resolved()` で `&InteractionDataResolved` を取得できます。操作への本人宛ての返信には `reply_ephemeral` を使います。[Playground の選択メニュー実装](../examples/ping/entities.rs)
+
+ユーザーとロールを混ぜたメニューでは、選択された各 ID の種類を Discord の `resolved.users` と `resolved.roles` で判定します。選択があるときに `resolved` が欠けている場合や、ID の種類が一意に決まらない場合は、ハンドラーを呼ばず本人へのエラー応答を試みます。選択数が 0 件なら、`resolved` がなくても空の `values()` を受け取れます。
 
 ### 入力フォームを開く
 

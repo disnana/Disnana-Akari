@@ -22,7 +22,7 @@ use twilight_model::{
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
         Id,
-        marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
+        marker::{ChannelMarker, GenericMarker, GuildMarker, RoleMarker, UserMarker},
     },
 };
 
@@ -47,6 +47,7 @@ pub(crate) struct Buttons {
     user_selects: HashMap<String, Box<dyn EntitySelectHandler<UserMarker>>>,
     role_selects: HashMap<String, Box<dyn EntitySelectHandler<RoleMarker>>>,
     channel_selects: HashMap<String, Box<dyn EntitySelectHandler<ChannelMarker>>>,
+    mentionable_selects: HashMap<String, Box<dyn MentionableSelectHandler>>,
     modals: HashMap<String, Box<dyn ModalHandler>>,
 }
 
@@ -106,6 +107,19 @@ impl Buttons {
         )
     }
 
+    pub(crate) fn register_mentionable_select(
+        &mut self,
+        custom_id: &str,
+        handler: impl AsyncFn(&mut MentionableSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        register_handler(
+            &mut self.mentionable_selects,
+            "メンショナブルセレクト",
+            custom_id,
+            Box::new(handler),
+        )
+    }
+
     pub(crate) fn register_modal(
         &mut self,
         custom_id: &str,
@@ -120,6 +134,7 @@ impl Buttons {
             && self.user_selects.is_empty()
             && self.role_selects.is_empty()
             && self.channel_selects.is_empty()
+            && self.mentionable_selects.is_empty()
             && self.modals.is_empty())
     }
 
@@ -131,6 +146,9 @@ impl Buttons {
             Some(UiInput::RoleSelect(data)) => self.role_selects.contains_key(&data.custom_id),
             Some(UiInput::ChannelSelect(data)) => {
                 self.channel_selects.contains_key(&data.custom_id)
+            }
+            Some(UiInput::MentionableSelect(data)) => {
+                self.mentionable_selects.contains_key(&data.custom_id)
             }
             Some(UiInput::Modal(data)) => self.modals.contains_key(&data.custom_id),
             None => false,
@@ -166,6 +184,30 @@ impl Buttons {
             }
             Some(UiInput::ChannelSelect(data)) => {
                 dispatch_entity(&self.channel_selects, http, interaction, data, timing).await;
+            }
+            Some(UiInput::MentionableSelect(data)) => {
+                let Some(handler) = self.mentionable_selects.get(&data.custom_id) else {
+                    return;
+                };
+                let mut inner = ButtonContext::new(http, interaction, &data.custom_id, timing);
+                let resolved = data.resolved.as_ref();
+                let Ok(values) = parse_mentionables(&data.values, resolved) else {
+                    reject_selection(&mut inner).await;
+                    return;
+                };
+                let mut ctx = MentionableSelectContext {
+                    inner,
+                    values,
+                    resolved,
+                };
+                let result = handler.call(&mut ctx).await;
+                finish_component(
+                    &mut ctx.inner,
+                    result,
+                    "メンショナブルセレクト",
+                    SELECT_FAILED,
+                )
+                .await;
             }
             Some(UiInput::Modal(data)) => {
                 let Some(handler) = self.modals.get(&data.custom_id) else {
@@ -209,9 +251,7 @@ async fn dispatch_entity<M>(
     };
     let mut inner = ButtonContext::new(http, interaction, &data.custom_id, timing);
     let Ok(values) = parse_entity_ids(&data.values) else {
-        if inner.reply_ephemeral(SELECT_FAILED).await.is_err() {
-            eprintln!("セレクトのエラー応答に失敗しました");
-        }
+        reject_selection(&mut inner).await;
         return;
     };
     let mut ctx = EntitySelectContext {
@@ -223,22 +263,51 @@ async fn dispatch_entity<M>(
     finish_component(&mut ctx.inner, result, "セレクト", SELECT_FAILED).await;
 }
 
+async fn reject_selection(ctx: &mut ButtonContext<'_>) {
+    if ctx.reply_ephemeral(SELECT_FAILED).await.is_err() {
+        eprintln!("セレクトのエラー応答に失敗しました");
+    }
+}
+
 fn parse_entity_ids<M>(values: &[String]) -> Result<Vec<Id<M>>> {
+    parse_select_values(values, |id| Ok(id.cast()))
+}
+
+fn parse_select_values<T: Eq>(
+    values: &[String],
+    resolve: impl Fn(Id<GenericMarker>) -> Result<T>,
+) -> Result<Vec<T>> {
     if values.len() > 25 {
         return Err("セレクトの選択数が上限を超えています".into());
     }
-    let mut ids = Vec::with_capacity(values.len());
+    let mut selections = Vec::with_capacity(values.len());
     for value in values {
         if value.starts_with('0') || !value.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err("セレクトの値が Discord ID ではありません".into());
         }
-        let id = value.parse()?;
-        if ids.contains(&id) {
+        let selection = resolve(value.parse()?)?;
+        if selections.contains(&selection) {
             return Err("セレクトの値が重複しています".into());
         }
-        ids.push(id);
+        selections.push(selection);
     }
-    Ok(ids)
+    Ok(selections)
+}
+
+fn parse_mentionables(
+    values: &[String],
+    resolved: Option<&InteractionDataResolved>,
+) -> Result<Vec<Mentionable>> {
+    parse_select_values(values, |id| {
+        let resolved = resolved.ok_or("メンショナブルの解決済みデータがありません")?;
+        let user_id = id.cast();
+        let role_id = id.cast();
+        match (resolved.users.get(&user_id), resolved.roles.get(&role_id)) {
+            (Some(user), None) if user.id == user_id => Ok(Mentionable::User(user_id)),
+            (None, Some(role)) if role.id == role_id => Ok(Mentionable::Role(role_id)),
+            _ => Err("メンショナブルの値をユーザーまたはロールの一方に特定できません".into()),
+        }
+    })
 }
 
 fn modal_fallback(state: ResponseState, succeeded: bool) -> Option<(&'static str, bool)> {
@@ -299,6 +368,7 @@ enum UiInput<'a> {
     UserSelect(&'a MessageComponentInteractionData),
     RoleSelect(&'a MessageComponentInteractionData),
     ChannelSelect(&'a MessageComponentInteractionData),
+    MentionableSelect(&'a MessageComponentInteractionData),
     Modal(&'a ModalInteractionData),
 }
 
@@ -311,6 +381,7 @@ fn ui_input(interaction: &Interaction) -> Option<UiInput<'_>> {
                 ComponentType::UserSelectMenu => Some(UiInput::UserSelect(data)),
                 ComponentType::RoleSelectMenu => Some(UiInput::RoleSelect(data)),
                 ComponentType::ChannelSelectMenu => Some(UiInput::ChannelSelect(data)),
+                ComponentType::MentionableSelectMenu => Some(UiInput::MentionableSelect(data)),
                 _ => None,
             }
         }
@@ -657,92 +728,123 @@ pub type RoleSelectContext<'a> = EntitySelectContext<'a, RoleMarker>;
 /// チャンネルセレクトが選択されたときの情報です。
 pub type ChannelSelectContext<'a> = EntitySelectContext<'a, ChannelMarker>;
 
-impl<'a, M> EntitySelectContext<'a, M> {
-    /// セレクトメニューの ID を返します。
-    pub fn custom_id(&self) -> &'a str {
-        self.inner.custom_id()
-    }
+/// メンショナブルセレクトで選択できるユーザーまたはロールです。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Mentionable {
+    /// 選択されたユーザーの ID です。
+    User(Id<UserMarker>),
+    /// 選択されたロールの ID です。
+    Role(Id<RoleMarker>),
+}
 
+/// メンショナブルセレクトを操作したときにハンドラーへ渡す情報です。
+pub struct MentionableSelectContext<'a> {
+    inner: ButtonContext<'a>,
+    values: Vec<Mentionable>,
+    resolved: Option<&'a InteractionDataResolved>,
+}
+
+macro_rules! typed_select_methods {
+    ($lifetime:lifetime) => {
+        /// セレクトメニューの ID を返します。
+        pub fn custom_id(&self) -> &$lifetime str {
+            self.inner.custom_id()
+        }
+
+        /// Discord が解決済みの情報を送った場合に、その情報を借ります。
+        pub fn resolved(&self) -> Option<&$lifetime InteractionDataResolved> {
+            self.resolved
+        }
+
+        /// セレクトを操作したユーザーの ID を返します。
+        pub fn author_id(&self) -> Option<Id<UserMarker>> {
+            self.inner.author_id()
+        }
+
+        /// 元メッセージを作るきっかけになったユーザーの ID を返します。
+        /// 判定方法は [`ButtonContext::invoker_id`] と同じです。
+        pub fn invoker_id(&self) -> Option<Id<UserMarker>> {
+            self.inner.invoker_id()
+        }
+
+        /// セレクトが操作されたサーバーの ID を返します。DM では `None` です。
+        pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
+            self.inner.guild_id()
+        }
+
+        /// セレクトが付いた Discord メッセージを借ります。
+        pub fn message(&self) -> Option<&$lifetime Message> {
+            self.inner.message()
+        }
+
+        /// Gateway の往復時間と、セレクト操作を処理するまでの時間を返します。
+        pub fn timing(&self) -> Timing {
+            self.inner.timing()
+        }
+
+        /// Akari が使用している Twilight の REST クライアントを借ります。
+        pub fn http(&self) -> &$lifetime Client {
+            self.inner.http()
+        }
+
+        /// セレクトを操作した本人にだけ表示する初回応答を送ります。
+        ///
+        /// # エラー
+        /// 応答済み、または Discord が受け付けなかった場合に失敗します。
+        pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
+            self.inner.reply_ephemeral(content).await
+        }
+
+        /// セレクトが付いたメッセージの本文、Embed、コンポーネントを置き換えます。
+        ///
+        /// # エラー
+        /// 更新できない応答状態、無効なメッセージ、または Discord が受け付けなかった場合に失敗します。
+        pub async fn update_message(&mut self, message: &UiMessage) -> Result<()> {
+            self.inner.update_message(message).await
+        }
+
+        /// 元の Components V2 メッセージのコンポーネントを置き換えます。
+        ///
+        /// # エラー
+        /// 更新できない応答状態、元メッセージが Components V2 以外、無効なコンポーネント、または通信の失敗でエラーになります。
+        pub async fn update_v2(&mut self, message: &ComponentsV2) -> Result<()> {
+            self.inner.update_v2(message).await
+        }
+
+        /// セレクト操作を先に受け付け、元のメッセージを後から変更できるようにします。
+        ///
+        /// # エラー
+        /// 初回応答済み、または Discord が受け付けなかった場合に失敗します。
+        pub async fn defer_update(&mut self) -> Result<()> {
+            self.inner.defer_update().await
+        }
+
+        /// 初回応答としてモーダルを開きます。
+        ///
+        /// # エラー
+        /// 初回応答済み、無効なモーダル、または Discord が受け付けなかった場合に失敗します。
+        pub async fn show_modal(&mut self, modal: &Modal) -> Result<()> {
+            self.inner.show_modal(modal).await
+        }
+    };
+}
+
+impl<'a, M> EntitySelectContext<'a, M> {
     /// 選択された項目の Discord ID を借ります。選択項目がない場合は空です。
     pub fn values(&self) -> &[Id<M>] {
         &self.values
     }
 
-    /// Discord が解決済みの情報を送った場合に、その情報を借ります。
-    pub fn resolved(&self) -> Option<&'a InteractionDataResolved> {
-        self.resolved
+    typed_select_methods!('a);
+}
+
+impl<'a> MentionableSelectContext<'a> {
+    /// 選択されたユーザーとロールを Discord から届いた順序で借ります。
+    pub fn values(&self) -> &[Mentionable] {
+        &self.values
     }
 
-    /// セレクトを操作したユーザーの ID を返します。
-    pub fn author_id(&self) -> Option<Id<UserMarker>> {
-        self.inner.author_id()
-    }
-
-    /// 元メッセージを作るきっかけになったユーザーの ID を返します。
-    /// 判定方法は [`ButtonContext::invoker_id`] と同じです。
-    pub fn invoker_id(&self) -> Option<Id<UserMarker>> {
-        self.inner.invoker_id()
-    }
-
-    /// セレクトが操作されたサーバーの ID を返します。DM では `None` です。
-    pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
-        self.inner.guild_id()
-    }
-
-    /// セレクトが付いた Discord メッセージを借ります。
-    pub fn message(&self) -> Option<&'a Message> {
-        self.inner.message()
-    }
-
-    /// Gateway の往復時間と、セレクト操作を処理するまでの時間を返します。
-    pub fn timing(&self) -> Timing {
-        self.inner.timing()
-    }
-
-    /// Akari が使用している Twilight の REST クライアントを借ります。
-    pub fn http(&self) -> &'a Client {
-        self.inner.http()
-    }
-
-    /// セレクトを操作した本人にだけ表示する初回応答を送ります。
-    ///
-    /// # エラー
-    /// 応答済み、または Discord が受け付けなかった場合に失敗します。
-    pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
-        self.inner.reply_ephemeral(content).await
-    }
-
-    /// セレクトが付いたメッセージの本文、Embed、コンポーネントを置き換えます。
-    ///
-    /// # エラー
-    /// 更新できない応答状態、無効なメッセージ、または Discord が受け付けなかった場合に失敗します。
-    pub async fn update_message(&mut self, message: &UiMessage) -> Result<()> {
-        self.inner.update_message(message).await
-    }
-
-    /// 元の Components V2 メッセージのコンポーネントを置き換えます。
-    ///
-    /// # エラー
-    /// 更新できない応答状態、元メッセージが Components V2 以外、無効なコンポーネント、または通信の失敗でエラーになります。
-    pub async fn update_v2(&mut self, message: &ComponentsV2) -> Result<()> {
-        self.inner.update_v2(message).await
-    }
-
-    /// セレクト操作を先に受け付け、元のメッセージを後から変更できるようにします。
-    ///
-    /// # エラー
-    /// 初回応答済み、または Discord が受け付けなかった場合に失敗します。
-    pub async fn defer_update(&mut self) -> Result<()> {
-        self.inner.defer_update().await
-    }
-
-    /// 初回応答としてモーダルを開きます。
-    ///
-    /// # エラー
-    /// 初回応答済み、無効なモーダル、または Discord が受け付けなかった場合に失敗します。
-    pub async fn show_modal(&mut self, modal: &Modal) -> Result<()> {
-        self.inner.show_modal(modal).await
-    }
+    typed_select_methods!('a);
 }
 
 /// モーダルを一回送信したときにハンドラーへ渡す情報です。
@@ -934,6 +1036,7 @@ macro_rules! handler_for {
 handler_for!(ButtonHandler, ButtonContext);
 handler_for!(SelectHandler, SelectContext);
 handler_for!(ModalHandler, ModalContext);
+handler_for!(MentionableSelectHandler, MentionableSelectContext);
 
 trait EntitySelectHandler<M>: Send + Sync {
     fn call<'a, 'ctx>(
@@ -968,12 +1071,16 @@ mod tests {
         ChannelMarker, ChannelSelectContext, RoleMarker, RoleSelectContext, UserMarker,
         UserSelectContext, parse_entity_ids,
     };
+    use super::{
+        InteractionDataResolved, Mentionable, MentionableSelectContext, parse_mentionables,
+    };
     use crate::ui::{Button, Embed};
     use twilight_model::{
         application::interaction::modal::{
             ModalInteractionActionRow, ModalInteractionLabel, ModalInteractionTextInput,
         },
         channel::message::MessageReference,
+        guild::{Permissions, Role, RoleColors, RoleFlags},
         oauth::ApplicationIntegrationMap,
         user::User,
         util::Timestamp,
@@ -1155,6 +1262,90 @@ mod tests {
         let too_many = (1..=26).map(|id| id.to_string()).collect::<Vec<_>>();
         assert!(parse_entity_ids::<UserMarker>(&too_many).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn mentionable_routes_match_the_kind_and_custom_id() -> Result<()> {
+        async fn selected(ctx: &mut MentionableSelectContext<'_>) -> Result<()> {
+            let _: &[Mentionable] = ctx.values();
+            Ok(())
+        }
+        let mut handlers = Buttons::default();
+        handlers.register_mentionable_select("target", selected)?;
+        assert!(handlers.has_handlers());
+        assert!(
+            handlers
+                .register_mentionable_select("target", selected)
+                .is_err()
+        );
+        assert!(handlers.register_mentionable_select("", selected).is_err());
+        for (kind, id, expected) in [
+            (ComponentType::MentionableSelectMenu, "target", true),
+            (ComponentType::MentionableSelectMenu, "Target", false),
+            (ComponentType::UserSelectMenu, "target", false),
+            (ComponentType::RoleSelectMenu, "target", false),
+        ] {
+            let incoming = interaction(
+                InteractionType::MessageComponent,
+                component_payload(kind, id),
+            );
+            assert_eq!(handlers.accepts(&incoming), expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mentionable_values_preserve_order_and_require_exactly_one_matching_entity() -> Result<()> {
+        let mut resolved = InteractionDataResolved {
+            attachments: Default::default(),
+            channels: Default::default(),
+            members: Default::default(),
+            messages: Default::default(),
+            roles: [(Id::new(5), role(5))].into(),
+            users: [(Id::new(9), user(9, false))].into(),
+        };
+        let valid = ["9".into(), "5".into()];
+        assert_eq!(
+            parse_mentionables(&valid, Some(&resolved))?,
+            [Mentionable::User(Id::new(9)), Mentionable::Role(Id::new(5))]
+        );
+        assert!(parse_mentionables(&[], None)?.is_empty());
+        assert!(parse_mentionables(&valid, None).is_err());
+        for invalid in ["2", "0", "05", "+5", "18446744073709551616", "9"] {
+            assert!(parse_mentionables(&["9".into(), invalid.into()], Some(&resolved)).is_err());
+        }
+        let too_many = (1..=26).map(|value| value.to_string()).collect::<Vec<_>>();
+        assert!(parse_mentionables(&too_many, Some(&resolved)).is_err());
+
+        resolved.roles.insert(Id::new(9), role(9));
+        assert!(parse_mentionables(&valid, Some(&resolved)).is_err());
+        resolved.roles.remove(&Id::new(9));
+        resolved.users.insert(Id::new(9), user(8, false));
+        assert!(parse_mentionables(&valid, Some(&resolved)).is_err());
+        Ok(())
+    }
+
+    #[allow(deprecated)]
+    fn role(id: u64) -> Role {
+        Role {
+            color: 0,
+            colors: RoleColors {
+                primary_color: 0,
+                secondary_color: None,
+                tertiary_color: None,
+            },
+            hoist: false,
+            icon: None,
+            id: Id::new(id),
+            managed: false,
+            mentionable: true,
+            name: "fixture".into(),
+            permissions: Permissions::empty(),
+            position: 0,
+            flags: RoleFlags::empty(),
+            tags: None,
+            unicode_emoji: None,
+        }
     }
 
     #[test]

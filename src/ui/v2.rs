@@ -9,8 +9,8 @@ use twilight_validate::{component::COMPONENT_V2_COUNT, embed::COLOR_MAXIMUM, mes
 use crate::Result;
 
 use super::{
-    Button, ChannelSelect, RoleSelect, StringSelect, UserSelect, button_row, check_button,
-    check_row, select_row,
+    Button, ChannelSelect, MentionableSelect, RoleSelect, StringSelect, UserSelect, button_row,
+    check_button, check_row, select_row,
 };
 
 const TOTAL_TEXT_LENGTH: usize = 4_000;
@@ -67,6 +67,11 @@ impl ComponentsV2 {
 
     /// チャンネル選択メニューを一つの行として追加します。
     pub fn channel_select(self, select: ChannelSelect) -> Self {
+        self.component(select_row(select.0))
+    }
+
+    /// ユーザーとロールの混在する選択メニューを一つの行として追加します。
+    pub fn mentionable_select(self, select: MentionableSelect) -> Self {
         self.component(select_row(select.0))
     }
 

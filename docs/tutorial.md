@@ -143,6 +143,8 @@ Playground の **更新** ボタンは `update_message` で、クリックされ
 
 選択時の `values()` は、ユーザー用、ロール用、チャンネル用に区別された ID の一覧を返します。`first()` で最初の ID を借り、`id.get()` で数値を取り出します。返信の数値はバッククォートで囲み、メンションを作らずに ID を表示します。[Playground の選択メニュー実装](../examples/ping/entities.rs)
 
+同じメニューにユーザーとロールを並べるには、`MentionableSelect::new(id).max_values(2)` のようにメニューを作り、`on_mentionable_select` に関数を登録します。`ctx.values()` の各項目に `match` を使うと、`Mentionable::User(id)` と `Mentionable::Role(id)` を分けて表示できます。`/entities` ではこの方法で、選んだ最大 2 件を一行ずつ本人に返します。[Playground の混合選択メニュー](../examples/ping/entities.rs)
+
 ## 自分のライブラリを組み込む
 
 Playground も Cargo プロジェクトなので、公開クレートはリポジトリのルートから `cargo add --manifest-path playground/Cargo.toml クレート名` で追加できます。`クレート名` を使いたいライブラリの名前に置き換えます。ローカルのライブラリは、その `Cargo.toml` があるディレクトリへの相対パスを `playground/Cargo.toml` の `[dependencies]` に指定できます。

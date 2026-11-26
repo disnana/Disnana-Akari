@@ -5,8 +5,8 @@ use twilight_model::channel::Message;
 pub use twilight_model::gateway::payload::incoming::Ready;
 
 use crate::{
-    ButtonContext, ChannelSelectContext, ModalContext, Result, RoleSelectContext, SelectContext,
-    UserSelectContext, buttons::Buttons,
+    ButtonContext, ChannelSelectContext, MentionableSelectContext, ModalContext, Result,
+    RoleSelectContext, SelectContext, UserSelectContext, buttons::Buttons,
 };
 
 /// Gateway イベントごとに非同期ハンドラーを登録します。
@@ -98,6 +98,18 @@ impl Events {
         handler: impl AsyncFn(&mut ChannelSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
         self.buttons.register_channel_select(custom_id, handler)
+    }
+
+    /// 指定した ID のメニューでユーザーやロールを選んだときに呼ぶ関数を登録します。
+    ///
+    /// # エラー
+    /// ID が無効、または同じ Mentionable Select ID を登録済みの場合に失敗します。
+    pub fn on_mentionable_select(
+        &mut self,
+        custom_id: &str,
+        handler: impl AsyncFn(&mut MentionableSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.buttons.register_mentionable_select(custom_id, handler)
     }
 
     /// 指定した ID の Modal が送信されたときに呼ぶ関数を登録します。

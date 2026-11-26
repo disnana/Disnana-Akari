@@ -255,6 +255,11 @@ macro_rules! entity_select {
 entity_select!(UserSelect, User, "ユーザーの選択メニューです。");
 entity_select!(RoleSelect, Role, "ロールの選択メニューです。");
 entity_select!(ChannelSelect, Channel, "チャンネルの選択メニューです。");
+entity_select!(
+    MentionableSelect,
+    Mentionable,
+    "ユーザーとロールの両方を候補にする選択メニューです。"
+);
 
 impl ChannelSelect {
     /// 選択肢に表示するチャンネルの種類を絞り込みます。
@@ -479,6 +484,12 @@ impl UiMessage {
 
     /// チャンネル選択メニューを一つの行として追加します。
     pub fn channel_select(mut self, select: ChannelSelect) -> Self {
+        self.components.push(select_row(select.0));
+        self
+    }
+
+    /// ユーザーとロールの混在する選択メニューを一つの行として追加します。
+    pub fn mentionable_select(mut self, select: MentionableSelect) -> Self {
         self.components.push(select_row(select.0));
         self
     }
@@ -820,7 +831,8 @@ mod tests {
     #[test]
     fn entity_selects_keep_types_and_settings_in_both_message_formats() {
         use super::{
-            ChannelSelect, ChannelType, ComponentsV2, RoleSelect, SelectMenuType, UserSelect,
+            ChannelSelect, ChannelType, ComponentsV2, MentionableSelect, RoleSelect,
+            SelectMenuType, UserSelect,
         };
 
         let user = UserSelect::new("user")
@@ -829,26 +841,34 @@ mod tests {
             .max_values(2);
         let role = RoleSelect::new("role").disabled(true);
         let channel = ChannelSelect::new("channel").channel_types(vec![ChannelType::GuildText]);
+        let mentionable = MentionableSelect::new("mentionable")
+            .placeholder("ユーザーやロールを選択")
+            .min_values(1)
+            .max_values(3)
+            .disabled(true);
 
         let legacy = UiMessage::new()
             .user_select(user.clone())
             .role_select(role.clone())
-            .channel_select(channel.clone());
+            .channel_select(channel.clone())
+            .mentionable_select(mentionable.clone());
         let v2 = ComponentsV2::new()
             .user_select(user)
             .role_select(role)
-            .channel_select(channel);
+            .channel_select(channel)
+            .mentionable_select(mentionable);
         assert!(legacy.validate().is_ok());
         assert!(v2.validate().is_ok());
         assert_eq!(legacy.components, v2.components);
 
-        let [user, role, channel] = legacy.components.as_slice() else {
-            panic!("3 行を想定")
+        let [user, role, channel, mentionable] = legacy.components.as_slice() else {
+            panic!("4 行を想定")
         };
         for (item, kind) in [
             (user, SelectMenuType::User),
             (role, SelectMenuType::Role),
             (channel, SelectMenuType::Channel),
+            (mentionable, SelectMenuType::Mentionable),
         ] {
             let Component::ActionRow(row) = item else {
                 panic!("Action Row を想定")
@@ -858,6 +878,16 @@ mod tests {
             };
             assert_eq!(select.kind, kind);
             assert!(select.options.is_none());
+            if kind == SelectMenuType::Mentionable {
+                assert_eq!(select.custom_id, "mentionable");
+                assert_eq!(
+                    select.placeholder.as_deref(),
+                    Some("ユーザーやロールを選択")
+                );
+                assert_eq!(select.min_values, Some(1));
+                assert_eq!(select.max_values, Some(3));
+                assert!(select.disabled);
+            }
         }
 
         let Component::ActionRow(row) = channel else {
@@ -874,7 +904,7 @@ mod tests {
 
     #[test]
     fn entity_selects_check_bounds_and_custom_ids_across_rows() {
-        use super::{ChannelSelect, ComponentsV2, RoleSelect, UserSelect};
+        use super::{ComponentsV2, MentionableSelect, RoleSelect, UserSelect};
 
         assert!(
             UiMessage::new()
@@ -890,14 +920,14 @@ mod tests {
         );
         assert!(
             ComponentsV2::new()
-                .channel_select(ChannelSelect::new("channel").max_values(26))
+                .mentionable_select(MentionableSelect::new("mentionable").max_values(26))
                 .validate()
                 .is_err()
         );
         assert!(
             ComponentsV2::new()
                 .user_select(UserSelect::new("duplicate"))
-                .role_select(RoleSelect::new("duplicate"))
+                .mentionable_select(MentionableSelect::new("duplicate"))
                 .validate()
                 .is_err()
         );

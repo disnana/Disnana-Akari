@@ -24,8 +24,8 @@ use twilight_model::{
 };
 
 pub use buttons::{
-    ButtonContext, ChannelSelectContext, EntitySelectContext, ModalContext, RoleSelectContext,
-    SelectContext, UserSelectContext,
+    ButtonContext, ChannelSelectContext, EntitySelectContext, Mentionable,
+    MentionableSelectContext, ModalContext, RoleSelectContext, SelectContext, UserSelectContext,
 };
 pub use commands::{CommandContext, Commands};
 pub use cooldown::Cooldown;

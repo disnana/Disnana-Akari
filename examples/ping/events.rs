@@ -19,6 +19,7 @@ pub fn register() -> Result<Events> {
     events.on_user_select(entities::USER_ID, entities::choose_user)?;
     events.on_role_select(entities::ROLE_ID, entities::choose_role)?;
     events.on_channel_select(entities::CHANNEL_ID, entities::choose_channel)?;
+    events.on_mentionable_select(entities::MENTIONABLE_ID, entities::choose_mentionable)?;
     Ok(events)
 }
 
