@@ -47,4 +47,17 @@ cargo publish --locked --registry crates-io
 
 [`disnana-akari` 0.1.0 のページ](https://crates.io/crates/disnana-akari/0.1.0)で公開を確認します。初回公開に使ったトークンが不要になったら、crates.io の [API Tokens](https://crates.io/settings/tokens) で失効させ、`cargo logout --registry crates-io` で手元の保存分も削除します。
 
+## バージョンタグで公開する
+
+初回公開後は crates.io のクレート設定から GitHub の Trusted Publisher を登録します。Repository owner は `disnana`、Repository name は `Disnana-Akari`、Workflow filename は `publish.yml`、Environment name は `crates-io` です。GitHub の同名環境では `v*` タグを許可します。[crates.io のクレート設定](https://crates.io/crates/disnana-akari/settings) · [GitHub の環境設定](https://github.com/disnana/Disnana-Akari/settings/environments)
+
+次の版では `Cargo.toml` と `Cargo.lock` のバージョンを更新し、変更履歴を揃えて `main` に反映します。公開対象のコミットに、その版と一致する `v` 付きタグを作って push します。たとえば、`0.1.1` を公開する場合は次のように実行します。
+
+```sh
+git tag -a v0.1.1 -m "Release v0.1.1"
+git push origin refs/tags/v0.1.1
+```
+
+GitHub Actions はタグ名と `Cargo.toml` のバージョン、公開対象コミットが `main` の履歴に含まれることを確認します。CI と RustSec 監査の成功後、GitHub の OIDC で取得した短期トークンを使って公開します。Actions の **Run workflow** では検証だけ実行できます。[Publish to crates.io](https://github.com/disnana/Disnana-Akari/actions/workflows/publish.yml) · [Trusted Publishing の公式ガイド](https://crates.io/docs/trusted-publishing)
+
 [crates.io への公開手順](https://doc.rust-lang.org/cargo/reference/publishing.html) · [Cargo のメタデータ仕様](https://doc.rust-lang.org/cargo/reference/manifest.html)

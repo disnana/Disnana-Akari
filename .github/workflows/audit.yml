@@ -8,12 +8,13 @@ on:
   schedule:
     - cron: '37 20 * * *'
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: rust-audit-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
