@@ -2,6 +2,8 @@
 
 Twilight を土台にした Rust 製 Discord Bot フレームワークです。テキストコマンド、サーバー向けのスラッシュコマンド、Gateway イベントをそれぞれ `async fn` として登録できます。テキストとスラッシュで処理を共通化したい場合は、同じ関数をハイブリッドコマンドとして登録できます。Discord の返信には埋め込みや Components V2 を使え、ボタンや選択メニューから入力フォームも開けます。
 
+0.x では公開 API に互換性のない変更が入る場合があります。更新時は変更履歴を確認してください。[変更履歴](CHANGELOG.md) · [最新リリース](https://github.com/disnana/Disnana-Akari/releases/latest)
+
 ```rust
 use disnana_akari::{Bot, CommandContext, Commands, Result};
 
