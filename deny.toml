@@ -1,0 +1,29 @@
+# cargo-deny の設定。脆弱性の検査は audit.yml (RustSec) が担当するので、ここでは扱わない。
+
+[graph]
+all-features = true
+
+[licenses]
+# 依存クレートに許可するライセンス。Akari 自身は MIT。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# 同じクレートの複数バージョンは、重複を把握できるように警告だけにする。
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

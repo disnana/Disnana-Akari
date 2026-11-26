@@ -1,0 +1,37 @@
+version: 2
+
+updates:
+  # Cargo.lock の依存関係。ライブラリなので、更新は週に一度まとめて受け取る。
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Asia/Tokyo
+    # 公開直後の版は、問題が見つかりやすいので1 週間置いてから提案する。
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: 'deps'
+
+  # GitHub Actions。SHA 固定のアクションも、コメントのバージョン表記ごと更新される。
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Asia/Tokyo
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ['*']
+    commit-message:
+      prefix: 'ci'

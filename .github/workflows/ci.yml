@@ -13,10 +13,16 @@ permissions:
 
 concurrency:
   group: rust-ci-${{ github.ref }}
-  cancel-in-progress: true
+  # main の push は止めず、PR の古い実行だけを取り消す。
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: '10'
+  RUSTUP_MAX_RETRIES: '10'
+  # デバッグ情報を省いて、ビルド時間とキャッシュの大きさを抑える。
+  CARGO_PROFILE_DEV_DEBUG: '0'
 
 jobs:
   lint:
@@ -94,3 +100,18 @@ jobs:
             echo '::error::The distribution archive includes Playground or an environment file.'
             exit 1
           fi
+
+  deny:
+    name: Licenses, bans and sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # 脆弱性は audit.yml が検査するので、ここではライセンス、重複、取得元だけを見る。
+      - name: Check dependency policy
+        uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4
+        with:
+          command: check licenses bans sources
+          arguments: --locked
