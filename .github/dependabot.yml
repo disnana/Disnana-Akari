@@ -36,8 +36,8 @@ updates:
     commit-message:
       prefix: 'ci'
 
-  # ドキュメントサイト（VitePress）の依存パッケージ。
-  - package-ecosystem: npm
+  # ドキュメントサイト（VitePress）の依存パッケージ。Bun のロックファイルを更新する。
+  - package-ecosystem: bun
     directory: /site
     schedule:
       interval: weekly
