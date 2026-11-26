@@ -1,0 +1,39 @@
+name: Rust dependency audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '37 20 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: RustSec audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Audit Cargo.lock against the current RustSec advisory database
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          version=0.23.0
+          archive="cargo-audit-x86_64-unknown-linux-gnu-v$version"
+          curl --fail --silent --show-error --location --retry 3 --max-time 60 \
+            "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v$version/$archive.tgz" \
+            --output "$archive.tgz"
+          printf '%s  %s\n' 'b77993532b253fcbf550996d7716465ec3d734d4e74e7f87bfb65a19add0fb59' "$archive.tgz" | sha256sum --check
+          tar -xzf "$archive.tgz"
+          "$archive/cargo-audit" audit --file "$GITHUB_WORKSPACE/Cargo.lock" --deny yanked
