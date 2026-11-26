@@ -8,6 +8,7 @@
 | `config.rs` | `.env` から Bot トークン、テスト用サーバー ID、登録一覧を一括置換するかどうかを読みます。 |
 | `commands.rs` | `!ping` と `/ping` を個別の関数に結び付けます。`echo` と `latency` は、それぞれテキストとスラッシュで関数を共有します。 |
 | `events.rs` | Gateway が準備できたときや、メッセージを受け取ったときの処理を定義します。 |
+| `ui.rs` | `/ui` の埋め込み、ボタン、クリック時の処理を定義します。 |
 
 ## `!ping` の実行を追う
 
@@ -80,3 +81,36 @@ async fn report(ctx: &mut SlashContext<'_>) -> Result<()> {
 ## イベントに処理を追加する
 
 `events.on_ready(ready)` に登録した関数は、Discord とのセッションが準備できると呼ばれます。投稿を観察する関数は `events.on_message(handler)` に登録できます。テキストコマンドの返信処理と同じファイルに置く必要はありません。[イベントの実装](../examples/ping/events.rs) · [API リファレンス](api.md)
+
+## 埋め込みとボタンを付けて返信する
+
+`/ui` は `UiMessage::new()` で返信を組み立て、`embed(...)` で説明を載せる枠、`buttons(...)` でボタンの行を追加します。`field` の最後の `true` は、Discord の表示幅が十分なときにほかの項目と横並びにできるという指定です。
+
+```rust
+use disnana_akari::{ButtonContext, Events, Result, SlashContext};
+use disnana_akari::ui::{Button, Embed, UiMessage};
+
+const CONFIRM: &str = "akari:example:confirm";
+
+async fn show(ctx: &mut SlashContext<'_>) -> Result<()> {
+    let message = UiMessage::new()
+        .embed(
+            Embed::new("確認")
+                .description("下のボタンを押してください。")
+                .color(0x5865F2)
+                .field("操作", "結果は本人にだけ表示されます。", true),
+        )
+        .buttons(vec![Button::primary(CONFIRM, "確認する")]);
+    ctx.reply_ui(&message).await
+}
+
+fn register(events: &mut Events) -> Result<()> {
+    events.on_button(CONFIRM, confirm)
+}
+
+async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
+    ctx.reply_ephemeral("確認しました。").await
+}
+```
+
+`Button::primary` の最初の値は、クリック時に Discord から送られてくる識別子 `custom_id` です。`on_button` に同じ値を渡すと、ボタンを押したときに登録した関数が呼ばれます。`const` で一箇所に定義しておくと、表示側と登録側の値を揃えられます。`reply_ephemeral` を使うと、クリックへの返信は本人にだけ見えます。[Playground の UI 実装](../examples/ping/ui.rs) · [API リファレンス](api.md)

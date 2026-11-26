@@ -8,7 +8,7 @@ use twilight_model::{
     id::{Id, marker::UserMarker},
 };
 
-use crate::{CommandContext, Commands, Result, SlashCommands, SlashContext, Timing};
+use crate::{CommandContext, Commands, Result, SlashCommands, SlashContext, Timing, ui::UiMessage};
 
 /// 同じ関数をテキストコマンドと、指定した場合はスラッシュコマンドに登録します。
 ///
@@ -162,6 +162,18 @@ impl<'a> HybridContext<'a> {
         match &mut self.inner {
             SourceContext::Text { ctx, .. } => ctx.reply(content).await,
             SourceContext::Slash(ctx) => ctx.reply(content).await,
+        }
+    }
+
+    /// テキストとスラッシュの両方で、Embed やボタンを付けて返信します。
+    ///
+    /// # エラー
+    ///
+    /// 無効な構成、スラッシュコマンドに応答済み、または Discord が送信を受け付けない場合に失敗します。
+    pub async fn reply_ui(&mut self, message: &UiMessage) -> Result<()> {
+        match &mut self.inner {
+            SourceContext::Text { ctx, .. } => ctx.reply_ui(message).await,
+            SourceContext::Slash(ctx) => ctx.reply_ui(message).await,
         }
     }
 }

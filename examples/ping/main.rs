@@ -5,6 +5,7 @@ use disnana_akari::Result;
 mod commands;
 mod config;
 mod events;
+mod ui;
 
 // この属性は、Discord とやりとりする非同期処理を Tokio 上で実行できるようにします。
 // async fn は「途中で通信の完了などを待てる関数」です。
@@ -21,7 +22,7 @@ async fn main() -> Result<()> {
     let (text_commands, slash_commands) = commands::register(guild_id)?;
 
     // with_events はイベント登録を持たせた Bot を返します。
-    let bot = bot.with_events(events::register());
+    let bot = bot.with_events(events::register()?);
     // Some は値があること、None は値がないことを表します。
     // if let は「この形に当てはまるときだけ」と書く方法です。
     let bot = if let Some(slash_commands) = slash_commands {

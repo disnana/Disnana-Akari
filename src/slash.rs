@@ -22,7 +22,7 @@ use twilight_model::{
 };
 use twilight_validate::command;
 
-use crate::{Result, Timing};
+use crate::{Result, Timing, ui::UiMessage};
 
 const COMMAND_FAILED: &str = "コマンドを処理できませんでした。";
 
@@ -231,21 +231,6 @@ impl ActiveSlashCommands {
         (data.kind == CommandType::ChatInput && in_scope).then_some(data)
     }
 
-    pub(crate) async fn reject_busy(&self, http: &Client, interaction: &Interaction) {
-        if self.accepts(interaction)
-            && send_initial_message(
-                http,
-                interaction,
-                "現在混雑しています。少し待ってからもう一度お試しください。",
-                true,
-            )
-            .await
-            .is_err()
-        {
-            eprintln!("スラッシュコマンドの混雑応答に失敗しました");
-        }
-    }
-
     pub(crate) async fn dispatch(&self, http: &Client, interaction: &Interaction, timing: Timing) {
         let Some(data) = self.command_data(interaction) else {
             return;
@@ -345,6 +330,47 @@ impl<'a> SlashContext<'a> {
     /// 二回目の応答や、Discord が受け付けなかった場合に失敗します。
     pub async fn reply(&mut self, content: &str) -> Result<()> {
         self.respond(content, false).await
+    }
+
+    /// 埋め込みやボタンを含む初回応答を送るか、遅延応答の元メッセージを完成させます。
+    ///
+    /// 初回応答はチャンネルに表示されます。遅延応答の公開範囲は `defer` の時点で決まります。
+    /// メンション通知は抑止します。
+    ///
+    /// # エラー
+    ///
+    /// 応答済み、メッセージの内容が無効、または Discord が受け付けなかった場合に失敗します。
+    pub async fn reply_ui(&mut self, message: &UiMessage) -> Result<()> {
+        message.validate()?;
+        let client = self.http.interaction(self.interaction.application_id);
+
+        match self.response_state.reply_action(false)? {
+            ReplyAction::Initial => {
+                let response = initial_response(InitialResponse::Ui(message), false);
+                client
+                    .create_response(self.interaction.id, &self.interaction.token, &response)
+                    .await?;
+            }
+            ReplyAction::EditDeferred => {
+                let mentions = AllowedMentions::default();
+                let mut update = client
+                    .update_response(&self.interaction.token)
+                    .allowed_mentions(Some(&mentions));
+                if let Some(content) = &message.content {
+                    update = update.content(Some(content));
+                }
+                if !message.embeds.is_empty() {
+                    update = update.embeds(Some(&message.embeds));
+                }
+                if !message.components.is_empty() {
+                    update = update.components(Some(&message.components));
+                }
+                update.await?;
+            }
+        }
+
+        *self.response_state = ResponseState::Replied;
+        Ok(())
     }
 
     /// 呼び出した本人にだけ見える初回応答を送るか、非公開の遅延応答を完成させます。
@@ -469,6 +495,7 @@ enum ReplyAction {
 
 enum InitialResponse<'a> {
     Message(&'a str),
+    Ui(&'a UiMessage),
     Deferred,
 }
 
@@ -484,6 +511,17 @@ fn initial_response(response: InitialResponse<'_>, ephemeral: bool) -> Interacti
                 ..Default::default()
             }),
         },
+        InitialResponse::Ui(message) => InteractionResponse {
+            kind: InteractionResponseType::ChannelMessageWithSource,
+            data: Some(InteractionResponseData {
+                content: message.content.clone(),
+                embeds: (!message.embeds.is_empty()).then(|| message.embeds.clone()),
+                components: (!message.components.is_empty()).then(|| message.components.clone()),
+                allowed_mentions: Some(AllowedMentions::default()),
+                flags,
+                ..Default::default()
+            }),
+        },
         InitialResponse::Deferred => InteractionResponse {
             kind: InteractionResponseType::DeferredChannelMessageWithSource,
             data: flags.map(|flags| InteractionResponseData {
@@ -494,7 +532,7 @@ fn initial_response(response: InitialResponse<'_>, ephemeral: bool) -> Interacti
     }
 }
 
-async fn send_initial_message(
+pub(crate) async fn send_initial_message(
     http: &Client,
     interaction: &Interaction,
     content: &str,
@@ -533,6 +571,7 @@ mod tests {
         InteractionResponseType, MessageFlags, ReplyAction, ResponseState, Result, SlashCommands,
         SlashContext, initial_response,
     };
+    use crate::ui::{Button, Embed, UiMessage};
 
     async fn handler(_: &mut SlashContext<'_>) -> Result<()> {
         Ok(())
@@ -650,5 +689,33 @@ mod tests {
             .unwrap();
         assert_eq!(data.content, None);
         assert_eq!(data.flags, Some(MessageFlags::EPHEMERAL));
+    }
+
+    #[test]
+    fn ui_callback_only_includes_present_message_fields() -> Result<()> {
+        let rich = UiMessage::new()
+            .embed(Embed::new("埋め込み"))
+            .buttons(vec![Button::primary("details", "詳細")]);
+        rich.validate()?;
+        let response = initial_response(InitialResponse::Ui(&rich), false);
+        assert_eq!(
+            response.kind,
+            InteractionResponseType::ChannelMessageWithSource
+        );
+        let data = response.data.unwrap();
+        assert_eq!(data.content, None);
+        assert_eq!(data.embeds.as_deref(), Some(rich.embeds.as_slice()));
+        assert_eq!(data.components.as_deref(), Some(rich.components.as_slice()));
+        assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
+        assert_eq!(data.flags, None);
+
+        let plain = UiMessage::new().content("本文のみ");
+        let data = initial_response(InitialResponse::Ui(&plain), false)
+            .data
+            .unwrap();
+        assert_eq!(data.content.as_deref(), Some("本文のみ"));
+        assert_eq!(data.embeds, None);
+        assert_eq!(data.components, None);
+        Ok(())
     }
 }

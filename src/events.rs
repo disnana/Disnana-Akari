@@ -4,13 +4,14 @@ use twilight_model::channel::Message;
 
 pub use twilight_model::gateway::payload::incoming::Ready;
 
-use crate::Result;
+use crate::{ButtonContext, Result, buttons::Buttons};
 
 /// Gateway イベントごとに非同期ハンドラーを登録します。
 #[derive(Default)]
 pub struct Events {
     ready: Vec<Box<dyn Handler<Ready>>>,
     message: Vec<Box<dyn Handler<Message>>>,
+    pub(crate) buttons: Buttons,
 }
 
 impl Events {
@@ -33,6 +34,19 @@ impl Events {
         handler: impl AsyncFn(&Message) -> Result<()> + Send + Sync + 'static,
     ) {
         self.message.push(Box::new(handler));
+    }
+
+    /// 指定したカスタム ID のボタンを押したときに呼ぶ関数を登録します。
+    ///
+    /// # エラー
+    ///
+    /// ID の長さが 1 文字未満か 100 文字超、または登録済みの場合に失敗します。
+    pub fn on_button(
+        &mut self,
+        custom_id: &str,
+        handler: impl AsyncFn(&mut ButtonContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.buttons.register(custom_id, handler)
     }
 
     pub(crate) fn has_message_handlers(&self) -> bool {

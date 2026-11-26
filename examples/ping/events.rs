@@ -1,13 +1,17 @@
 use disnana_akari::model::channel::Message;
 use disnana_akari::{Events, Ready, Result};
 
-pub fn register() -> Events {
+use crate::ui;
+
+pub fn register() -> Result<Events> {
     let mut events = Events::new();
 
     // コマンド名の代わりに「いつ呼ぶか」を指定して、関数を登録します。
     events.on_ready(on_ready);
     events.on_message(on_message);
-    events
+    // ボタンの ID が一致したときにだけ、ui.rs の click 関数を呼びます。
+    events.on_button(ui::BUTTON_ID, ui::click)?;
+    Ok(events)
 }
 
 // &Ready は、接続完了イベントの情報を借りて読むための型です。

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, future::Future, pin::Pin};
 
-use crate::{Context, Result, Timing};
+use crate::{Context, Result, Timing, ui::UiMessage};
 
 /// 共通のプレフィックスを使うテキストコマンドの登録先です。
 pub struct Commands {
@@ -100,6 +100,15 @@ impl<'a> CommandContext<'a> {
     /// 返信を送信できなかった場合に失敗します。
     pub async fn reply(&self, content: &str) -> Result<()> {
         self.ctx.reply(content).await
+    }
+
+    /// 元のコマンドに Embed やボタンを付けて返信します。
+    ///
+    /// # エラー
+    ///
+    /// 詳細は [`Context::reply_ui`] を参照してください。
+    pub async fn reply_ui(&self, message: &UiMessage) -> Result<()> {
+        self.ctx.reply_ui(message).await
     }
 }
 

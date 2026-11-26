@@ -10,7 +10,7 @@
 
 ## Playground を起動する
 
-`playground/` がまだない場合は、後述の手順で作成します。`playground/.env` を開き、`DISCORD_TOKEN=` の右辺に Bot トークンを貼り付けます。`/ping`、`/echo`、`/latency` も試す場合は、Discord の設定で開発者モードを有効にし、テスト用サーバーを右クリックして **サーバーIDをコピー** を選びます。コピーした数字を `DISCORD_GUILD_ID=` の右辺に貼り付けます。UTF-8 で保存し、値は引用符を付けずに書きます。`playground/` は Git の除外対象です。
+`playground/` がまだない場合は、後述の手順で作成します。`playground/.env` を開き、`DISCORD_TOKEN=` の右辺に Bot トークンを貼り付けます。スラッシュコマンドも試す場合は、Discord の設定で開発者モードを有効にし、テスト用サーバーを右クリックして **サーバーIDをコピー** を選びます。コピーした数字を `DISCORD_GUILD_ID=` の右辺に貼り付けます。UTF-8 で保存し、値は引用符を付けずに書きます。`playground/` は Git の除外対象です。
 
 ```dotenv
 DISCORD_TOKEN=
@@ -38,6 +38,7 @@ cargo run --locked --manifest-path playground/Cargo.toml --target-dir target
 | 自分でインストールした Bot の `/ping` を選んで実行する | `Pong!` |
 | 同じ Bot の `/echo` を選び、`text` 欄に `こんにちは` と入力して実行する | `こんにちは` |
 | 同じ Bot の `/latency` を選んで実行する | `!latency` と同じ 3 項目 |
+| 同じ Bot の `/ui` を実行して、表示された **Ping** ボタンを押す | 埋め込みとボタンがチャンネルに表示され、`Pong!` は押した人にだけ表示されます。 |
 
 遅延はミリ秒（ms）で表示されます。接続直後など、Gateway からハートビートの応答をまだ受け取っていない場合は、Gateway RTT が「未計測」と表示されます。[測定値の定義](api.md#timing)
 
@@ -70,7 +71,7 @@ cargo run --locked --example ping
 
 `playground/` は `.gitignore` に登録済みです。Akari を `path = ".."` で参照する独立した Cargo プロジェクトなので、Akari 本体の変更もそのまま試せます。
 
-作成済みなら、`playground/src/commands.rs` でコマンド、`playground/src/events.rs` でイベントを編集して **Akari Playground** を実行します。自作のコードがある場合は、`examples/ping/` と `playground/src/` の差分を見ながら新しいサンプルを取り込めます。
+作成済みなら、`playground/src/commands.rs` でコマンド、`playground/src/events.rs` でイベント、`playground/src/ui.rs` で `/ui` の表示やボタン操作を編集して **Akari Playground** を実行します。自作のコードがある場合は、`examples/ping/` と `playground/src/` の差分を見ながら新しいサンプルを取り込めます。
 
 新しくクローンした環境では、ルートで次のコマンドを実行してフォルダを作ります。既存の `playground/` がある場合はこの手順を飛ばしてください。
 

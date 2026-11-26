@@ -1,5 +1,6 @@
 #![doc = include_str!("../docs/api.md")]
 
+mod buttons;
 mod commands;
 mod cooldown;
 mod events;
@@ -7,6 +8,7 @@ mod hybrid;
 mod slash;
 mod slash_queue;
 mod timing;
+pub mod ui;
 
 use std::{env, error::Error};
 
@@ -14,10 +16,11 @@ use tokio::sync::mpsc;
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
 use twilight_http::Client;
 use twilight_model::{
-    application::interaction::Interaction,
+    application::interaction::{Interaction, InteractionType},
     channel::{Message, message::AllowedMentions},
 };
 
+pub use buttons::ButtonContext;
 pub use commands::{CommandContext, Commands};
 pub use cooldown::Cooldown;
 pub use events::{Events, Ready};
@@ -28,7 +31,7 @@ pub use twilight_model as model;
 
 use timing::Pending;
 
-const SLASH_WORKERS: usize = 8;
+const INTERACTION_WORKERS: usize = 8;
 const BUSY_WORKERS: usize = 8;
 const GATEWAY_QUEUE_CAPACITY: usize = 64;
 
@@ -174,6 +177,10 @@ impl Bot {
             None => None,
         };
 
+        if events.buttons.has_handlers() {
+            event_types |= EventTypeFlags::INTERACTION_CREATE;
+        }
+
         if on_message.is_some() || events.has_message_handlers() {
             default_intents |= Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
             event_types |= EventTypeFlags::MESSAGE_CREATE;
@@ -182,7 +189,8 @@ impl Bot {
         let intents = intents.unwrap_or(default_intents) | additional_intents;
         let mut shard = Shard::new(ShardId::ONE, token, intents);
         let (messages, mut message_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
-        let (interactions, interaction_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
+        let (interactions, interaction_queue) =
+            mpsc::channel::<Pending<Interaction>>(GATEWAY_QUEUE_CAPACITY);
         let (busy, busy_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
         let slash = slash.as_ref();
 
@@ -213,10 +221,12 @@ impl Bot {
 
         let handle_interactions = slash_queue::dispatch(
             interaction_queue,
-            SLASH_WORKERS,
+            INTERACTION_WORKERS,
             |pending| async {
                 let (interaction, timing) = Pending::begin(pending);
-                if let Some(commands) = slash {
+                if interaction.kind == InteractionType::MessageComponent {
+                    events.buttons.dispatch(&http, &interaction, timing).await;
+                } else if let Some(commands) = slash {
                     commands.dispatch(&http, &interaction, timing).await;
                 }
             },
@@ -225,8 +235,16 @@ impl Bot {
         let handle_busy = slash_queue::respond(busy_queue, BUSY_WORKERS, |interaction| {
             let http = &http;
             async move {
-                if let Some(commands) = slash {
-                    commands.reject_busy(http, &interaction).await;
+                if slash::send_initial_message(
+                    http,
+                    &interaction,
+                    "現在混雑しています。少し待ってからもう一度お試しください。",
+                    true,
+                )
+                .await
+                .is_err()
+                {
+                    eprintln!("interaction の混雑応答に失敗しました");
                 }
             }
         });
@@ -252,7 +270,8 @@ impl Bot {
                         }
                     }
                     Ok(Event::InteractionCreate(interaction))
-                        if slash.is_some_and(|commands| commands.accepts(&interaction.0)) =>
+                        if events.buttons.accepts(&interaction.0)
+                            || slash.is_some_and(|commands| commands.accepts(&interaction.0)) =>
                     {
                         if let Err(error) =
                             interactions.try_send(Pending::new(interaction.0, gateway_rtt))
@@ -319,6 +338,32 @@ impl<'a> Context<'a> {
             .allowed_mentions(Some(&AllowedMentions::default()))
             .await?;
 
+        Ok(())
+    }
+
+    /// 元のメッセージに Embed やボタンを付けて返信します。
+    ///
+    /// # エラー
+    ///
+    /// メッセージの構成が無効、または Discord が送信を受け付けない場合に失敗します。
+    pub async fn reply_ui(&self, message: &ui::UiMessage) -> Result<()> {
+        message.validate()?;
+        let mentions = AllowedMentions::default();
+        let mut request = self
+            .http
+            .create_message(self.message.channel_id)
+            .reply(self.message.id)
+            .allowed_mentions(Some(&mentions));
+        if let Some(content) = &message.content {
+            request = request.content(content);
+        }
+        if !message.embeds.is_empty() {
+            request = request.embeds(&message.embeds);
+        }
+        if !message.components.is_empty() {
+            request = request.components(&message.components);
+        }
+        request.await?;
         Ok(())
     }
 }
