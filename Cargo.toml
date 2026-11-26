@@ -1,0 +1,15 @@
+[package]
+name = "disnana-akari"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+twilight-gateway = "0.18"
+twilight-http = "0.18"
+twilight-model = "0.18"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
