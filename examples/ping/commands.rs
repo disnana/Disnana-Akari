@@ -87,21 +87,14 @@ async fn latency(
     text_cooldown: &Cooldown,
     slash_cooldown: &Cooldown,
 ) -> Result<()> {
-    let Some(user) = ctx.author_id() else {
-        return ctx.reply("実行したユーザーを確認できませんでした。").await;
-    };
-
     // match で呼び出し方に応じた制限を選びます。同じ人でも ! と / の待ち時間は別々です。
     let cooldown = match ctx.source() {
         CommandSource::Text => text_cooldown,
         CommandSource::Slash => slash_cooldown,
     };
-    // check が Err を返したら、計測結果を出す前に残り時間だけ返信して終わります。
-    if let Err(remaining) = cooldown.check(user) {
-        let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
-        return ctx
-            .reply(&format!("あと {seconds} 秒待ってから試してください。"))
-            .await;
+    // false のときは待ち時間を返信済みです。先頭の ! は true と false を反転させます。
+    if !ctx.check_cooldown(cooldown).await? {
+        return Ok(());
     }
 
     // HybridContext を使うと、どちらのコマンドからも同じ書き方で計測や返信ができます。

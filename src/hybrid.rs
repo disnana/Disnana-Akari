@@ -8,7 +8,9 @@ use twilight_model::{
     id::{Id, marker::UserMarker},
 };
 
-use crate::{CommandContext, Commands, Result, SlashCommands, SlashContext, Timing, ui::UiMessage};
+use crate::{
+    CommandContext, Commands, Cooldown, Result, SlashCommands, SlashContext, Timing, ui::UiMessage,
+};
 
 /// 同じ関数をテキストコマンドと、指定した場合はスラッシュコマンドに登録します。
 ///
@@ -107,6 +109,31 @@ impl<'a> HybridContext<'a> {
             SourceContext::Text { ctx, .. } => Some(ctx.context().message().author.id),
             SourceContext::Slash(ctx) => ctx.author_id(),
         }
+    }
+
+    /// コマンドを実行する前に、ユーザーごとの待ち時間を確認します。
+    ///
+    /// 実行できる場合は使用を記録して `true` を返します。待ち時間が残っている場合は、
+    /// 秒単位で切り上げて返信したあと `false` を返します。スラッシュでは本人にだけ表示します。
+    ///
+    /// # エラー
+    ///
+    /// 実行者の ID を取得できない場合や、待ち時間の通知を送れない場合はエラーを返します。
+    pub async fn check_cooldown(&mut self, cooldown: &Cooldown) -> Result<bool> {
+        let user = self
+            .author_id()
+            .ok_or("実行したユーザーを確認できませんでした。")?;
+        let Err(remaining) = cooldown.check(user) else {
+            return Ok(true);
+        };
+
+        let seconds = u128::from(remaining.as_secs()) + u128::from(remaining.subsec_nanos() > 0);
+        let notice = format!("あと {seconds} 秒待ってから試してください。");
+        match &mut self.inner {
+            SourceContext::Text { ctx, .. } => ctx.reply(&notice).await?,
+            SourceContext::Slash(ctx) => ctx.reply_ephemeral(&notice).await?,
+        }
+        Ok(false)
     }
 
     /// テキストコマンドの名前に続く本文です。スラッシュの場合は `None` になります。

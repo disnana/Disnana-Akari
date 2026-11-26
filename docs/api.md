@@ -22,9 +22,17 @@ Bot と Webhook が送ったメッセージは除外します。復旧可能な 
 
 ### ハンドラーの実行順
 
-Gateway の受信、テキストコマンドとイベントの処理、スラッシュコマンドの処理は、非同期で並行して進みます。テキストコマンドとイベントは一つのキューで到着順に処理し、待ち行列は最大 64 件です。満杯時は新しく届いたイベントを破棄し、標準エラー出力に記録します。
+Gateway の受信、コマンド、イベントは非同期で並行して進みます。処理ごとに次の枠とキューを使います。
 
-スラッシュコマンドと登録済みのボタン操作は、同時実行枠 8 件と、受信から処理への引き渡し用キュー 64 件を共有します。同時実行枠やキューが埋まっている場合、別の処理枠から本人にだけ見える混雑通知を試みます。混雑通知も同時 8 件、待ち行列 64 件までです。通知用の待ち行列が満杯の場合や、Discord への通知が失敗した場合は、標準エラー出力に記録します。Gateway のイベントストリームが終わると処理中と保留中のイベントも中止します。
+| 処理 | 同時実行枠 | 受信キュー | 混雑時 |
+| --- | --- | --- | --- |
+| `Bot::run_commands` のテキストコマンド | 8 件 | 64 件 | メンション通知を抑止した返信を試みます。 |
+| スラッシュコマンドと登録済みのボタン操作 | 合計 8 件 | 合計 64 件 | 本人にだけ見える返信を試みます。 |
+| `on_ready`、`on_message` と `Bot::run` の自前ハンドラー | 1 件 | 64 件 | 新しく届いたイベントを破棄し、標準エラー出力に記録します。 |
+
+テキストコマンド用のキューには、登録名に一致したメッセージだけが入ります。イベントは受信順に処理し、同じイベントの関数は登録順に呼びます。`Bot::run` の自前ハンドラーは、そのメッセージに対する `Events::on_message` より先に実行します。`Bot::run_commands` のコマンドとイベントの間では、実行順や完了順を保証しません。
+
+混雑時の返信には、テキストとスラッシュ・ボタンで別々の処理枠を使います。それぞれ同時に 8 件、キューは 64 件までです。混雑返信用のキューが満杯の場合や返信に失敗した場合は、標準エラー出力に記録します。Gateway のイベントストリームが終わると、処理中と保留中のイベントも中止します。
 
 ハンドラーが I/O の完了を `.await` している間は Gateway の受信を続けられます。同期 I/O や長い計算は、同じタスク内の他の処理も止めるため、Tokio の `spawn_blocking` などで切り分けます。
 
@@ -73,7 +81,7 @@ Gateway の受信、テキストコマンドとイベントの処理、スラッ
 
 ### 時間がかかる処理に応答する
 
-関数の形は `async fn handler(ctx: &mut SlashContext<'_>) -> Result<()>` です。Discord は Interaction の受信後 3 秒以内に初回応答を求めます。外部サービスへの問い合わせなどがある場合は、先に `ctx.defer().await?` または `ctx.defer_ephemeral().await?` を呼び、処理後に `ctx.reply(...).await?` で処理中の表示を本文に置き換えます。公開範囲は `defer` または `defer_ephemeral` の時点で決まります。公開の `defer` の後に `reply_ephemeral` を呼ぶとエラーになります。`followup` と `followup_ephemeral` は最初の本文を送った後に呼びます。Discord の Interaction トークンの有効期間は 15 分です。[Discord の Interaction 応答仕様](https://docs.discord.com/developers/interactions/receiving-and-responding)
+関数の形は `async fn handler(ctx: &mut SlashContext<'_>) -> Result<()>` です。Discord は Interaction の受信後 3 秒以内に初回応答を求めます。外部サービスへの問い合わせなど、期限に間に合わない可能性がある処理の前に、ハンドラーから `ctx.defer().await?` または `ctx.defer_ephemeral().await?` を明示的に呼びます。処理後に `ctx.reply(...).await?` で処理中の表示を本文に置き換えます。公開範囲は `defer` または `defer_ephemeral` の時点で決まります。公開の `defer` の後に `reply_ephemeral` を呼ぶとエラーになります。`followup` と `followup_ephemeral` は最初の本文を送った後に呼びます。Discord の Interaction トークンの有効期間は 15 分です。[Discord の Interaction 応答仕様](https://docs.discord.com/developers/interactions/receiving-and-responding)
 
 ハンドラーが最初の本文を送れずに終了した場合は、Akari がエラー応答を試みます。初回応答が済んでいない場合は本人にだけ表示し、処理中の応答がある場合はその表示をエラー文に置き換えます。返信本文中のメンション通知は抑止します。
 
@@ -91,11 +99,14 @@ Gateway の受信、テキストコマンドとイベントの処理、スラッ
 | `ctx.option(name) -> Option<&CommandOptionValue>` | スラッシュ側の名前付き引数を借ります。テキスト側や該当する引数がない場合は `None` を返します。 |
 | `ctx.string(name) -> Option<&str>` | スラッシュ側の文字列引数を借ります。テキスト側、引数なし、他の型の場合は `None` を返します。 |
 | `ctx.text_arg(name) -> Option<&str>` | スラッシュでは同名の文字列引数、テキストでは最初に定義したトップレベルの文字列引数に対応する残りの本文を借ります。値が空か空白だけの場合は `None` です。 |
+| `ctx.check_cooldown(&cooldown).await -> Result<bool>` | 実行できる場合はユーザーごとの利用を記録して `true` を返します。待ち時間が残っている場合はその時間を知らせ、`false` を返します。スラッシュでの待ち時間の通知は本人にだけ表示します。 |
 | `ctx.timing() -> Timing` | 呼び出し元に応じた測定値を取得します。 |
 | `ctx.reply(content).await -> Result<()>` | テキストなら元の投稿に返信し、スラッシュなら公開の初回応答を送ります。 |
 | `ctx.reply_ui(&message).await -> Result<()>` | `UiMessage` をテキストコマンドまたはスラッシュコマンドへの返信に使います。 |
 
-テキスト側の `text_arg` は、コマンド名の後ろ全体を一つの値として返します。二つ目以降の文字列引数や他の型の引数を読む場合は、必要に応じて `args()` や `option()` を使います。ユーザーごとの呼び出し頻度を制限するときは `ctx.author_id()` と `Cooldown` を組み合わせられます。
+テキスト側の `text_arg` は、コマンド名の後ろ全体を最初のトップレベルの文字列引数に割り当てます。たとえば、文字列 `text` と整数 `count` を定義した `/repeat` では Discord の入力欄から `text` と `count` を別々に取得できます。`!repeat こんにちは 3` では `text_arg("text")` が `こんにちは 3` 全体を返します。名前付きの数値引数はスラッシュ側の `option("count")` で取得できます。テキスト側の本文を複数の値に分けたい場合は、`args()` の値をハンドラーで解析します。
+
+クールダウンは応答や重い処理の前に確認します。`if !ctx.check_cooldown(&cooldown).await? { return Ok(()); }` とすると、残り時間を返信した場合にハンドラーを終了できます。ユーザー ID を取得できない場合や返信に失敗した場合はエラーを返します。
 
 ## `Cooldown`
 
@@ -122,7 +133,7 @@ Gateway の受信、テキストコマンドとイベントの処理、スラッ
 | `events.on_message(handler)` | 人が送った新着メッセージの `&Message` を渡します。通常の投稿とテキストコマンドの両方を受け取ります。 |
 | `events.on_button(custom_id, handler) -> Result<()>` | 指定した識別子のボタンが押されたときに `&mut ButtonContext<'_>` を渡します。識別子は 1～100 文字で、同じ識別子に関数を一つ登録できます。 |
 
-同じイベントに複数の関数を登録できます。テキストコマンドを併用すると、メッセージをコマンドとして処理した後に `on_message` の関数を登録順に呼び出します。各関数が返したエラーは標準エラー出力に記録され、次のハンドラーへ進みます。
+`on_ready` と `on_message` には複数の関数を登録できます。各関数が返したエラーは標準エラー出力に記録され、次のハンドラーへ進みます。コマンドとイベントの順序は [ハンドラーの実行順](#ハンドラーの実行順) を参照してください。
 
 ## `UiMessage` と `ButtonContext<'_>`
 
@@ -162,8 +173,10 @@ Gateway の受信、テキストコマンドとイベントの処理、スラッ
 ## 使用例
 
 ```rust,no_run
+use std::time::Duration;
+
 use disnana_akari::{
-    Bot, ButtonContext, CommandContext, Commands, Events, HybridContext, Ready, Result,
+    Bot, ButtonContext, CommandContext, Commands, Cooldown, Events, HybridContext, Ready, Result,
     SlashCommands, SlashContext, register_hybrid, ui::{Button, Embed, UiMessage},
 };
 
@@ -186,13 +199,14 @@ async fn main() -> Result<()> {
         vec![SlashCommands::string_option("text", "返す文章", true)],
         echo,
     )?;
+    let cooldown = Cooldown::new(Duration::from_secs(1));
     register_hybrid(
         &mut commands,
         Some(&mut slash),
         "latency",
         "Bot のキュー待ちを確認します",
         vec![],
-        latency,
+        async move |ctx| latency(ctx, &cooldown).await,
     )?;
 
     let mut events = Events::new();
@@ -232,7 +246,11 @@ async fn echo(ctx: &mut HybridContext<'_>) -> Result<()> {
     ctx.reply(text).await
 }
 
-async fn latency(ctx: &mut HybridContext<'_>) -> Result<()> {
+async fn latency(ctx: &mut HybridContext<'_>, cooldown: &Cooldown) -> Result<()> {
+    if !ctx.check_cooldown(cooldown).await? {
+        return Ok(());
+    }
+
     let wait = ctx.timing().queue_wait();
     ctx.reply(&format!("キュー待ち {:.3} ms", wait.as_secs_f64() * 1_000.0))
         .await

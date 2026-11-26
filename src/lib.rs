@@ -6,11 +6,11 @@ mod cooldown;
 mod events;
 mod hybrid;
 mod slash;
-mod slash_queue;
 mod timing;
 pub mod ui;
+mod work_queue;
 
-use std::{env, error::Error};
+use std::{env, error::Error, sync::Arc};
 
 use tokio::sync::mpsc;
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
@@ -32,8 +32,12 @@ pub use twilight_model as model;
 use timing::Pending;
 
 const INTERACTION_WORKERS: usize = 8;
+const TEXT_WORKERS: usize = 8;
 const BUSY_WORKERS: usize = 8;
 const GATEWAY_QUEUE_CAPACITY: usize = 64;
+const BUSY_MESSAGE: &str = "現在混雑しています。少し待ってからもう一度お試しください。";
+
+type NoMessageHandler = fn(Context<'_>) -> std::future::Ready<Result<()>>;
 
 /// Akari とメッセージハンドラーで使う結果型です。
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -112,29 +116,19 @@ impl Bot {
     ///
     /// スラッシュコマンドの登録に失敗した場合や、Gateway が終了した場合に失敗します。
     pub async fn start(self) -> Result<()> {
-        self.connect(None::<fn(Context<'_>) -> std::future::Ready<Result<()>>>)
-            .await
+        self.connect(None::<NoMessageHandler>, None).await
     }
 
     /// Discord に接続し、登録されたテキストコマンドを実行します。
     ///
     /// コマンド関数が失敗したときは、呼び出したメッセージへエラーを返信します。
+    /// 複数のコマンドは同時進行でき、受信順に処理するイベントハンドラーから独立しています。
     ///
     /// # エラー
     ///
     /// スラッシュコマンドの登録に失敗した場合や、Gateway が終了した場合に失敗します。
     pub async fn run_commands(self, commands: Commands) -> Result<()> {
-        self.run(async |ctx: Context<'_>| {
-            if let Err(error) = commands.dispatch(ctx).await {
-                if let Err(reply_error) = ctx.reply("コマンドを処理できませんでした。").await
-                {
-                    eprintln!("テキストコマンドのエラー応答に失敗しました ({reply_error})");
-                }
-                return Err(error);
-            }
-            Ok(())
-        })
-        .await
+        self.connect(None::<NoMessageHandler>, Some(commands)).await
     }
 
     /// Discord に接続し、人がサーバーで送った新着メッセージを順に処理します。
@@ -150,12 +144,13 @@ impl Bot {
         self,
         on_message: impl for<'a> AsyncFn(Context<'a>) -> Result<()>,
     ) -> Result<()> {
-        self.connect(Some(on_message)).await
+        self.connect(Some(on_message), None).await
     }
 
     async fn connect(
         self,
         on_message: Option<impl for<'a> AsyncFn(Context<'a>) -> Result<()>>,
+        text_commands: Option<Commands>,
     ) -> Result<()> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let Bot {
@@ -181,45 +176,78 @@ impl Bot {
             event_types |= EventTypeFlags::INTERACTION_CREATE;
         }
 
-        if on_message.is_some() || events.has_message_handlers() {
+        let observe_messages = on_message.is_some() || events.has_message_handlers();
+        let text_commands = text_commands.as_ref();
+        if observe_messages || text_commands.is_some() {
             default_intents |= Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
             event_types |= EventTypeFlags::MESSAGE_CREATE;
         }
 
         let intents = intents.unwrap_or(default_intents) | additional_intents;
         let mut shard = Shard::new(ShardId::ONE, token, intents);
-        let (messages, mut message_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
+        let (event_tx, mut event_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
+        let (text_tx, text_queue) = mpsc::channel::<Pending<Arc<Message>>>(GATEWAY_QUEUE_CAPACITY);
+        let (text_busy_tx, text_busy_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
         let (interactions, interaction_queue) =
             mpsc::channel::<Pending<Interaction>>(GATEWAY_QUEUE_CAPACITY);
         let (busy, busy_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
         let slash = slash.as_ref();
 
-        let handle_messages = async {
-            while let Some(pending) = message_queue.recv().await {
-                let (event, timing) = Pending::begin(pending);
+        let handle_events = async {
+            while let Some(event) = event_queue.recv().await {
                 match event {
-                    Event::Ready(ready) => {
+                    MessageEvent::Ready(ready) => {
                         events.ready(&ready).await;
                     }
-                    Event::MessageCreate(message) => {
+                    MessageEvent::Message(pending) => {
+                        let (message, timing) = pending.begin();
                         if let Some(handler) = &on_message {
                             let context = Context {
                                 http: &http,
-                                message: &message.message,
+                                message: &message,
                                 timing,
                             };
                             if let Err(error) = handler(context).await {
                                 eprintln!("メッセージ処理に失敗しました ({error})");
                             }
                         }
-                        events.message(&message.message).await;
+                        events.message(&message).await;
                     }
-                    _ => {}
                 }
             }
         };
 
-        let handle_interactions = slash_queue::dispatch(
+        let handle_text = work_queue::dispatch(
+            text_queue,
+            TEXT_WORKERS,
+            |pending| async {
+                let (message, timing) = Pending::begin(pending);
+                if let Some(commands) = text_commands {
+                    commands
+                        .dispatch_with_feedback(Context {
+                            http: &http,
+                            message: &message,
+                            timing,
+                        })
+                        .await;
+                }
+            },
+            |pending| queue_text_busy(&text_busy_tx, pending),
+        );
+        let handle_text_busy =
+            work_queue::respond(text_busy_queue, BUSY_WORKERS, |pending| async {
+                let (message, timing) = Pending::begin(pending);
+                let context = Context {
+                    http: &http,
+                    message: &message,
+                    timing,
+                };
+                if let Err(error) = context.reply(BUSY_MESSAGE).await {
+                    eprintln!("テキストコマンドの混雑応答に失敗しました ({error})");
+                }
+            });
+
+        let handle_interactions = work_queue::dispatch(
             interaction_queue,
             INTERACTION_WORKERS,
             |pending| async {
@@ -232,17 +260,12 @@ impl Bot {
             },
             |pending| queue_busy_response(&busy, pending.into_event()),
         );
-        let handle_busy = slash_queue::respond(busy_queue, BUSY_WORKERS, |interaction| {
+        let handle_busy = work_queue::respond(busy_queue, BUSY_WORKERS, |interaction| {
             let http = &http;
             async move {
-                if slash::send_initial_message(
-                    http,
-                    &interaction,
-                    "現在混雑しています。少し待ってからもう一度お試しください。",
-                    true,
-                )
-                .await
-                .is_err()
+                if slash::send_initial_message(http, &interaction, BUSY_MESSAGE, true)
+                    .await
+                    .is_err()
                 {
                     eprintln!("interaction の混雑応答に失敗しました");
                 }
@@ -253,20 +276,40 @@ impl Bot {
             while let Some(event) = shard.next_event(event_types).await {
                 let gateway_rtt = shard.latency().recent().first().copied();
                 match event {
-                    Ok(event @ Event::Ready(_)) => {
+                    Ok(Event::Ready(ready)) => {
                         println!("Discord に接続しました");
-                        if messages.try_send(Pending::new(event, gateway_rtt)).is_err() {
+                        if event_tx
+                            .try_send(MessageEvent::Ready(Box::new(ready)))
+                            .is_err()
+                        {
                             eprintln!("受信キューが満杯のため READY を処理できませんでした");
                         }
                     }
                     Ok(Event::MessageCreate(message))
                         if !message.author.bot && message.webhook_id.is_none() =>
                     {
-                        let event = Event::MessageCreate(message);
-                        if messages.try_send(Pending::new(event, gateway_rtt)).is_err() {
+                        let run_command = text_commands
+                            .is_some_and(|commands| commands.matches_message(&message.content));
+                        if !observe_messages && !run_command {
+                            continue;
+                        }
+                        let message = Arc::new(message.message);
+                        if observe_messages
+                            && event_tx
+                                .try_send(MessageEvent::Message(Pending::new(
+                                    Arc::clone(&message),
+                                    gateway_rtt,
+                                )))
+                                .is_err()
+                        {
                             eprintln!(
-                                "受信キューが満杯のため MESSAGE_CREATE を処理できませんでした"
+                                "イベントキューが満杯のため MESSAGE_CREATE を処理できませんでした"
                             );
+                        }
+                        if run_command
+                            && let Err(error) = text_tx.try_send(Pending::new(message, gateway_rtt))
+                        {
+                            queue_text_busy(&text_busy_tx, error.into_inner());
                         }
                     }
                     Ok(Event::InteractionCreate(interaction))
@@ -291,12 +334,25 @@ impl Bot {
         // どのワーカーも Gateway 受信を待たせない。切断で終了したら保留中の処理も中止する。
         tokio::select! {
             () = receive => {},
-            () = handle_messages => {},
+            () = handle_events => {},
+            () = handle_text => {},
+            () = handle_text_busy => {},
             () = handle_interactions => {},
             () = handle_busy => {},
         }
 
         Err("Discord Gateway の接続が終了しました".into())
+    }
+}
+
+enum MessageEvent {
+    Ready(Box<Ready>),
+    Message(Pending<Arc<Message>>),
+}
+
+fn queue_text_busy(queue: &mpsc::Sender<Pending<Arc<Message>>>, pending: Pending<Arc<Message>>) {
+    if queue.try_send(pending).is_err() {
+        eprintln!("混雑応答のキューが満杯のためテキストコマンドに応答できませんでした");
     }
 }
 

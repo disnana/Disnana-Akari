@@ -57,13 +57,13 @@ async fn echo(ctx: &mut HybridContext<'_>) -> Result<()> {
 
 共通の関数は `&mut HybridContext<'_>` を受け取ります。`ctx.timing()` で測定値を読み取り、表示用の文字列に整形してから `ctx.reply(&response).await` で呼び出し元に返信します。`&response` は、表示用の文字列を返信関数へ一時的に貸しています。
 
-Playground の `latency` では、`ctx.source()` を `match` で分けて、`!latency` には 3 秒、`/latency` には 1 秒のクールダウンを適用します。`ctx.author_id()` が返すユーザー ID を `cooldown.check(user)` に渡すと、まだ実行できない場合に `Err(remaining)` が返ります。直後にもう片方の形式を試しても、待ち時間は共有されません。
+Playground の `latency` では、`ctx.source()` を `match` で分けて、`!latency` には 3 秒、`/latency` には 1 秒のクールダウンを適用します。`ctx.check_cooldown(cooldown).await?` は、まだ実行できない場合に残り時間を知らせて `false` を返します。`if !... { return Ok(()); }` で、その場合に返信を終えて関数から戻れます。スラッシュでは残り時間が本人にだけ表示されます。直後にもう片方の形式を試しても、待ち時間は共有されません。
 
 `Cooldown::new(...)` は登録時に一度だけ実行します。`async move |ctx| ...` は、登録した関数の中に作成済みのクールダウンを持たせる書き方です。`latency` 関数は `&Cooldown` でそれを借りるため、前回の記録を次回も使えます。[コマンドの実装](../examples/ping/commands.rs) · [API リファレンス](api.md#cooldown)
 
 ## 時間のかかるスラッシュコマンドに先に応答する
 
-スラッシュ専用のハンドラーには `&mut SlashContext<'_>` が渡ります。先に `defer_ephemeral` を呼ぶと、呼び出したユーザーだけに処理中の表示が出ます。調べ物が終わったら `reply` で表示を置き換え、別のメッセージも送りたい場合は `followup_ephemeral` を呼びます。
+スラッシュ専用のハンドラーには `&mut SlashContext<'_>` が渡ります。Discord の 3 秒の応答期限に間に合わない可能性がある処理では、ハンドラーの最初で `defer_ephemeral` を呼びます。呼び出したユーザーだけに処理中の表示が出ます。調べ物が終わったら `reply` で表示を置き換え、別のメッセージも送りたい場合は `followup_ephemeral` を呼びます。
 
 ```rust
 use disnana_akari::{Result, SlashContext};

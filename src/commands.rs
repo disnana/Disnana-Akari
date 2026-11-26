@@ -63,6 +63,20 @@ impl Commands {
         Ok(())
     }
 
+    pub(crate) fn matches_message(&self, content: &str) -> bool {
+        self.resolve(content).is_some()
+    }
+
+    pub(crate) async fn dispatch_with_feedback(&self, ctx: Context<'_>) {
+        if let Err(error) = self.dispatch(ctx).await {
+            eprintln!("テキストコマンドの処理に失敗しました ({error})");
+            if let Err(reply_error) = ctx.reply("コマンドを処理できませんでした。").await
+            {
+                eprintln!("テキストコマンドのエラー応答に失敗しました ({reply_error})");
+            }
+        }
+    }
+
     fn resolve<'a>(&self, content: &'a str) -> Option<(&dyn CommandHandler, &'a str)> {
         let input = content.strip_prefix(&self.prefix)?;
         let (name, args) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
@@ -146,6 +160,7 @@ mod tests {
         commands.register("echo", command)?;
 
         assert_eq!(commands.resolve("!ping").map(|(_, args)| args), Some(""));
+        assert!(commands.matches_message("!ping"));
         assert_eq!(
             commands
                 .resolve("!echo\t こんにちは  世界 ")
@@ -154,6 +169,7 @@ mod tests {
         );
         for input in ["ping", "!", "! ping", "!pinged", "!PING", "/ping"] {
             assert!(commands.resolve(input).is_none(), "{input}");
+            assert!(!commands.matches_message(input), "{input}");
         }
         Ok(())
     }
