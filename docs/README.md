@@ -17,9 +17,7 @@
 cargo doc --locked --no-deps --open
 ```
 
-## crates.io で公開する前に確認すること
+## リリース
 
-- `Cargo.toml` のパッケージ名、バージョン、説明、リポジトリなど、公開用メタデータを確認します。
-- ライセンスを決定し、ライセンス文書と `license` または `license-file` の設定を揃えます。
-- 変更履歴に最初のリリースの機能と互換性を記載します。
-- CI で整形、Clippy、テストを確認します。公開可否の設定を整えた後に `cargo package --list` と `cargo publish --dry-run` で配布ファイルとビルドを確認します。
+- [変更履歴](../CHANGELOG.md)
+- [crates.io へ公開する前の確認](releasing.md)

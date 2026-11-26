@@ -3,6 +3,12 @@ name = "disnana-akari"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
+description = "An asynchronous Discord bot framework built on Twilight."
+repository = "https://github.com/disnana/Disnana-Akari"
+readme = "README.md"
+keywords = ["discord", "bot", "twilight", "framework"]
+categories = ["api-bindings", "asynchronous"]
+include = ["/src/**", "/examples/**", "/docs/**", "/README.md", "/CHANGELOG.md", "/LICENSE*", "/NOTICE*"]
 publish = false
 
 [dependencies]

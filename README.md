@@ -23,3 +23,5 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 - [クイックスタートとローカルの実験用 Bot](docs/quickstart.md)
 - [Playground のコードを読む](docs/tutorial.md)
 - [API リファレンス](docs/api.md)
+- [変更履歴](CHANGELOG.md)
+- [公開前の確認](docs/releasing.md)
