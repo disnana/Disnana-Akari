@@ -1,5 +1,6 @@
 // use は、クレート（Rust のライブラリ）が公開している名前を、このファイルで使えるようにします。
 use disnana_akari::Result;
+use disnana_akari::model::gateway::Intents;
 
 // mod は、別ファイルに分けたコードをこのプログラムの一部として読み込みます。
 mod commands;
@@ -23,6 +24,12 @@ async fn main() -> Result<()> {
     } = config::load()?;
     let (text_commands, slash_commands) = commands::register(guild_id)?;
 
+    // Akari は Intent を自動では追加しません。テキストコマンドは、メッセージの本文を読むので、
+    // GUILD_MESSAGES と MESSAGE_CONTENT が必要です（MESSAGE_CONTENT は Developer Portal でも有効にします）。
+    let bot = bot.add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT);
+    // on_error は、ハンドラーのエラーや Gateway のエラーを一件ずつ受け取ります。
+    // 設定しない場合、Akari は同じ内容を標準エラー出力に書きます。
+    let bot = bot.on_error(|report| eprintln!("エラー: {report}"));
     // with_events はイベント登録を持たせた Bot を返します。
     let bot = bot.with_events(events::register()?);
     // Some は値があること、None は値がないことを表します。

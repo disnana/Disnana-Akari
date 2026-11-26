@@ -53,11 +53,13 @@ export default defineConfig({
       {
         text: 'ガイド',
         items: [
+          { text: 'Intent の設定', link: '/guide/intents' },
           { text: 'テキストコマンド', link: '/guide/text-commands' },
           { text: 'スラッシュコマンド', link: '/guide/slash-commands' },
           { text: 'ハイブリッドコマンド', link: '/guide/hybrid-commands' },
           { text: 'イベントを受け取る', link: '/guide/events' },
           { text: '応答のしかた', link: '/guide/responding' },
+          { text: 'エラーと自動で送る文言', link: '/guide/errors' },
           { text: 'Embed とボタン', link: '/guide/buttons' },
           { text: '選択メニュー', link: '/guide/select-menus' },
           { text: '入力フォーム（モーダル）', link: '/guide/modals' },

@@ -6,6 +6,7 @@
 
 ```rust
 use disnana_akari::model::channel::Message;
+use disnana_akari::model::gateway::Intents;
 use disnana_akari::{Bot, Events, Ready, Result};
 
 #[tokio::main(flavor = "current_thread")]
@@ -14,7 +15,11 @@ async fn main() -> Result<()> {
     events.on_ready(on_ready);
     events.on_message(on_message);
 
-    Bot::from_env()?.with_events(events).start().await
+    Bot::from_env()?
+        .add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT) // on_message に必要
+        .with_events(events)
+        .start()
+        .await
 }
 
 async fn on_ready(ready: &Ready) -> Result<()> {
@@ -36,21 +41,23 @@ async fn on_message(message: &Message) -> Result<()> {
 | `events.on_select(id, 関数)` ほか | [選択メニュー](select-menus.md)が操作されたとき |
 | `events.on_modal(id, 関数)` | [入力フォーム](modals.md)が送信されたとき |
 
-`on_ready` と `on_message` は、複数の関数を登録できます。登録した順に呼ばれ、1 つがエラーを返しても次へ進みます（エラーは標準エラー出力に記録されます）。
+`on_ready` と `on_message` は、複数の関数を登録できます。登録した順に呼ばれ、1 つがエラーを返しても次へ進みます（エラーは [`Bot::on_error`](errors.md) に報告されます）。
 
 > [!NOTE]
-> `on_message` を使うと、Akari は自動で `GUILD_MESSAGES` と `MESSAGE_CONTENT` の Intent を要求します。Developer Portal の **Message Content Intent** を有効にしてください。
+> `on_message` には、`GUILD_MESSAGES` と `MESSAGE_CONTENT` の Intent が必要です。Akari は自動では追加しないので、`add_intents` で指定してください（足りないときは、接続前にエラーになります）。Developer Portal の **Message Content Intent** も有効にします。[Intent の設定](intents.md)
 
 ## メッセージに返信したいとき
 
 `on_message` の関数は `&Message` だけを受け取るので、返信はできません。返信したいときは、`Bot::run` で `Context` を受け取ります。
 
 ```rust
+use disnana_akari::model::gateway::Intents;
 use disnana_akari::{Bot, Context, Result};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     Bot::from_env()?
+        .add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
         .run(async |ctx: Context<'_>| {
             if ctx.message().content == "こんにちは" {
                 ctx.reply("こんにちは！").await?;

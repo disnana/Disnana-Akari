@@ -4,7 +4,7 @@
 | --- | --- |
 | **Bot トークン** | Bot が Discord にログインするための秘密の文字列。パスワードと同じ扱いです。 |
 | **Gateway** | Discord が Bot にイベントを送ってくる常時接続。Akari が自動で管理します。 |
-| **Intent** | Bot が受け取りたいイベントの種類。必要なものだけ要求します。 |
+| **Intent** | Bot が受け取りたいイベントの種類。必要なものだけ、`add_intents` で指定します（Akari は自動では追加しません）。 |
 | **Message Content Intent** | メッセージの本文を読むための特別な Intent。Developer Portal で有効にします。 |
 | **ギルド（guild）** | Discord API での「サーバー」の呼び名。 |
 | **Interaction** | スラッシュコマンド、ボタン、選択メニュー、フォーム送信など、ユーザーの操作を表すイベント。3 秒以内の応答が必要です。 |

@@ -1,7 +1,8 @@
 use std::{collections::HashMap, future::Future, pin::Pin};
 
 use crate::{
-    Context, Result, Timing,
+    Context, ErrorSource, Result, Timing,
+    hooks::Hooks,
     ui::{ComponentsV2, UiMessage},
 };
 
@@ -70,14 +71,31 @@ impl Commands {
         self.resolve(content).is_some()
     }
 
-    pub(crate) async fn dispatch_with_feedback(&self, ctx: Context<'_>) {
-        if let Err(error) = self.dispatch(ctx).await {
-            eprintln!("テキストコマンドの処理に失敗しました ({error})");
-            if let Err(reply_error) = ctx.reply("コマンドを処理できませんでした。").await
-            {
-                eprintln!("テキストコマンドのエラー応答に失敗しました ({reply_error})");
-            }
+    /// コマンドを実行する。失敗はエラーの報告先へ渡し、文言が設定されていれば元の投稿へ返信する。
+    pub(crate) async fn dispatch_with_feedback(&self, ctx: Context<'_>, hooks: &Hooks) {
+        let Err(error) = self.dispatch(ctx).await else {
+            return;
+        };
+        let name = self.command_name(&ctx.message().content);
+        hooks
+            .reporter
+            .report(ErrorSource::TextCommand, name, &*error);
+        if let Some(text) = &hooks.messages.text_command_failed
+            && let Err(reply_error) = ctx.reply(text).await
+        {
+            hooks
+                .reporter
+                .report(ErrorSource::Response, name, &*reply_error);
         }
+    }
+
+    fn command_name<'a>(&self, content: &'a str) -> Option<&'a str> {
+        let input = content.strip_prefix(&self.prefix)?;
+        Some(
+            input
+                .split_once(char::is_whitespace)
+                .map_or(input, |(name, _)| name),
+        )
     }
 
     fn resolve<'a>(&self, content: &'a str) -> Option<(&dyn CommandHandler, &'a str)> {

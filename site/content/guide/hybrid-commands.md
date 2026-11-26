@@ -5,10 +5,11 @@
 ## 基本
 
 ```rust
+use disnana_akari::model::gateway::Intents;
+use disnana_akari::model::id::Id;
 use disnana_akari::{
     Bot, Commands, HybridContext, Result, SlashCommands, register_hybrid,
 };
-use disnana_akari::model::id::Id;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -25,6 +26,8 @@ async fn main() -> Result<()> {
     )?;
 
     Bot::from_env()?
+        // テキスト側（!echo）のために必要
+        .add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
         .with_slash_commands(slash)
         .run_commands(commands)
         .await

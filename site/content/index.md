@@ -30,10 +30,10 @@ features:
     details: 時間のかかる処理は defer で先に受け付け、終わってから結果を返せます。
     link: /guide/responding
     linkText: 応答のしかた
-  - title: 失敗時の挙動
-    details: コマンドがエラーを返しても、利用者には「処理できませんでした」と伝え、詳細は標準エラー出力に記録します。混雑時も応答します。
-    link: /guide/how-it-works
-    linkText: Akari の動き方
+  - title: 勝手なことをしない
+    details: 標準出力には何も書かず、Intent も自動では追加しません。ハンドラーのエラーは、Bot::on_error で一件ずつ受け取れます。
+    link: /guide/errors
+    linkText: エラーと自動で送る文言
 ---
 
 ## 最小の例

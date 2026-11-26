@@ -1,16 +1,17 @@
 use super::owner::{message_invoker, message_owner};
 use super::{
     ButtonContext, ButtonResponse, ComponentType, Id, Interaction, InteractionData,
-    InteractionHandlers, InteractionResponseType, InteractionType, MODAL_ACCEPTED, MODAL_FAILED,
-    Message, MessageComponentInteractionData, ModalContext, ModalInteractionComponent,
-    ModalInteractionData, ResponseState, Result, SelectContext, UiMessage, UpdateAction,
-    modal_fallback, submitted_text, update_response,
+    InteractionHandlers, InteractionResponseType, InteractionType, Message,
+    MessageComponentInteractionData, ModalContext, ModalInteractionComponent, ModalInteractionData,
+    ResponseState, Result, SelectContext, UiMessage, UpdateAction, modal_fallback, submitted_text,
+    update_response,
 };
 use super::{
     ChannelMarker, ChannelSelectContext, RoleMarker, RoleSelectContext, UserMarker,
     UserSelectContext, parse_entity_ids,
 };
 use super::{InteractionDataResolved, Mentionable, MentionableSelectContext, parse_mentionables};
+use crate::Messages;
 use crate::ui::{Button, Embed};
 use twilight_model::{
     application::interaction::{
@@ -331,24 +332,60 @@ fn invoker_comes_from_supported_message_metadata() {
 
 #[test]
 fn modal_fallback_respects_outcome_and_visibility() {
+    let messages = Messages::default();
+    let accepted = messages.modal_accepted.as_deref().unwrap();
+    let failed = messages.modal_failed.as_deref().unwrap();
     assert_eq!(
-        modal_fallback(ResponseState::Pending, true),
-        Some((MODAL_ACCEPTED, true))
+        modal_fallback(ResponseState::Pending, true, &messages),
+        Some((accepted, true))
     );
     assert_eq!(
-        modal_fallback(ResponseState::Pending, false),
-        Some((MODAL_FAILED, true))
+        modal_fallback(ResponseState::Pending, false, &messages),
+        Some((failed, true))
     );
     for ephemeral in [false, true] {
         let deferred = ResponseState::Deferred { ephemeral };
         assert_eq!(
-            modal_fallback(deferred, true),
-            Some((MODAL_ACCEPTED, false))
+            modal_fallback(deferred, true, &messages),
+            Some((accepted, false))
         );
-        assert_eq!(modal_fallback(deferred, false), Some((MODAL_FAILED, false)));
+        assert_eq!(
+            modal_fallback(deferred, false, &messages),
+            Some((failed, false))
+        );
     }
-    assert_eq!(modal_fallback(ResponseState::Replied, true), None);
-    assert_eq!(modal_fallback(ResponseState::Replied, false), None);
+    assert_eq!(
+        modal_fallback(ResponseState::Replied, true, &messages),
+        None
+    );
+    assert_eq!(
+        modal_fallback(ResponseState::Replied, false, &messages),
+        None
+    );
+}
+
+#[test]
+fn modal_fallback_sends_nothing_when_the_message_is_disabled() {
+    let mut messages = Messages {
+        modal_accepted: None,
+        modal_failed: None,
+        ..Messages::default()
+    };
+    for succeeded in [true, false] {
+        assert_eq!(
+            modal_fallback(ResponseState::Pending, succeeded, &messages),
+            None
+        );
+    }
+    messages.modal_accepted = Some("受け取りました".to_owned());
+    assert_eq!(
+        modal_fallback(ResponseState::Pending, true, &messages),
+        Some(("受け取りました", true))
+    );
+    assert_eq!(
+        modal_fallback(ResponseState::Pending, false, &messages),
+        None
+    );
 }
 
 #[test]

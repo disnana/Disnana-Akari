@@ -36,20 +36,8 @@ async fn channel_name(ctx: CommandContext<'_>) -> Result<()> {
 
 `disnana_akari::http` は `twilight_http` の再エクスポートです。
 
-## Intent を調整する
+## Intent と暗号プロバイダー
 
-Akari は、使う機能に合わせて Gateway Intent を自動で選びます。テキストコマンドやメッセージのハンドラーを使うと `GUILD_MESSAGES` と `MESSAGE_CONTENT` を要求し、スラッシュコマンドとボタンだけなら、どちらも要求しません。
+Intent の指定は、[Intent の設定](intents.md) を参照してください。Akari は Intent を自動では追加しません。
 
-足したい Intent があるときは `add_intents`、完全に置き換えたいときは `with_intents` を使います。
-
-```rust
-use disnana_akari::model::gateway::Intents;
-use disnana_akari::{Bot, Result};
-
-fn build() -> Result<Bot> {
-    Ok(Bot::from_env()?.add_intents(Intents::GUILD_MEMBERS))
-}
-```
-
-> [!WARNING]
-> `with_intents` で置き換えるときは、テキストコマンドを使うなら `GUILD_MESSAGES` と `MESSAGE_CONTENT` を **自分で含めてください**。含めないと、コマンドに反応しなくなります。
+Akari は、プロセス全体の暗号プロバイダー（`rustls` の `CryptoProvider`）を登録しません。`rustls` が最初の使用時に自動で選びます。アプリで別のプロバイダー（`aws-lc-rs` など）も有効にする場合は、起動前に、アプリ側で `CryptoProvider::install_default` を呼んでください。

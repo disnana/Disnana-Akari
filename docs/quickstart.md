@@ -28,7 +28,7 @@ RustRover でリポジトリのルートを開き、上部の実行構成で **A
 cargo run --locked --manifest-path playground/Cargo.toml --target-dir target
 ```
 
-`Discord に接続しました` と表示されたら、テスト用サーバーのチャンネルで確認します。
+`（Bot 名） として Discord に接続しました` と表示されたら、テスト用サーバーのチャンネルで確認します。この表示は、サンプルが `on_ready` に書いたものです。Akari 自身は、接続しても何も表示しません。
 
 | Discord での操作 | 返信 |
 | --- | --- |
@@ -71,7 +71,7 @@ export DISCORD_TOKEN
 cargo run --locked --example ping
 ```
 
-`Discord に接続しました` と表示されたら、サーバーのチャンネルで `!ping` を送ります。Bot が元のメッセージに `Pong!` と返信します。終了は `Ctrl+C` です。
+`（Bot 名） として Discord に接続しました` と表示されたら、サーバーのチャンネルで `!ping` を送ります。Bot が元のメッセージに `Pong!` と返信します。終了は `Ctrl+C` です。
 
 ## Git 管理外で自分のコードを書く
 
