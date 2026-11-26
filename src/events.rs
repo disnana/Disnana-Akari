@@ -5,8 +5,9 @@ use twilight_model::channel::Message;
 pub use twilight_model::gateway::payload::incoming::Ready;
 
 use crate::{
-    ButtonContext, ChannelSelectContext, MentionableSelectContext, ModalContext, Result,
-    RoleSelectContext, SelectContext, UserSelectContext, interactions::InteractionHandlers,
+    ButtonContext, ChannelSelectContext, ErrorSource, MentionableSelectContext, ModalContext,
+    Result, RoleSelectContext, SelectContext, UserSelectContext, hooks::Reporter,
+    interactions::InteractionHandlers,
 };
 
 /// Gateway イベントごとに非同期ハンドラーを登録します。
@@ -134,19 +135,24 @@ impl Events {
         !self.message.is_empty()
     }
 
-    pub(crate) async fn ready(&self, event: &Ready) {
-        dispatch(&self.ready, event, "READY").await;
+    pub(crate) async fn ready(&self, event: &Ready, reporter: &Reporter) {
+        dispatch(&self.ready, event, "READY", reporter).await;
     }
 
-    pub(crate) async fn message(&self, event: &Message) {
-        dispatch(&self.message, event, "MESSAGE_CREATE").await;
+    pub(crate) async fn message(&self, event: &Message, reporter: &Reporter) {
+        dispatch(&self.message, event, "MESSAGE_CREATE", reporter).await;
     }
 }
 
-async fn dispatch<T>(handlers: &[Box<dyn Handler<T>>], event: &T, event_name: &str) {
+async fn dispatch<T>(
+    handlers: &[Box<dyn Handler<T>>],
+    event: &T,
+    event_name: &str,
+    reporter: &Reporter,
+) {
     for handler in handlers {
         if let Err(error) = handler.call(event).await {
-            eprintln!("イベント {event_name} の処理に失敗しました ({error})");
+            reporter.report(ErrorSource::Event, Some(event_name), &*error);
         }
     }
 }
@@ -169,6 +175,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{Handler, dispatch};
+    use crate::hooks::Reporter;
 
     #[tokio::test]
     async fn keeps_registration_order_after_a_handler_error() {
@@ -185,7 +192,7 @@ mod tests {
                 Ok(())
             }),
         ];
-        dispatch(&handlers, &10, "TEST").await;
+        dispatch(&handlers, &10, "TEST", &Reporter::default()).await;
         assert_eq!(*observed.lock().unwrap(), vec![10, 11]);
     }
 }

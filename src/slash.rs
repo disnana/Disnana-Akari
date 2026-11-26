@@ -23,11 +23,10 @@ use twilight_model::{
 use twilight_validate::command;
 
 use crate::{
-    Result, Timing,
+    ErrorSource, Result, Timing,
+    hooks::Hooks,
     ui::{ComponentsV2, Modal, UiMessage},
 };
-
-const COMMAND_FAILED: &str = "コマンドを処理できませんでした。";
 
 /// 一つのサーバーに登録するスラッシュコマンド一覧です。
 pub struct SlashCommands {
@@ -234,21 +233,27 @@ impl ActiveSlashCommands {
         (data.kind == CommandType::ChatInput && in_scope).then_some(data)
     }
 
-    pub(crate) async fn dispatch(&self, http: &Client, interaction: &Interaction, timing: Timing) {
+    pub(crate) async fn dispatch(
+        &self,
+        http: &Client,
+        interaction: &Interaction,
+        timing: Timing,
+        hooks: &Hooks,
+    ) {
         let Some(data) = self.command_data(interaction) else {
             return;
         };
+        let name = Some(data.name.as_str());
         let Some(handler) = self.handlers.get(&data.id) else {
-            if send_initial_message(
-                http,
-                interaction,
-                "このコマンドは現在利用できません。",
-                true,
-            )
-            .await
-            .is_err()
+            hooks.reporter.report_text(
+                ErrorSource::SlashCommand,
+                name,
+                "Akari に登録されていないスラッシュコマンドが実行されました",
+            );
+            if let Some(text) = &hooks.messages.slash_command_unavailable
+                && let Err(error) = send_initial_message(http, interaction, text, true).await
             {
-                eprintln!("未登録スラッシュコマンドへの応答に失敗しました");
+                hooks.reporter.report(ErrorSource::Response, name, &*error);
             }
             return;
         };
@@ -262,18 +267,21 @@ impl ActiveSlashCommands {
             timing,
         };
         if let Err(error) = handler.call(&mut ctx).await {
-            eprintln!(
-                "スラッシュコマンド `/{}` の処理に失敗しました ({error})",
-                data.name
-            );
+            hooks
+                .reporter
+                .report(ErrorSource::SlashCommand, name, &*error);
         }
+        // 応答が済んでいない（エラー、または応答の忘れ）ときは、文言が設定されていれば知らせる。
+        let Some(text) = &hooks.messages.slash_command_failed else {
+            return;
+        };
         let fallback = match *ctx.response_state {
-            ResponseState::Pending => ctx.reply_ephemeral(COMMAND_FAILED).await,
-            ResponseState::Deferred { .. } => ctx.reply(COMMAND_FAILED).await,
+            ResponseState::Pending => ctx.reply_ephemeral(text).await,
+            ResponseState::Deferred { .. } => ctx.reply(text).await,
             ResponseState::Replied | ResponseState::ModalOpened => Ok(()),
         };
-        if fallback.is_err() {
-            eprintln!("スラッシュコマンドのエラー応答に失敗しました");
+        if let Err(error) = fallback {
+            hooks.reporter.report(ErrorSource::Response, name, &*error);
         }
     }
 }

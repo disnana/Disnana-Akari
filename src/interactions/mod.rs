@@ -25,18 +25,14 @@ use twilight_model::{
 mod owner;
 
 use crate::{
-    Result, Timing,
+    ErrorSource, Messages, Result, Timing,
+    hooks::Hooks,
     slash::{
         ResponseState, edit_ui_response, edit_v2_response, send_followup_message,
         send_initial_message, v2_update_response,
     },
     ui::{ComponentsV2, Modal, UiMessage},
 };
-
-const BUTTON_FAILED: &str = "ボタンを処理できませんでした。";
-const SELECT_FAILED: &str = "選択内容を処理できませんでした。";
-const MODAL_FAILED: &str = "入力内容を処理できませんでした。";
-const MODAL_ACCEPTED: &str = "入力を受け付けました。";
 
 #[derive(Default)]
 pub(crate) struct InteractionHandlers {
@@ -153,7 +149,13 @@ impl InteractionHandlers {
         }
     }
 
-    pub(crate) async fn dispatch(&self, http: &Client, interaction: &Interaction, timing: Timing) {
+    pub(crate) async fn dispatch(
+        &self,
+        http: &Client,
+        interaction: &Interaction,
+        timing: Timing,
+        hooks: &Hooks,
+    ) {
         match ui_input(interaction) {
             Some(UiInput::Button(id)) => {
                 let Some(handler) = self.buttons.get(id) else {
@@ -161,7 +163,14 @@ impl InteractionHandlers {
                 };
                 let mut ctx = ButtonContext::new(http, interaction, id, timing);
                 let result = handler.call(&mut ctx).await;
-                finish_component(&mut ctx, result, "ボタン", BUTTON_FAILED).await;
+                finish_component(
+                    &mut ctx,
+                    result,
+                    ErrorSource::Button,
+                    &hooks.messages.button_failed,
+                    hooks,
+                )
+                .await;
             }
             Some(UiInput::Select(data)) => {
                 let Some(handler) = self.selects.get(&data.custom_id) else {
@@ -172,16 +181,31 @@ impl InteractionHandlers {
                     values: &data.values,
                 };
                 let result = handler.call(&mut ctx).await;
-                finish_component(&mut ctx.inner, result, "セレクト", SELECT_FAILED).await;
+                finish_component(
+                    &mut ctx.inner,
+                    result,
+                    ErrorSource::Select,
+                    &hooks.messages.select_failed,
+                    hooks,
+                )
+                .await;
             }
             Some(UiInput::UserSelect(data)) => {
-                dispatch_entity(&self.user_selects, http, interaction, data, timing).await;
+                dispatch_entity(&self.user_selects, http, interaction, data, timing, hooks).await;
             }
             Some(UiInput::RoleSelect(data)) => {
-                dispatch_entity(&self.role_selects, http, interaction, data, timing).await;
+                dispatch_entity(&self.role_selects, http, interaction, data, timing, hooks).await;
             }
             Some(UiInput::ChannelSelect(data)) => {
-                dispatch_entity(&self.channel_selects, http, interaction, data, timing).await;
+                dispatch_entity(
+                    &self.channel_selects,
+                    http,
+                    interaction,
+                    data,
+                    timing,
+                    hooks,
+                )
+                .await;
             }
             Some(UiInput::MentionableSelect(data)) => {
                 let Some(handler) = self.mentionable_selects.get(&data.custom_id) else {
@@ -190,7 +214,7 @@ impl InteractionHandlers {
                 let mut inner = ButtonContext::new(http, interaction, &data.custom_id, timing);
                 let resolved = data.resolved.as_ref();
                 let Ok(values) = parse_mentionables(&data.values, resolved) else {
-                    reject_selection(&mut inner).await;
+                    reject_selection(&mut inner, hooks).await;
                     return;
                 };
                 let mut ctx = MentionableSelectContext {
@@ -202,8 +226,9 @@ impl InteractionHandlers {
                 finish_component(
                     &mut ctx.inner,
                     result,
-                    "メンショナブルセレクト",
-                    SELECT_FAILED,
+                    ErrorSource::Select,
+                    &hooks.messages.select_failed,
+                    hooks,
                 )
                 .await;
             }
@@ -219,17 +244,18 @@ impl InteractionHandlers {
                     response: ResponseState::Pending,
                 };
                 let result = handler.call(&mut ctx).await;
+                let name = Some(data.custom_id.as_str());
                 if let Err(error) = &result {
-                    eprintln!("モーダルの処理に失敗しました ({error})");
+                    hooks.reporter.report(ErrorSource::Modal, name, &**error);
                 }
-                if let Some((content, ephemeral)) = modal_fallback(ctx.response, result.is_ok())
-                    && ctx
+                if let Some((content, ephemeral)) =
+                    modal_fallback(ctx.response, result.is_ok(), &hooks.messages)
+                    && let Err(error) = ctx
                         .response
                         .reply(http, interaction, content, ephemeral)
                         .await
-                        .is_err()
                 {
-                    eprintln!("モーダルの自動応答に失敗しました");
+                    hooks.reporter.report(ErrorSource::Response, name, &*error);
                 }
             }
             None => {}
@@ -243,13 +269,14 @@ async fn dispatch_entity<M>(
     interaction: &Interaction,
     data: &MessageComponentInteractionData,
     timing: Timing,
+    hooks: &Hooks,
 ) {
     let Some(handler) = handlers.get(&data.custom_id) else {
         return;
     };
     let mut inner = ButtonContext::new(http, interaction, &data.custom_id, timing);
     let Ok(values) = parse_entity_ids(&data.values) else {
-        reject_selection(&mut inner).await;
+        reject_selection(&mut inner, hooks).await;
         return;
     };
     let mut ctx = EntitySelectContext {
@@ -258,12 +285,28 @@ async fn dispatch_entity<M>(
         resolved: data.resolved.as_ref(),
     };
     let result = handler.call(&mut ctx).await;
-    finish_component(&mut ctx.inner, result, "セレクト", SELECT_FAILED).await;
+    finish_component(
+        &mut ctx.inner,
+        result,
+        ErrorSource::Select,
+        &hooks.messages.select_failed,
+        hooks,
+    )
+    .await;
 }
 
-async fn reject_selection(ctx: &mut ButtonContext<'_>) {
-    if ctx.reply_ephemeral(SELECT_FAILED).await.is_err() {
-        eprintln!("セレクトのエラー応答に失敗しました");
+/// 選択内容を読み取れなかったことを報告し、文言が設定されていれば本人にだけ知らせる。
+async fn reject_selection(ctx: &mut ButtonContext<'_>, hooks: &Hooks) {
+    let name = Some(ctx.custom_id());
+    hooks.reporter.report_text(
+        ErrorSource::Select,
+        name,
+        "Discord が送った選択内容を読み取れませんでした",
+    );
+    if let Some(text) = &hooks.messages.select_failed
+        && let Err(error) = ctx.reply_ephemeral(text).await
+    {
+        hooks.reporter.report(ErrorSource::Response, name, &*error);
     }
 }
 
@@ -308,11 +351,16 @@ fn parse_mentionables(
     })
 }
 
-fn modal_fallback(state: ResponseState, succeeded: bool) -> Option<(&'static str, bool)> {
+/// 入力フォームの関数が応答しなかったときに、自動で送る文言と、本人にだけ見せるかどうか。
+fn modal_fallback(
+    state: ResponseState,
+    succeeded: bool,
+    messages: &Messages,
+) -> Option<(&str, bool)> {
     let content = if succeeded {
-        MODAL_ACCEPTED
+        messages.modal_accepted.as_deref()?
     } else {
-        MODAL_FAILED
+        messages.modal_failed.as_deref()?
     };
     match state {
         ResponseState::Pending => Some((content, true)),
@@ -339,24 +387,39 @@ fn register_handler<T: ?Sized>(
     }
 }
 
+/// ボタンや選択メニューの関数の結果を処理する。
+///
+/// 失敗はエラーの報告先へ渡し、文言が設定されていれば本人にだけ知らせる。
+/// 成功して応答がなければ、メッセージを出さずに操作を受け付ける。
 async fn finish_component(
     ctx: &mut ButtonContext<'_>,
     result: Result<()>,
-    label: &str,
-    failure: &str,
+    source: ErrorSource,
+    failure: &Option<String>,
+    hooks: &Hooks,
 ) {
-    if let Err(error) = result {
-        eprintln!("{label}の処理に失敗しました ({error})");
-        let fallback = match ctx.response {
-            ButtonResponse::Pending => ctx.reply_ephemeral(failure).await,
-            ButtonResponse::DeferredUpdate => ctx.followup_ephemeral(failure).await,
-            ButtonResponse::Sent => Ok(()),
-        };
-        if fallback.is_err() {
-            eprintln!("{label}のエラー応答に失敗しました");
+    let name = Some(ctx.custom_id());
+    match result {
+        Err(error) => {
+            hooks.reporter.report(source, name, &*error);
+            let Some(text) = failure else {
+                return;
+            };
+            let fallback = match ctx.response {
+                ButtonResponse::Pending => ctx.reply_ephemeral(text).await,
+                ButtonResponse::DeferredUpdate => ctx.followup_ephemeral(text).await,
+                ButtonResponse::Sent => Ok(()),
+            };
+            if let Err(error) = fallback {
+                hooks.reporter.report(ErrorSource::Response, name, &*error);
+            }
         }
-    } else if ctx.response == ButtonResponse::Pending && ctx.acknowledge().await.is_err() {
-        eprintln!("{label}の確認応答に失敗しました");
+        Ok(()) if ctx.response == ButtonResponse::Pending => {
+            if let Err(error) = ctx.acknowledge().await {
+                hooks.reporter.report(ErrorSource::Response, name, &*error);
+            }
+        }
+        Ok(()) => {}
     }
 }
 

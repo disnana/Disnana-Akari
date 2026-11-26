@@ -6,7 +6,8 @@
 | --- | --- |
 | `DISCORD_TOKEN に Discord Bot トークンを設定してください` | `cargo run` と同じターミナルで、環境変数 `DISCORD_TOKEN` を設定したか確認します。[手順](../getting-started/discord-setup.md#トークンを渡す) |
 | Gateway がコード `4004` で閉じる | トークンが正しいか確認します。**Reset Token** で作り直した場合は、環境変数も更新します。 |
-| Gateway がコード `4014` で閉じる | Developer Portal で **Message Content Intent** を有効にしたか確認します。 |
+| 起動時に「Intent … が必要です」と出る | テキストコマンドやメッセージのハンドラーには、`GUILD_MESSAGES` と `MESSAGE_CONTENT` が必要です。`add_intents` で追加します。[Intent の設定](../guide/intents.md) |
+| Gateway がコード `4014` で閉じる | Developer Portal で **Message Content Intent** を有効にしたか確認します。理由は `Bot::on_error` に報告されます。 |
 | スラッシュコマンドを登録できない | Bot を、そのサーバーに `applications.commands` スコープ付きで招待したか、サーバー ID が正しいか確認します。 |
 
 ## 反応しない
@@ -25,7 +26,8 @@
 | --- | --- |
 | 「アプリケーションが応答しませんでした」と出る | 3 秒以内に最初の応答を送れていません。時間のかかる処理の前に `ctx.defer().await?` を呼びます。[応答のしかた](../guide/responding.md) |
 | 「現在混雑しています」と返る | 同時に処理できる数か、待てる数がいっぱいです。少し待って、もう一度試します。[Akari の動き方](../guide/how-it-works.md) |
-| 「コマンドを処理できませんでした。」と返る | コマンドが `Err` を返したか、スラッシュコマンドが何も返信せずに終わりました。詳細は標準エラー出力に出ます。 |
+| 「コマンドを処理できませんでした。」と返る | スラッシュコマンドが `Err` を返したか、何も返信せずに終わりました。詳細は `Bot::on_error` に報告されます（未設定なら標準エラー出力）。 |
+| テキストコマンドが失敗しても、何も返信されない | 既定では返信しません。エラーは `Bot::on_error` に報告されます。返信したいときは `Messages::text_command_failed` を設定します。[エラーと自動で送る文言](../guide/errors.md) |
 | `reply_ephemeral` がエラーになる | 公開の `defer` のあとは、本人にだけ見せる応答に変えられません。最初から `defer_ephemeral` を使います。 |
 
 ## よくある質問

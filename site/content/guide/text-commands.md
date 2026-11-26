@@ -3,11 +3,12 @@
 `!ping` のように、メッセージの先頭にプレフィックスを付けて呼び出すコマンドです。
 
 > [!NOTE]
-> テキストコマンドは、メッセージの本文を読む必要があります。Developer Portal で **Message Content Intent** を有効にしてください（[手順](../getting-started/discord-setup.md#_3-message-content-intent-を有効にする)）。
+> テキストコマンドは、メッセージの本文を読む必要があります。Developer Portal で **Message Content Intent** を有効にし、コードでは `GUILD_MESSAGES` と `MESSAGE_CONTENT` を `add_intents` で指定してください（[手順](../getting-started/discord-setup.md#_3-message-content-intent-を有効にする)、[Intent の設定](intents.md)）。
 
 ## 基本
 
 ```rust
+use disnana_akari::model::gateway::Intents;
 use disnana_akari::{Bot, CommandContext, Commands, Result};
 
 #[tokio::main(flavor = "current_thread")]
@@ -15,7 +16,10 @@ async fn main() -> Result<()> {
     let mut commands = Commands::new("!")?;
     commands.register("ping", ping)?;
     commands.register("hello", hello)?;
-    Bot::from_env()?.run_commands(commands).await
+    Bot::from_env()?
+        .add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
+        .run_commands(commands)
+        .await
 }
 
 async fn ping(ctx: CommandContext<'_>) -> Result<()> {
@@ -111,7 +115,7 @@ fn register(commands: &mut Commands) -> Result<()> {
 
 ## エラーが起きたとき
 
-コマンド関数が `Err` を返すと、Akari は元のメッセージに「コマンドを処理できませんでした。」と返信し、エラーの詳細を標準エラー出力に記録します。利用者に見せたい説明は、`Err` を返さず、自分で返信してください。
+コマンド関数が `Err` を返すと、Akari はエラーを `Bot::on_error` に報告します（設定していなければ、標準エラー出力に書きます）。元のメッセージへの返信は、既定では **しません**。返信したいときは、`Messages::text_command_failed` に文言を設定します（[エラーと自動で送る文言](errors.md)）。利用者に見せたい説明は、`Err` を返さず、自分で返信するのが確実です。
 
 ## 次のステップ
 

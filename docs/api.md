@@ -8,15 +8,40 @@
 | `Bot::from_env() -> Result<Bot>` | 環境変数 `DISCORD_TOKEN` から Bot を作ります。 |
 | `bot.with_events(events) -> Bot` | Gateway イベントに応じて呼び出す関数の一覧を設定します。 |
 | `bot.with_slash_commands(commands) -> Bot` | スラッシュコマンドを指定サーバーで有効にします。 |
-| `bot.with_intents(intents) -> Bot` | 自動で選ぶ Gateway Intent を、渡された `Intents` の集合で置き換えます。 |
-| `bot.add_intents(intents) -> Bot` | 自動で選ぶ集合または `with_intents` で指定した集合に、渡された `Intents` を追加します。 |
+| `bot.with_intents(intents) -> Bot` | 要求する Gateway Intent を、渡された `Intents` の集合にします。既定は空です。 |
+| `bot.add_intents(intents) -> Bot` | 要求する Intent に、渡された `Intents` を追加します。 |
+| `bot.intents() -> Intents` | 起動時に Discord へ要求する Intent を返します。 |
+| `bot.on_error(hook) -> Bot` | エラーを一件ずつ受け取る関数を設定します。[エラーと自動で送る文言](#エラーと自動で送る文言) |
+| `bot.with_messages(messages) -> Bot` | Akari が利用者へ自動で送る文言を設定します。 |
 | `bot.start().await -> Result<()>` | 設定したイベントとスラッシュコマンドで Bot を起動します。 |
 | `bot.run_commands(commands).await -> Result<()>` | 上記に加えて、テキストコマンドを実行します。 |
 | `bot.run(on_message).await -> Result<()>` | テキストコマンドの代わりに、受信メッセージを自前の `async fn on_message(ctx: Context<'_>) -> Result<()>` で処理します。 |
 
-起動メソッドは Tokio ランタイム内で呼び出します。テキストコマンドやメッセージハンドラーを使う場合は、自動で `GUILD_MESSAGES` と `MESSAGE_CONTENT` を要求します。スラッシュコマンド、ボタン操作、`on_ready` だけを使う場合、この二つの Intent は不要です。
+起動メソッドは Tokio ランタイム内で呼び出します。
 
-`with_intents` を使う場合、テキストコマンドには `GUILD_MESSAGES` と `MESSAGE_CONTENT` を明示的に含めます。自動で選ぶ Intent に別のビットを足すときは `add_intents` を使います。両方を指定した場合は、呼ぶ順序に関係なく `with_intents` で最後に指定した集合に、`add_intents` の集合が加わります。`Intents` は `disnana_akari::model::gateway::Intents` から参照できます。
+### Intent
+
+Akari は Intent を **自動では追加しません**。要求する Intent は、`with_intents` と `add_intents` で指定したものだけです。`with_intents` で基本の集合を決め、`add_intents` で足します。両方を指定した場合は、呼ぶ順序に関係なく和集合になります。`Intents` は `disnana_akari::model::gateway::Intents` から参照できます。
+
+- テキストコマンド、`Events::on_message`、`Bot::run` のメッセージ処理を使うには、`GUILD_MESSAGES` と `MESSAGE_CONTENT` が必要です。足りない場合は、Discord に接続する前に、足りない Intent と対処を示すエラーを返します。
+- `MESSAGE_CONTENT` は特権 Intent です。Developer Portal の Bot ページでも有効にします。許可されていないと、Gateway がコード `4014` で接続を閉じます。このときの理由は、`on_error` に報告します。
+- スラッシュコマンド、ボタンや選択メニューの操作、フォーム、`on_ready` だけを使う場合は、Intent は不要です。
+
+```rust,no_run
+use disnana_akari::model::gateway::Intents;
+use disnana_akari::{Bot, Commands, Result};
+
+async fn run(commands: Commands) -> Result<()> {
+    Bot::from_env()?
+        .add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
+        .run_commands(commands)
+        .await
+}
+```
+
+### TLS（暗号プロバイダー）
+
+Akari はプロセス全体の暗号プロバイダー（`rustls` の `CryptoProvider`）を登録しません。依存の `rustls` は `ring` だけを有効にしているので、`rustls` が最初の使用時に自動で選びます。アプリで別のプロバイダー（`aws-lc-rs` など）も有効にする場合は、起動前に、アプリ側で `CryptoProvider::install_default` を呼んでください。
 
 Bot と Webhook が送ったメッセージは除外します。復旧可能な Gateway の切断は Twilight が処理し、イベントストリームの終了やスラッシュコマンドの登録失敗は起動メソッドからエラーとして返ります。
 
@@ -26,13 +51,13 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 
 | 処理 | 同時実行枠 | 受信キュー | 混雑時 |
 | --- | --- | --- | --- |
-| `Bot::run_commands` のテキストコマンド | 8 件 | 64 件 | メンション通知を抑止した返信を試みます。 |
-| スラッシュコマンドと登録済みのボタン、選択メニュー、フォーム送信 | 合計 8 件 | 合計 64 件 | 本人にだけ見える返信を試みます。 |
-| `on_ready`、`on_message` と `Bot::run` の自前ハンドラー | 1 件 | 64 件 | 新しく届いたイベントを破棄し、標準エラー出力に記録します。 |
+| `Bot::run_commands` のテキストコマンド | 8 件 | 64 件 | `on_error` に報告します。`Messages::text_command_busy` を設定した場合だけ、元の投稿に返信します。 |
+| スラッシュコマンドと登録済みのボタン、選択メニュー、フォーム送信 | 合計 8 件 | 合計 64 件 | `on_error` に報告し、`Messages::interaction_busy`（既定あり）を本人にだけ返します。 |
+| `on_ready`、`on_message` と `Bot::run` の自前ハンドラー | 1 件 | 64 件 | 新しく届いたイベントを破棄し、`on_error` に報告します。 |
 
 テキストコマンド用のキューには、登録名に一致したメッセージだけが入ります。`on_ready` と `on_message` は受信順に処理し、一件のイベントに対する関数は登録順に呼びます。フォーム送信を含むコンポーネント操作は、スラッシュコマンドと同じ枠で並行して処理します。`Bot::run` の自前ハンドラーは、そのメッセージに対する `Events::on_message` より先に実行します。`Bot::run_commands` のコマンドと `on_message` は独立して進むため、どちらが先に完了するかは処理時間によって変わります。
 
-混雑時の返信には、テキストとスラッシュ・ボタンで別々の処理枠を使います。それぞれ同時に 8 件、キューは 64 件までです。混雑返信用のキューが満杯の場合や返信に失敗した場合は、標準エラー出力に記録します。Gateway のイベントストリームが終わると、処理中と保留中のイベントも中止します。
+混雑の返信には、テキストとスラッシュ・ボタンで別々の処理枠を使います。それぞれ同時に 8 件、キューは 64 件までです。混雑の返信用のキューが満杯の場合や、返信に失敗した場合も、`on_error` に報告します。Gateway のイベントストリームが終わると、処理中と保留中のイベントも中止します。
 
 ハンドラーが I/O の完了を `.await` している間は Gateway の受信を続けられます。同期 I/O や長い計算は、同じタスク内の他の処理も止めるため、Tokio の `spawn_blocking` などで切り分けます。
 
@@ -52,7 +77,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 
 名前は大文字と小文字を区別します。最初の空白までがコマンド名です。`! ping` のようにプレフィックスの直後が空白の投稿、未登録の名前、通常の投稿は無視されます。
 
-`Bot::run_commands` で登録済みのコマンドの実行に失敗した場合は、元の投稿に「コマンドを処理できませんでした。」と返信を試み、エラーの詳細を標準エラー出力に記録します。`commands.dispatch` を直接使う場合は、呼び出し元でエラーを受け取って返信やログを扱います。
+`Bot::run_commands` で登録済みのコマンドの実行に失敗した場合は、エラーを `on_error` に報告します。元の投稿への返信は、既定では **しません**。返信したい場合は `Messages::text_command_failed` に文言を設定します。`commands.dispatch` を直接使う場合は、呼び出し元でエラーを受け取って返信やログを扱います。
 
 ## `SlashCommands` と `SlashContext<'_>`
 
@@ -81,7 +106,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 
 ### サーバーに登録するコマンドを同期する
 
-既定の起動では、同名のスラッシュコマンドを追加または更新し、ほかの既存コマンドを保持します。Akari に登録していないサーバー限定のスラッシュコマンドを受信した場合は、本人にだけ「このコマンドは現在利用できません。」と返します。
+既定の起動では、同名のスラッシュコマンドを追加または更新し、ほかの既存コマンドを保持します。Akari に登録していないサーバー限定のスラッシュコマンドを受信した場合は、`on_error` に報告し、`Messages::slash_command_unavailable`（既定は「このコマンドは現在利用できません。」）を本人にだけ返します。
 
 `replace_guild_commands()` を指定すると、登録一覧に含まれないコマンドが対象サーバーから削除されます。削除の範囲は同じアプリ・同じサーバーの全アプリケーションコマンドで、ユーザーやメッセージを右クリックして実行するコマンドも対象です。空の一覧で一括同期すると対象の全コマンドが削除されます。[Discord のサーバー単位の一括上書き](https://docs.discord.com/developers/interactions/application-commands#bulk-overwrite-guild-application-commands)
 
@@ -146,7 +171,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `events.on_mentionable_select(custom_id, handler) -> Result<()>` | ユーザーとロールを候補に持つメニューの選択時に `&mut MentionableSelectContext<'_>` を渡します。 |
 | `events.on_modal(custom_id, handler) -> Result<()>` | 指定した識別子のフォームが送信されたときに `&mut ModalContext<'_>` を渡します。 |
 
-`on_ready` と `on_message` には複数の関数を登録できます。各関数が返したエラーは標準エラー出力に記録され、次のハンドラーへ進みます。コマンドとイベントの順序は [ハンドラーの実行順](#ハンドラーの実行順) を参照してください。
+`on_ready` と `on_message` には複数の関数を登録できます。各関数が返したエラーは `on_error` に報告され、次のハンドラーへ進みます。コマンドとイベントの順序は [ハンドラーの実行順](#ハンドラーの実行順) を参照してください。
 
 ## `UiMessage` と `ButtonContext<'_>`
 
@@ -264,7 +289,7 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 | `ctx.followup(content).await -> Result<()>` | 最初の本文を送った後、チャンネルに追加のメッセージを送ります。 |
 | `ctx.followup_ephemeral(content).await -> Result<()>` | 最初の本文を送った後、本人にだけ追加のメッセージを送ります。 |
 
-時間がかかる処理では、3 秒の初回応答期限までに `defer` または `defer_ephemeral` を明示的に呼び、完了時に `reply` を呼びます。公開の `defer` の後に `reply_ephemeral` を呼ぶとエラーになります。ハンドラーが本文を送らずに成功した場合は、Akari が「入力を受け付けました。」と知らせます。初回応答前なら本人にだけ表示し、遅延応答済みならその表示を受け取り通知に置き換えます。本文を送る前にハンドラーが失敗した場合は、同じ経路でエラー応答を試みます。[Components V2 のチュートリアル](tutorial.md) · [Discord の Interaction 応答仕様](https://docs.discord.com/developers/interactions/receiving-and-responding)
+時間がかかる処理では、3 秒の初回応答期限までに `defer` または `defer_ephemeral` を明示的に呼び、完了時に `reply` を呼びます。公開の `defer` の後に `reply_ephemeral` を呼ぶとエラーになります。ハンドラーが本文を送らずに成功した場合は、Akari が `Messages::modal_accepted`（既定は「入力を受け付けました。」）を送ります。初回応答前なら本人にだけ表示し、遅延応答済みならその表示を置き換えます。本文を送る前にハンドラーが失敗した場合は、`Messages::modal_failed` を同じ経路で送ります。どちらの文言も `None` にすると、Akari は何も送りません。その場合、応答が済んでいない操作は、Discord 上で失敗と表示されます。[Components V2 のチュートリアル](tutorial.md) · [Discord の Interaction 応答仕様](https://docs.discord.com/developers/interactions/receiving-and-responding)
 
 ```rust,no_run
 use disnana_akari::{ModalContext, Result};
@@ -276,6 +301,67 @@ async fn submit(ctx: &mut ModalContext<'_>) -> Result<()> {
     ctx.followup_ephemeral("受け取り番号は 1234 です。").await
 }
 ```
+
+## エラーと自動で送る文言
+
+### エラーを受け取る
+
+`Bot::on_error` に関数を渡すと、Akari の内部で起きたエラーを一件ずつ受け取れます。
+
+```rust,no_run
+use disnana_akari::{Bot, Result};
+
+fn build() -> Result<Bot> {
+    Ok(Bot::from_env()?.on_error(|report| {
+        // report.source: エラーが起きた場所、report.name: コマンド名や custom_id、report.error: 内容
+        eprintln!("[bot] {report}");
+    }))
+}
+```
+
+| 項目 | 内容 |
+| --- | --- |
+| `report.source` | `ErrorSource`。`TextCommand`、`SlashCommand`、`Button`、`Select`、`Modal`、`Message`、`Event`、`Gateway`、`Response`（自動応答の失敗）、`QueueFull`（処理枠が満杯）など。今後増える可能性があります（`#[non_exhaustive]`）。 |
+| `report.name` | コマンド名、`custom_id`、イベント名など、原因を絞り込む手がかり。分からないときは `None`。 |
+| `report.error` | エラーの内容。ハンドラーが返したエラーは、そのまま渡します。 |
+
+- 関数を設定すると、Akari は標準エラー出力へは書きません。設定しない場合は、`[akari] ...` の形で標準エラー出力に書きます。
+- 関数は処理の途中で同期的に呼ばれます。短く保ち、`panic` しないでください。重い処理は、チャンネルへ送るなどして、別のタスクで行います。
+- Gateway が接続を閉じたときは、理由を含めて報告します。たとえばコード `4014` では、特権 Intent を有効にするよう案内します。
+- Akari は `tracing` や `log` を使いません。必要なら、`on_error` の中で、お使いのロガーへ渡してください。
+
+### 自動で送る文言
+
+Akari は、Discord の決まりを満たすために、いくつかの場面で利用者へメッセージを送ります。`Bot::with_messages` で、文言を変えたり、送らないようにしたりできます。
+
+```rust,no_run
+use disnana_akari::{Bot, Messages, Result};
+
+fn build() -> Result<Bot> {
+    let mut messages = Messages::default();
+    messages.interaction_busy = Some("Only a moment, please.".to_owned());
+    messages.text_command_failed = Some("Something went wrong.".to_owned()); // 既定は送らない
+    messages.modal_accepted = None; // 何も送らない
+    Ok(Bot::from_env()?.with_messages(messages))
+}
+```
+
+| 項目 | 送る場面 | 既定 |
+| --- | --- | --- |
+| `text_command_failed` | テキストコマンドの関数がエラーを返したとき（元の投稿へ返信） | 送らない |
+| `text_command_busy` | テキストコマンドの処理枠が満杯のとき（元の投稿へ返信） | 送らない |
+| `interaction_busy` | スラッシュ、ボタン、選択メニュー、フォームの処理枠が満杯のとき（本人にだけ） | 「現在混雑しています。…」 |
+| `slash_command_failed` | スラッシュコマンドの関数がエラーを返したか、応答しなかったとき | 「コマンドを処理できませんでした。」 |
+| `slash_command_unavailable` | Akari に登録していないスラッシュコマンドが実行されたとき（本人にだけ） | 「このコマンドは現在利用できません。」 |
+| `button_failed` | ボタンの関数がエラーを返したとき（本人にだけ） | 「ボタンを処理できませんでした。」 |
+| `select_failed` | 選択メニューの関数がエラーを返したとき、または選択内容を読み取れなかったとき（本人にだけ） | 「選択内容を処理できませんでした。」 |
+| `modal_failed` | フォームの関数がエラーを返したとき（本人にだけ） | 「入力内容を処理できませんでした。」 |
+| `modal_accepted` | フォームの関数が、成功したのに応答しなかったとき（本人にだけ） | 「入力を受け付けました。」 |
+
+- テキストコマンドには、応答の決まりがないので、既定では何も送りません。
+- スラッシュコマンド、ボタン、選択メニュー、フォームは、Discord が受信後 3 秒以内の応答を求めます。そのため、これらには既定の文言があります。`None` にすると、応答が済んでいない操作は Discord 上で失敗と表示されます。
+- 文言を `None` にしても、エラー自体は `on_error` に報告します。
+- 成功した（エラーを返さなかった）ボタンや選択メニューの操作は、メッセージを出さずに受け付けます。
 
 ## `Context<'_>` と `Result<T>`
 
@@ -304,6 +390,7 @@ async fn fetch_channel(ctx: Context<'_>) -> Result<Channel> {
 ```rust,no_run
 use std::time::Duration;
 
+use disnana_akari::model::gateway::Intents;
 use disnana_akari::{
     Bot, ButtonContext, CommandContext, Commands, Cooldown, Events, HybridContext, Ready, Result,
     SlashCommands, SlashContext, register_hybrid, ui::{Button, Embed, UiMessage},
@@ -343,6 +430,7 @@ async fn main() -> Result<()> {
     events.on_button(CONFIRM, confirm)?;
 
     Bot::from_env()?
+        .add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
         .with_events(events)
         .with_slash_commands(slash)
         .run_commands(commands)

@@ -3,6 +3,7 @@
 mod commands;
 mod cooldown;
 mod events;
+mod hooks;
 mod hybrid;
 mod interactions;
 mod slash;
@@ -26,6 +27,7 @@ use twilight_model::{
 pub use commands::{CommandContext, Commands};
 pub use cooldown::Cooldown;
 pub use events::{Events, Ready};
+pub use hooks::{ErrorReport, ErrorSource, Messages};
 pub use hybrid::{CommandSource, HybridContext, register_hybrid};
 pub use interactions::{
     ButtonContext, ChannelSelectContext, EntitySelectContext, Mentionable,
@@ -36,13 +38,13 @@ pub use timing::Timing;
 pub use twilight_http as http;
 pub use twilight_model as model;
 
+use hooks::{Hooks, Reporter, describe_gateway_close};
 use timing::Pending;
 
 const INTERACTION_WORKERS: usize = 8;
 const TEXT_WORKERS: usize = 8;
 const BUSY_WORKERS: usize = 8;
 const GATEWAY_QUEUE_CAPACITY: usize = 64;
-const BUSY_MESSAGE: &str = "現在混雑しています。少し待ってからもう一度お試しください。";
 
 type NoMessageHandler = fn(Context<'_>) -> std::future::Ready<Result<()>>;
 
@@ -56,6 +58,8 @@ pub struct Bot {
     slash: Option<SlashCommands>,
     intents: Option<Intents>,
     additional_intents: Intents,
+    reporter: Reporter,
+    messages: Messages,
 }
 
 impl Bot {
@@ -76,6 +80,8 @@ impl Bot {
             slash: None,
             intents: None,
             additional_intents: Intents::empty(),
+            reporter: Reporter::default(),
+            messages: Messages::default(),
         })
     }
 
@@ -103,17 +109,45 @@ impl Bot {
         self
     }
 
-    /// 自動で算出する Gateway Intent を、指定したビット集合で置き換えます。
-    /// テキストコマンドを使う場合は `GUILD_MESSAGES` と `MESSAGE_CONTENT` を含めてください。
+    /// 要求する Gateway Intent を、指定したビット集合にします。
+    ///
+    /// Akari は Intent を自動では追加しません。既定は空です。
+    /// テキストコマンドやメッセージのハンドラーを使う場合は、`GUILD_MESSAGES` と
+    /// `MESSAGE_CONTENT` を含めてください。足りないときは、起動前にエラーを返します。
+    /// `MESSAGE_CONTENT` は特権 Intent なので、Developer Portal の Bot ページでも有効にします。
     pub fn with_intents(mut self, intents: Intents) -> Self {
         self.intents = Some(intents);
         self
     }
 
-    /// 自動で算出した Intent、または [`Self::with_intents`] の値に Intent を追加します。
-    /// 複数回指定すると和集合になり、`with_intents` との呼び出し順に関わらず適用します。
+    /// 要求する Intent に、渡された Intent を追加します。
+    /// 複数回指定すると和集合になり、[`Self::with_intents`] との呼び出し順に関わらず適用します。
     pub fn add_intents(mut self, intents: Intents) -> Self {
         self.additional_intents |= intents;
+        self
+    }
+
+    /// 起動時に Discord へ要求する Intent を返します。
+    pub fn intents(&self) -> Intents {
+        self.intents.unwrap_or_else(Intents::empty) | self.additional_intents
+    }
+
+    /// エラーを受け取る関数を設定します。
+    ///
+    /// ハンドラーが返したエラー、Gateway の切断や受信エラー、処理枠が満杯でイベントを捨てたことなどを、
+    /// 一件ずつ [`ErrorReport`] で受け取ります。設定すると、Akari は標準エラー出力へは書きません。
+    /// 設定しない場合は、これらを `[akari] ...` の形で標準エラー出力に書きます。
+    ///
+    /// 関数は処理の途中で同期的に呼ばれます。短く保ち、`panic` しないでください。
+    /// 重い処理や非同期の処理は、チャンネルへ送るなどして、別のタスクで行います。
+    pub fn on_error(mut self, hook: impl Fn(&ErrorReport<'_>) + Send + Sync + 'static) -> Self {
+        self.reporter = Reporter::new(hook);
+        self
+    }
+
+    /// Akari が利用者へ自動で送る文言を設定します。[`Messages`] を参照してください。
+    pub fn with_messages(mut self, messages: Messages) -> Self {
+        self.messages = messages;
         self
     }
 
@@ -159,17 +193,26 @@ impl Bot {
         on_message: Option<impl for<'a> AsyncFn(Context<'a>) -> Result<()>>,
         text_commands: Option<Commands>,
     ) -> Result<()> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
         let Bot {
             token,
             events,
             slash,
             intents,
             additional_intents,
+            reporter,
+            messages,
         } = self;
+        let hooks = Hooks { reporter, messages };
+
+        // Intent は自動では足さない。足りないときは、通信する前にエラーにする。
+        let observe_messages = on_message.is_some() || events.has_message_handlers();
+        let text_commands = text_commands.as_ref();
+        let needs_messages = observe_messages || text_commands.is_some();
+        let intents = intents.unwrap_or_else(Intents::empty) | additional_intents;
+        check_intents(intents, needs_messages)?;
+
         let http = Client::new(token.clone());
         let mut event_types = EventTypeFlags::READY;
-        let mut default_intents = Intents::empty();
 
         let slash = match slash {
             Some(commands) => {
@@ -183,14 +226,10 @@ impl Bot {
             event_types |= EventTypeFlags::INTERACTION_CREATE;
         }
 
-        let observe_messages = on_message.is_some() || events.has_message_handlers();
-        let text_commands = text_commands.as_ref();
-        if observe_messages || text_commands.is_some() {
-            default_intents |= Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
+        if needs_messages {
             event_types |= EventTypeFlags::MESSAGE_CREATE;
         }
 
-        let intents = intents.unwrap_or(default_intents) | additional_intents;
         let mut shard = Shard::new(ShardId::ONE, token, intents);
         let (event_tx, mut event_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
         let (text_tx, text_queue) = mpsc::channel::<Pending<Arc<Message>>>(GATEWAY_QUEUE_CAPACITY);
@@ -204,7 +243,7 @@ impl Bot {
             while let Some(event) = event_queue.recv().await {
                 match event {
                     MessageEvent::Ready(ready) => {
-                        events.ready(&ready).await;
+                        events.ready(&ready, &hooks.reporter).await;
                     }
                     MessageEvent::Message(pending) => {
                         let (message, timing) = pending.begin();
@@ -215,10 +254,10 @@ impl Bot {
                                 timing,
                             };
                             if let Err(error) = handler(context).await {
-                                eprintln!("メッセージ処理に失敗しました ({error})");
+                                hooks.reporter.report(ErrorSource::Message, None, &*error);
                             }
                         }
-                        events.message(&message).await;
+                        events.message(&message, &hooks.reporter).await;
                     }
                 }
             }
@@ -231,15 +270,18 @@ impl Bot {
                 let (message, timing) = Pending::begin(pending);
                 if let Some(commands) = text_commands {
                     commands
-                        .dispatch_with_feedback(Context {
-                            http: &http,
-                            message: &message,
-                            timing,
-                        })
+                        .dispatch_with_feedback(
+                            Context {
+                                http: &http,
+                                message: &message,
+                                timing,
+                            },
+                            &hooks,
+                        )
                         .await;
                 }
             },
-            |pending| queue_text_busy(&text_busy_tx, pending),
+            |pending| queue_text_busy(&text_busy_tx, pending, &hooks),
         );
         let handle_text_busy =
             work_queue::respond(text_busy_queue, BUSY_WORKERS, |pending| async {
@@ -249,8 +291,12 @@ impl Bot {
                     message: &message,
                     timing,
                 };
-                if let Err(error) = context.reply(BUSY_MESSAGE).await {
-                    eprintln!("テキストコマンドの混雑応答に失敗しました ({error})");
+                if let Some(text) = &hooks.messages.text_command_busy
+                    && let Err(error) = context.reply(text).await
+                {
+                    hooks
+                        .reporter
+                        .report(ErrorSource::Response, Some("混雑の通知"), &*error);
                 }
             });
 
@@ -265,22 +311,25 @@ impl Bot {
                 ) {
                     events
                         .interaction_handlers
-                        .dispatch(&http, &interaction, timing)
+                        .dispatch(&http, &interaction, timing, &hooks)
                         .await;
                 } else if let Some(commands) = slash {
-                    commands.dispatch(&http, &interaction, timing).await;
+                    commands.dispatch(&http, &interaction, timing, &hooks).await;
                 }
             },
-            |pending| queue_busy_response(&busy, pending.into_event()),
+            |pending| queue_busy_response(&busy, pending.into_event(), &hooks),
         );
         let handle_busy = work_queue::respond(busy_queue, BUSY_WORKERS, |interaction| {
             let http = &http;
+            let hooks = &hooks;
             async move {
-                if slash::send_initial_message(http, &interaction, BUSY_MESSAGE, true)
-                    .await
-                    .is_err()
+                if let Some(text) = &hooks.messages.interaction_busy
+                    && let Err(error) =
+                        slash::send_initial_message(http, &interaction, text, true).await
                 {
-                    eprintln!("interaction の混雑応答に失敗しました");
+                    hooks
+                        .reporter
+                        .report(ErrorSource::Response, Some("混雑の通知"), &*error);
                 }
             }
         });
@@ -290,12 +339,15 @@ impl Bot {
                 let gateway_rtt = shard.latency().recent().first().copied();
                 match event {
                     Ok(Event::Ready(ready)) => {
-                        println!("Discord に接続しました");
                         if event_tx
                             .try_send(MessageEvent::Ready(Box::new(ready)))
                             .is_err()
                         {
-                            eprintln!("受信キューが満杯のため READY を処理できませんでした");
+                            hooks.reporter.report_text(
+                                ErrorSource::QueueFull,
+                                Some("READY"),
+                                "イベントの待ち行列がいっぱいで、処理できませんでした",
+                            );
                         }
                     }
                     Ok(Event::MessageCreate(message))
@@ -315,14 +367,16 @@ impl Bot {
                                 )))
                                 .is_err()
                         {
-                            eprintln!(
-                                "イベントキューが満杯のため MESSAGE_CREATE を処理できませんでした"
+                            hooks.reporter.report_text(
+                                ErrorSource::QueueFull,
+                                Some("MESSAGE_CREATE"),
+                                "イベントの待ち行列がいっぱいで、処理できませんでした",
                             );
                         }
                         if run_command
                             && let Err(error) = text_tx.try_send(Pending::new(message, gateway_rtt))
                         {
-                            queue_text_busy(&text_busy_tx, error.into_inner());
+                            queue_text_busy(&text_busy_tx, error.into_inner(), &hooks);
                         }
                     }
                     Ok(Event::InteractionCreate(interaction))
@@ -332,14 +386,18 @@ impl Bot {
                         if let Err(error) =
                             interactions.try_send(Pending::new(interaction.0, gateway_rtt))
                         {
-                            queue_busy_response(&busy, error.into_inner().into_event());
+                            queue_busy_response(&busy, error.into_inner().into_event(), &hooks);
                         }
                     }
                     Ok(Event::GatewayClose(Some(frame))) => {
-                        eprintln!("Discord Gateway が接続を閉じました (コード {})", frame.code);
+                        hooks.reporter.report_text(
+                            ErrorSource::Gateway,
+                            None,
+                            &describe_gateway_close(frame.code),
+                        );
                     }
                     Ok(_) => {}
-                    Err(error) => eprintln!("Gateway の受信エラー ({error})"),
+                    Err(error) => hooks.reporter.report(ErrorSource::Gateway, None, &error),
                 }
             }
         };
@@ -363,16 +421,57 @@ enum MessageEvent {
     Message(Pending<Arc<Message>>),
 }
 
-fn queue_text_busy(queue: &mpsc::Sender<Pending<Arc<Message>>>, pending: Pending<Arc<Message>>) {
-    if queue.try_send(pending).is_err() {
-        eprintln!("混雑応答のキューが満杯のためテキストコマンドに応答できませんでした");
+/// テキストコマンドを処理できなかったことを報告し、文言が設定されていれば混雑を返信する。
+fn queue_text_busy(
+    queue: &mpsc::Sender<Pending<Arc<Message>>>,
+    pending: Pending<Arc<Message>>,
+    hooks: &Hooks,
+) {
+    hooks.reporter.report_text(
+        ErrorSource::QueueFull,
+        Some("テキストコマンド"),
+        "処理枠がいっぱいで、コマンドを実行できませんでした",
+    );
+    if hooks.messages.text_command_busy.is_some() && queue.try_send(pending).is_err() {
+        hooks.reporter.report_text(
+            ErrorSource::QueueFull,
+            Some("混雑の通知"),
+            "混雑の通知の待ち行列がいっぱいで、返信できませんでした",
+        );
     }
 }
 
-fn queue_busy_response(queue: &mpsc::Sender<Interaction>, interaction: Interaction) {
-    if queue.try_send(interaction).is_err() {
-        eprintln!("混雑応答のキューが満杯のため INTERACTION_CREATE に応答できませんでした");
+/// Interaction を処理できなかったことを報告し、文言が設定されていれば混雑を返す。
+fn queue_busy_response(queue: &mpsc::Sender<Interaction>, interaction: Interaction, hooks: &Hooks) {
+    hooks.reporter.report_text(
+        ErrorSource::QueueFull,
+        Some("Interaction"),
+        "処理枠がいっぱいで、操作を実行できませんでした",
+    );
+    if hooks.messages.interaction_busy.is_some() && queue.try_send(interaction).is_err() {
+        hooks.reporter.report_text(
+            ErrorSource::QueueFull,
+            Some("混雑の通知"),
+            "混雑の通知の待ち行列がいっぱいで、応答できませんでした",
+        );
     }
+}
+
+/// メッセージを扱うのに必要な Intent が、要求する Intent に含まれているか確認する。
+fn check_intents(requested: Intents, needs_messages: bool) -> Result<()> {
+    if !needs_messages {
+        return Ok(());
+    }
+    let missing = (Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT).difference(requested);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "テキストコマンドやメッセージのハンドラーには、Intent {missing:?} が必要です。\
+         `Bot::add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)` で追加してください。\
+         MESSAGE_CONTENT は特権 Intent なので、Developer Portal の Bot ページでも有効にします。"
+    )
+    .into())
 }
 
 /// ハンドラーに渡される、受信メッセージと返信先の情報です。
@@ -454,6 +553,70 @@ impl<'a> Context<'a> {
             .flags(MessageFlags::IS_COMPONENTS_V2)
             .components(&message.components)
             .await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn ping(_: CommandContext<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    #[test]
+    fn message_features_need_both_message_intents() {
+        assert!(check_intents(Intents::empty(), false).is_ok());
+
+        let message = check_intents(Intents::empty(), true)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("add_intents"));
+        assert!(message.contains("MESSAGE_CONTENT"));
+
+        // GUILD_MESSAGES だけでは、メッセージの本文を読めない。
+        assert!(check_intents(Intents::GUILD_MESSAGES, true).is_err());
+        assert!(check_intents(Intents::MESSAGE_CONTENT, true).is_err());
+        assert!(check_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT, true).is_ok());
+        assert!(check_intents(Intents::all(), true).is_ok());
+    }
+
+    #[test]
+    fn bot_never_adds_intents_on_its_own() -> Result<()> {
+        assert_eq!(Bot::new("token")?.intents(), Intents::empty());
+
+        let both = Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
+        let bot = Bot::new("token")?
+            .add_intents(Intents::MESSAGE_CONTENT)
+            .with_intents(Intents::GUILD_MESSAGES);
+        assert_eq!(bot.intents(), both, "呼び出しの順序によらず和集合になる");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_commands_without_intents_fail_before_any_network_use() -> Result<()> {
+        let mut commands = Commands::new("!")?;
+        commands.register("ping", ping)?;
+
+        let error = Bot::new("token")?
+            .run_commands(commands)
+            .await
+            .expect_err("Intent が足りないので、接続前に失敗する");
+        assert!(error.to_string().contains("add_intents"));
+        Ok(())
+    }
+
+    #[test]
+    fn error_hook_and_messages_are_configured_on_the_bot() -> Result<()> {
+        let messages = Messages {
+            slash_command_failed: None,
+            ..Messages::default()
+        };
+        let bot = Bot::new("token")?
+            .on_error(|_| {})
+            .with_messages(messages.clone());
+        assert_eq!(bot.messages, messages);
         Ok(())
     }
 }

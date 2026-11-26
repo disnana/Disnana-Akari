@@ -25,7 +25,8 @@ pub fn register() -> Result<Events> {
 
 // &Ready は、接続完了イベントの情報を借りて読むための型です。
 async fn on_ready(ready: &Ready) -> Result<()> {
-    println!("{} のイベントハンドラーが準備できました。", ready.user.name);
+    // Akari は接続しても何も表示しません。接続を知りたいときは、このように on_ready に書きます。
+    println!("{} として Discord に接続しました", ready.user.name);
     Ok(())
 }
 
