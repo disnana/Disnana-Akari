@@ -10,7 +10,7 @@ license = "MIT"
 keywords = ["discord", "bot", "twilight", "framework"]
 categories = ["api-bindings", "asynchronous"]
 include = ["/src/**", "/examples/**", "/docs/**", "/README.md", "/CHANGELOG.md", "/LICENSE*", "/NOTICE*"]
-publish = false
+publish = ["crates-io"]
 
 [dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
