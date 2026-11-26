@@ -198,6 +198,23 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 
 テキストコマンドへの返信では、Discord が返信先の投稿を操作データから省略する場合があります。`resolve_invoker_id().await` を使う場合は、先に `defer_update().await?` で操作を受け付けておくと、REST の完了を待ってから結果を返せます。返信先が削除されていれば `Ok(None)` を返し、履歴の閲覧権限不足などで取得が失敗した場合は `Err` を返します。[Discord のメッセージ仕様](https://docs.discord.com/developers/resources/message#message-object)
 
+```rust,no_run
+use disnana_akari::{ButtonContext, Result};
+
+async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
+    // Discord の初回応答期限内に操作を受け付けます。
+    ctx.defer_update().await?;
+
+    // 操作者と元の投稿者の ID が両方判明した場合だけ比較します。
+    let owner = ctx.resolve_invoker_id().await?;
+    if !matches!((ctx.author_id(), owner), (Some(author), Some(owner)) if author == owner) {
+        return ctx.followup_ephemeral("元の投稿者だけが操作できます。").await;
+    }
+
+    ctx.followup_ephemeral("操作を受け付けました。").await
+}
+```
+
 ハンドラーが初回応答を送らずに成功した場合は、Akari が確認応答を試みます。初回応答の前にエラーを返した場合は、本人にだけ見える初回応答を試みます。`defer_update` 後にハンドラーが失敗した場合は、元のメッセージを保ったまま、本人にだけ追加でエラーを知らせます。[埋め込みとボタンのチュートリアル](tutorial.md)
 
 ## `ComponentsV2` と入力フォーム
