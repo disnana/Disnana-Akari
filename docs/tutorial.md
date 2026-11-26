@@ -1,33 +1,46 @@
-# コマンドを関数ごとに登録する
+# Playground のコードを読む
 
-[クイックスタート](quickstart.md) で用意した Playground では、`src/main.rs` が Bot を起動し、`src/commands.rs` がコマンドを登録します。
+[クイックスタート](quickstart.md) で Bot を動かしたら、RustRover で `playground/src/main.rs` を開きます。コピー元のサンプルにも日本語のコメントがあります。[サンプルの入口](../examples/ping/main.rs)
+
+| ファイル | 担当 |
+| --- | --- |
+| `main.rs` | 設定を読み、コマンドとイベントを登録して Bot を起動します。 |
+| `config.rs` | `.env` から Bot トークンとテスト用サーバー ID を読みます。 |
+| `commands.rs` | `!ping`、`!echo`、`/ping`、`/echo` を個別の関数に結び付けます。 |
+| `events.rs` | Gateway が準備できたときや、メッセージを受け取ったときの処理を定義します。 |
+
+## `!ping` の実行を追う
 
 ```rust
 use disnana_akari::{CommandContext, Commands, Result};
 
-pub fn register() -> Result<Commands> {
+fn register() -> Result<Commands> {
     let mut commands = Commands::new("!")?;
     commands.register("ping", ping)?;
-    commands.register("echo", echo)?;
     Ok(commands)
 }
 
 async fn ping(ctx: CommandContext<'_>) -> Result<()> {
     ctx.reply("Pong!").await
 }
-
-async fn echo(ctx: CommandContext<'_>) -> Result<()> {
-    let text = ctx.args();
-    if text.is_empty() {
-        return ctx.reply("使い方 `!echo <文章>`").await;
-    }
-
-    ctx.reply(text).await
-}
 ```
 
-`main.rs` で `mod commands;` と宣言し、`bot.run_commands(commands::register()?).await` で登録したコマンドを有効にします。関数を増やすときは `src/commands.rs` に `async fn` を追加し、`register` に名前と関数を渡します。名前は `ping` のようにプレフィックスを省いて指定します。
+- `use` はライブラリの型を短い名前で使えるようにします。別ファイルの処理は `mod commands;` のように宣言します。
+- `let mut` は変更できる変数を作ります。`register` が一覧にコマンドを追加するため、この変数には `mut` が必要です。
+- `Commands::new("!")` は `Commands` 型の関数を呼び出します。末尾の `?` は、失敗した場合にこの関数もそこで終了してエラーを返すという意味です。
+- `commands.register("ping", ping)` の二つ目の `ping` は関数そのものです。Discord で `!ping` を受信すると、Akari がこの関数を呼びます。
+- `async fn` は非同期関数です。`.await` は、この関数の実行を一時停止して Discord への返信処理の完了を待ちます。
+- `CommandContext<'_>` は、Akari が持つメッセージの情報を一時的に借ります。`'_` は借用の有効な範囲をコンパイラーに推論させる記号です。
+- `Result<()>` の `()` は「成功時に返す値がない」という意味です。関数の最後の式をセミコロンなしで書くと、その式の値が返ります。`ping` は返信処理の成功かエラーをそのまま返します。
 
-`!echo こんにちは` を送ると `ctx.args()` は `こんにちは` を返します。引数の前後の空白は取り除かれ、途中の空白は保持されます。引数は元のメッセージ本文の一部を借りた `&str` なので、そのまま `reply` に渡せます。ハンドラーの終了後にも本文を保持したい場合は `to_owned()` で `String` を作ります。
+`!echo こんにちは` を送ると、`ctx.args()` がコマンド名より後ろの `こんにちは` を返します。値は `&str` で、元の本文の一部を借りています。ハンドラーの終了後まで文字列が必要なら `to_owned()` で所有する `String` に変換できます。
 
-コマンドが増えたら `commands` の下に用途別のサブモジュールを作り、各モジュールから同じ `Commands` に登録できます。未登録のコマンドや通常の投稿を扱う処理は、`Bot::run` のメッセージハンドラーに書けます。[API リファレンス](api.md)
+## `/echo` が引数を受け取る仕組み
+
+`/echo` の `text` 欄は、登録時に `SlashCommands::string_option("text", "返す文章", true)` で作ります。テキストコマンドでは本文の分割を Akari が行い、スラッシュコマンドでは入力欄の値を Discord が名前付きで渡します。
+
+`ctx.string("text")` は `Option<&str>` を返します。値があれば `Some(text)`、なければ `None` です。`&mut SlashContext<'_>` はコンテキストを変更できる形で借りています。Akari はこの借用を通じて初回応答が済んだことを記録します。[コマンドの実装](../examples/ping/commands.rs)
+
+## イベントに処理を追加する
+
+`events.on_ready(ready)` に登録した関数は、Discord とのセッションが準備できると呼ばれます。投稿を観察する関数は `events.on_message(handler)` に登録できます。テキストコマンドの返信処理と同じファイルに置く必要はありません。[イベントの実装](../examples/ping/events.rs) · [API リファレンス](api.md)

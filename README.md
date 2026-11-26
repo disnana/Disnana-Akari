@@ -1,6 +1,6 @@
 # Disnana Akari
 
-Twilight を土台にした Rust 製 Discord Bot フレームワークです。テキストコマンドを `async fn` として登録できます。
+Twilight を土台にした Rust 製 Discord Bot フレームワークです。テキストコマンド、サーバー向けのスラッシュコマンド、Gateway イベントをそれぞれ `async fn` として登録できます。現時点では `publish = false` を設定しており、ローカルのパス依存として使えます。
 
 ```rust
 use disnana_akari::{Bot, CommandContext, Commands, Result};
@@ -19,5 +19,5 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 
 - [日本語ドキュメント](docs/README.md)
 - [クイックスタートとローカルの実験用 Bot](docs/quickstart.md)
-- [コマンドのチュートリアル](docs/tutorial.md)
+- [Playground のコードを読む](docs/tutorial.md)
 - [API リファレンス](docs/api.md)

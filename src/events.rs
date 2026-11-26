@@ -1,0 +1,96 @@
+use std::{future::Future, pin::Pin};
+
+use twilight_model::channel::Message;
+
+pub use twilight_model::gateway::payload::incoming::Ready;
+
+use crate::Result;
+
+/// Gateway イベントごとに非同期ハンドラーを登録します。
+#[derive(Default)]
+pub struct Events {
+    ready: Vec<Box<dyn Handler<Ready>>>,
+    message: Vec<Box<dyn Handler<Message>>>,
+}
+
+impl Events {
+    /// 空のイベントハンドラー一覧を作ります。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 新しい Gateway セッションが準備できたときに呼ばれる関数を追加します。
+    pub fn on_ready(
+        &mut self,
+        handler: impl AsyncFn(&Ready) -> Result<()> + Send + Sync + 'static,
+    ) {
+        self.ready.push(Box::new(handler));
+    }
+
+    /// サーバーで人が送信した新着メッセージを受け取る関数を追加します。
+    pub fn on_message(
+        &mut self,
+        handler: impl AsyncFn(&Message) -> Result<()> + Send + Sync + 'static,
+    ) {
+        self.message.push(Box::new(handler));
+    }
+
+    pub(crate) fn has_message_handlers(&self) -> bool {
+        !self.message.is_empty()
+    }
+
+    pub(crate) async fn ready(&self, event: &Ready) {
+        dispatch(&self.ready, event, "READY").await;
+    }
+
+    pub(crate) async fn message(&self, event: &Message) {
+        dispatch(&self.message, event, "MESSAGE_CREATE").await;
+    }
+}
+
+async fn dispatch<T>(handlers: &[Box<dyn Handler<T>>], event: &T, event_name: &str) {
+    for handler in handlers {
+        if let Err(error) = handler.call(event).await {
+            eprintln!("イベント {event_name} の処理に失敗しました ({error})");
+        }
+    }
+}
+
+trait Handler<T>: Send + Sync {
+    fn call<'a>(&'a self, event: &'a T) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
+}
+
+impl<T, F> Handler<T> for F
+where
+    F: AsyncFn(&T) -> Result<()> + Send + Sync,
+{
+    fn call<'a>(&'a self, event: &'a T) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        Box::pin(self(event))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::{Handler, dispatch};
+
+    #[tokio::test]
+    async fn keeps_registration_order_after_a_handler_error() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let first = Arc::clone(&observed);
+        let second = Arc::clone(&observed);
+        let handlers: Vec<Box<dyn Handler<i32>>> = vec![
+            Box::new(async move |value: &i32| {
+                first.lock().unwrap().push(*value);
+                Err("最初のイベントハンドラーのエラー".into())
+            }),
+            Box::new(async move |value: &i32| {
+                second.lock().unwrap().push(*value + 1);
+                Ok(())
+            }),
+        ];
+        dispatch(&handlers, &10, "TEST").await;
+        assert_eq!(*observed.lock().unwrap(), vec![10, 11]);
+    }
+}

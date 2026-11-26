@@ -1,14 +1,20 @@
 #![doc = include_str!("../docs/api.md")]
 
 mod commands;
+mod events;
+mod slash;
 
 use std::{env, error::Error};
 
+use tokio::sync::mpsc;
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
 use twilight_http::Client;
 use twilight_model::channel::{Message, message::AllowedMentions};
 
 pub use commands::{CommandContext, Commands};
+pub use events::{Events, Ready};
+pub use slash::{SlashCommands, SlashContext};
+pub use twilight_model as model;
 
 /// Akari とメッセージハンドラーで使う結果型です。
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -16,6 +22,9 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 /// テスト用サーバー向けの、単一シャードの Discord Bot です。
 pub struct Bot {
     token: String,
+    events: Events,
+    slash: Option<SlashCommands>,
+    intents: Option<Intents>,
 }
 
 impl Bot {
@@ -32,6 +41,9 @@ impl Bot {
 
         Ok(Self {
             token: token.to_owned(),
+            events: Events::default(),
+            slash: None,
+            intents: None,
         })
     }
 
@@ -47,13 +59,41 @@ impl Bot {
             .map_err(|_| "DISCORD_TOKEN に Discord Bot トークンを設定してください".into())
     }
 
+    /// Gateway イベントを受け取るハンドラー一覧を設定します。
+    pub fn with_events(mut self, events: Events) -> Self {
+        self.events = events;
+        self
+    }
+
+    /// 指定されたサーバーでスラッシュコマンドを有効にします。
+    pub fn with_slash_commands(mut self, commands: SlashCommands) -> Self {
+        self.slash = Some(commands);
+        self
+    }
+
+    /// 自動で算出する Gateway Intent を、指定したビット集合で置き換えます。
+    pub fn with_intents(mut self, intents: Intents) -> Self {
+        self.intents = Some(intents);
+        self
+    }
+
+    /// イベントハンドラーやスラッシュコマンドを設定した Bot を起動します。
+    ///
+    /// # エラー
+    ///
+    /// スラッシュコマンドの登録に失敗した場合や、Gateway が終了した場合に失敗します。
+    pub async fn start(self) -> Result<()> {
+        self.connect(None::<fn(Context<'_>) -> std::future::Ready<Result<()>>>)
+            .await
+    }
+
     /// Discord に接続し、登録されたテキストコマンドを実行します。
     ///
     /// 接続とエラー処理は [`Self::run`] と同じです。
     ///
     /// # エラー
     ///
-    /// Discord Gateway のイベントストリームが終了した場合に失敗します。
+    /// スラッシュコマンドの登録に失敗した場合や、Gateway が終了した場合に失敗します。
     pub async fn run_commands(self, commands: Commands) -> Result<()> {
         self.run(async |ctx| commands.dispatch(ctx).await).await
     }
@@ -62,43 +102,120 @@ impl Bot {
     ///
     /// Tokio ランタイム内で呼び出してください。Bot や Webhook によるメッセージは
     /// ハンドラーに渡しません。ハンドラーのエラーは標準エラー出力に記録して処理を続けます。
-    /// ハンドラーが待機している間は Gateway のイベント受信も待つため、処理は短く保ちます。
+    /// 受信処理とハンドラー処理は並行して進みます。キュー満杯時は新着イベントを破棄します。
     ///
     /// # エラー
     ///
-    /// Gateway が再接続できない状態でイベントストリームを閉じた場合に失敗します。
+    /// スラッシュコマンドの登録に失敗した場合や、Gateway が終了した場合に失敗します。
     pub async fn run(
         self,
         on_message: impl for<'a> AsyncFn(Context<'a>) -> Result<()>,
     ) -> Result<()> {
-        // 既にプロバイダーが登録されている場合は、アプリ側の選択を使う。
+        self.connect(Some(on_message)).await
+    }
+
+    async fn connect(
+        self,
+        on_message: Option<impl for<'a> AsyncFn(Context<'a>) -> Result<()>>,
+    ) -> Result<()> {
         let _ = rustls::crypto::ring::default_provider().install_default();
+        let Bot {
+            token,
+            events,
+            slash,
+            intents,
+        } = self;
+        let http = Client::new(token.clone());
+        let mut event_types = EventTypeFlags::READY;
+        let mut default_intents = Intents::empty();
 
-        let intents = Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
-        let mut shard = Shard::new(ShardId::ONE, self.token.clone(), intents);
-        let http = Client::new(self.token);
-        let events = EventTypeFlags::READY | EventTypeFlags::MESSAGE_CREATE;
-
-        while let Some(event) = shard.next_event(events).await {
-            match event {
-                Ok(Event::Ready(_)) => println!("Discord に接続しました"),
-                Ok(Event::MessageCreate(message))
-                    if !message.author.bot && message.webhook_id.is_none() =>
-                {
-                    let context = Context {
-                        http: &http,
-                        message: &message.message,
-                    };
-                    if let Err(error) = on_message(context).await {
-                        eprintln!("メッセージ処理に失敗しました ({error})");
-                    }
-                }
-                Ok(Event::GatewayClose(Some(frame))) => {
-                    eprintln!("Discord Gateway が接続を閉じました (コード {})", frame.code);
-                }
-                Ok(_) => {}
-                Err(error) => eprintln!("Gateway の受信エラー ({error})"),
+        let slash = match slash {
+            Some(commands) => {
+                event_types |= EventTypeFlags::INTERACTION_CREATE;
+                Some(commands.sync(&http).await?)
             }
+            None => None,
+        };
+
+        if on_message.is_some() || events.has_message_handlers() {
+            default_intents |= Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
+            event_types |= EventTypeFlags::MESSAGE_CREATE;
+        }
+
+        let mut shard = Shard::new(ShardId::ONE, token, intents.unwrap_or(default_intents));
+        let (messages, mut message_queue) = mpsc::channel(64);
+        let (interactions, mut interaction_queue) = mpsc::channel(64);
+
+        let handle_messages = async {
+            while let Some(event) = message_queue.recv().await {
+                match event {
+                    Event::Ready(ready) => {
+                        events.ready(&ready).await;
+                    }
+                    Event::MessageCreate(message) => {
+                        if let Some(handler) = &on_message {
+                            let context = Context {
+                                http: &http,
+                                message: &message.message,
+                            };
+                            if let Err(error) = handler(context).await {
+                                eprintln!("メッセージ処理に失敗しました ({error})");
+                            }
+                        }
+                        events.message(&message.message).await;
+                    }
+                    _ => {}
+                }
+            }
+        };
+
+        let handle_interactions = async {
+            while let Some(interaction) = interaction_queue.recv().await {
+                if let Some(commands) = &slash {
+                    commands.dispatch(&http, &interaction).await;
+                }
+            }
+        };
+
+        let receive = async {
+            while let Some(event) = shard.next_event(event_types).await {
+                match event {
+                    Ok(event @ Event::Ready(_)) => {
+                        println!("Discord に接続しました");
+                        if messages.try_send(event).is_err() {
+                            eprintln!("受信キューが満杯のため READY を処理できませんでした");
+                        }
+                    }
+                    Ok(Event::MessageCreate(message))
+                        if !message.author.bot && message.webhook_id.is_none() =>
+                    {
+                        if messages.try_send(Event::MessageCreate(message)).is_err() {
+                            eprintln!(
+                                "受信キューが満杯のため MESSAGE_CREATE を処理できませんでした"
+                            );
+                        }
+                    }
+                    Ok(Event::InteractionCreate(interaction)) => {
+                        if interactions.try_send(interaction.0).is_err() {
+                            eprintln!(
+                                "受信キューが満杯のため INTERACTION_CREATE を処理できませんでした"
+                            );
+                        }
+                    }
+                    Ok(Event::GatewayClose(Some(frame))) => {
+                        eprintln!("Discord Gateway が接続を閉じました (コード {})", frame.code);
+                    }
+                    Ok(_) => {}
+                    Err(error) => eprintln!("Gateway の受信エラー ({error})"),
+                }
+            }
+        };
+
+        // どのワーカーも Gateway 受信を待たせない。切断で終了したら保留中の処理も中止する。
+        tokio::select! {
+            () = receive => {},
+            () = handle_messages => {},
+            () = handle_interactions => {},
         }
 
         Err("Discord Gateway の接続が終了しました".into())

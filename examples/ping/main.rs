@@ -1,33 +1,31 @@
-use std::{fs, io, path::Path};
+// use は、クレート（Rust のライブラリ）が公開している名前を、このファイルで使えるようにします。
+use disnana_akari::Result;
 
-use disnana_akari::{Bot, Result};
-
+// mod は、別ファイルに分けたコードをこのプログラムの一部として読み込みます。
 mod commands;
+mod config;
+mod events;
 
+// この属性は、Discord とやりとりする非同期処理を Tokio 上で実行できるようにします。
+// async fn は「途中で通信の完了などを待てる関数」です。
+// Result<()> は「成功時は値を返さず、失敗時はエラーを返す」を表します。
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let env_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
-    let bot = match fs::read_to_string(&env_path) {
-        Ok(settings) => {
-            let token = settings
-                .trim_start_matches('\u{feff}')
-                .lines()
-                .filter_map(|line| line.split_once('='))
-                .find_map(|(key, value)| (key.trim() == "DISCORD_TOKEN").then_some(value));
-            token
-                .and_then(|value| Bot::new(value).ok())
-                .ok_or_else(|| {
-                    format!(
-                        "{} の DISCORD_TOKEN に Bot トークンを設定してください",
-                        env_path.display()
-                    )
-                })?
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Bot::from_env()?,
-        Err(error) => {
-            return Err(format!("{} を読み込めませんでした ({error})", env_path.display()).into());
-        }
+    // let は変数を作ります。ここでは load() が返す 2 個の値に、それぞれ名前を付けます。
+    // ? は成功した値を取り出し、エラーならこの関数をそこで終了して呼び出し元に返します。
+    let (bot, guild_id) = config::load()?;
+
+    // with_events はイベント登録を持たせた Bot を返します。
+    let bot = bot.with_events(events::register());
+    // Some は値があること、None は値がないことを表します。
+    // if let は「この形に当てはまるときだけ」と書く方法です。
+    let bot = if let Some(guild_id) = guild_id {
+        bot.with_slash_commands(commands::register_slash(guild_id)?)
+    } else {
+        bot
     };
 
+    // .await は非同期処理が終わるまで待ちます。最後の行のセミコロンを省くと、
+    // その行の値（ここでは Bot の実行結果）が main の戻り値になります。
     bot.run_commands(commands::register()?).await
 }

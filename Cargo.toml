@@ -7,9 +7,11 @@ publish = false
 
 [dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tokio = { version = "1", features = ["macros", "sync"] }
 twilight-gateway = "0.18"
 twilight-http = "0.18"
 twilight-model = "0.18"
+twilight-validate = "0.18"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
