@@ -6,9 +6,10 @@ pub use v2::ComponentsV2;
 
 use std::collections::HashSet;
 
+use http_types::Uri;
 use twilight_model::{
     channel::message::{
-        Component,
+        Component, EmojiReactionType,
         component::{
             ActionRow, Button as RawButton, ButtonStyle, Label, SelectMenu, SelectMenuOption,
             SelectMenuType, TextInput as RawTextInput, TextInputStyle,
@@ -77,7 +78,7 @@ impl Embed {
     }
 }
 
-/// 押すと `custom_id` に対応するイベントを発生させるボタンです。
+/// 登録したイベントを呼ぶか、リンク先を開くボタンです。
 #[derive(Clone, Debug)]
 #[must_use]
 pub struct Button(RawButton);
@@ -85,16 +86,60 @@ pub struct Button(RawButton);
 impl Button {
     /// 青色のボタンを作ります。`custom_id` はハンドラー登録時と同じ ID を指定します。
     pub fn primary(custom_id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::interactive(ButtonStyle::Primary, custom_id, label)
+    }
+
+    /// 補助操作向けの灰色のボタンを作ります。
+    pub fn secondary(custom_id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::interactive(ButtonStyle::Secondary, custom_id, label)
+    }
+
+    /// 確定操作向けの緑色のボタンを作ります。
+    pub fn success(custom_id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::interactive(ButtonStyle::Success, custom_id, label)
+    }
+
+    /// 削除など、影響の大きい操作向けの赤色のボタンを作ります。
+    pub fn danger(custom_id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::interactive(ButtonStyle::Danger, custom_id, label)
+    }
+
+    /// 絶対 HTTP(S) URL を開くボタンを作ります。クリックのイベントは発生しません。
+    pub fn link(url: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::styled(ButtonStyle::Link, None, Some(url.into()), label.into())
+    }
+
+    fn interactive(
+        style: ButtonStyle,
+        custom_id: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
+        Self::styled(style, Some(custom_id.into()), None, label.into())
+    }
+
+    fn styled(
+        style: ButtonStyle,
+        custom_id: Option<String>,
+        url: Option<String>,
+        label: String,
+    ) -> Self {
         Self(RawButton {
-            custom_id: Some(custom_id.into()),
+            custom_id,
             disabled: false,
             emoji: None,
             id: None,
-            label: Some(label.into()),
+            label: (!label.is_empty()).then_some(label),
             sku_id: None,
-            style: ButtonStyle::Primary,
-            url: None,
+            style,
+            url,
         })
+    }
+
+    /// Unicode 絵文字や Discord のカスタム絵文字を設定します。
+    /// 絵文字だけを表示する場合は、作成時に空のラベルを渡します。
+    pub fn emoji(mut self, emoji: EmojiReactionType) -> Self {
+        self.0.emoji = Some(emoji);
+        self
     }
 
     /// `true` を指定するとボタンを押せなくします。
@@ -433,6 +478,10 @@ fn check_row<'a>(row: &'a ActionRow, ids: &mut HashSet<&'a str>) -> Result<()> {
 }
 
 fn check_button<'a>(button: &'a RawButton, ids: &mut HashSet<&'a str>) -> Result<()> {
+    if matches!(&button.emoji, Some(EmojiReactionType::Unicode { name }) if name.trim().is_empty())
+    {
+        return Err("Unicode 絵文字を指定してください。".into());
+    }
     if button.style != ButtonStyle::Premium
         && button.emoji.is_none()
         && button
@@ -441,6 +490,20 @@ fn check_button<'a>(button: &'a RawButton, ids: &mut HashSet<&'a str>) -> Result
             .is_none_or(|label| label.trim().is_empty())
     {
         return Err("ボタンにはラベルまたは絵文字が必要です。".into());
+    }
+    if button.style == ButtonStyle::Link {
+        let url = button.url.as_deref().unwrap_or_default();
+        let target = url.split_once('#').map_or(url, |(target, _)| target);
+        if url.chars().count() > 512
+            || url.chars().any(char::is_whitespace)
+            || !target.parse::<Uri>().is_ok_and(|uri| {
+                matches!(uri.scheme_str(), Some("http" | "https")) && uri.host().is_some()
+            })
+        {
+            return Err(
+                "リンクボタンには512文字以内の絶対 HTTP(S) URL を指定してください。".into(),
+            );
+        }
     }
     if let Some(id) = button.custom_id.as_deref() {
         check_custom_id(ids, id)?;
@@ -490,6 +553,75 @@ fn validate_custom_id(id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn link_and_styled_buttons_work_with_both_message_formats() {
+        use super::{ComponentsV2, EmojiReactionType};
+
+        let emoji = EmojiReactionType::Unicode {
+            name: "🔄".into()
+        };
+        let secondary = Button::secondary("refresh", "").emoji(emoji.clone());
+        let success = Button::success("accept", "承認");
+        let danger = Button::danger("remove", "削除");
+        let link = Button::link("https://example.com/docs?mode=ui#buttons", "ガイド");
+
+        assert_eq!(secondary.0.style, ButtonStyle::Secondary);
+        assert_eq!(secondary.0.custom_id.as_deref(), Some("refresh"));
+        assert_eq!(secondary.0.emoji, Some(emoji));
+        assert!(secondary.0.label.is_none());
+        assert_eq!(success.0.style, ButtonStyle::Success);
+        assert_eq!(danger.0.style, ButtonStyle::Danger);
+        assert_eq!(link.0.style, ButtonStyle::Link);
+        assert!(link.0.custom_id.is_none());
+        assert_eq!(
+            link.0.url.as_deref(),
+            Some("https://example.com/docs?mode=ui#buttons")
+        );
+
+        let buttons = vec![secondary, success, danger, link];
+        assert!(UiMessage::new().buttons(buttons.clone()).validate().is_ok());
+        assert!(ComponentsV2::new().buttons(buttons).validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_links_and_empty_emoji_in_both_message_formats() {
+        use super::{ComponentsV2, EmojiReactionType};
+
+        for url in [
+            "",
+            "/docs",
+            "javascript:alert(1)",
+            "https://",
+            "https://example.com/white space",
+            "https://example.com/fragment#white space",
+        ] {
+            let button = Button::link(url, "ガイド");
+            assert!(
+                UiMessage::new()
+                    .buttons(vec![button.clone()])
+                    .validate()
+                    .is_err()
+            );
+            assert!(
+                ComponentsV2::new()
+                    .buttons(vec![button])
+                    .validate()
+                    .is_err()
+            );
+        }
+        let long = Button::link(format!("https://example.com/{}", "x".repeat(512)), "ガイド");
+        assert!(UiMessage::new().buttons(vec![long]).validate().is_err());
+
+        let empty_emoji =
+            Button::primary("ping", "").emoji(EmojiReactionType::Unicode { name: " ".into() });
+        assert!(
+            UiMessage::new()
+                .buttons(vec![empty_emoji])
+                .validate()
+                .is_err()
+        );
+    }
+
     use super::{
         Button, ButtonStyle, Component, Embed, InteractionResponseType, Modal, SelectOption,
         StringSelect, TextInput, TextInputStyle, UiMessage,

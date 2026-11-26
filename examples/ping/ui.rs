@@ -2,6 +2,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use disnana_akari::{
     ButtonContext, Result, SlashContext,
+    model::channel::message::EmojiReactionType,
     ui::{Button, Embed, UiMessage},
 };
 
@@ -26,8 +27,14 @@ fn panel(status: &str) -> UiMessage {
     // 最初の返信と更新時に同じ関数を使うので、更新後もボタンが残ります。
     UiMessage::new().embed(embed).buttons(vec![
         Button::primary(BUTTON_ID, "Ping"),
-        Button::primary(REFRESH_BUTTON_ID, "更新"),
-        Button::primary(SLOW_REFRESH_BUTTON_ID, "遅延更新"),
+        Button::success(REFRESH_BUTTON_ID, "更新")
+            .emoji(EmojiReactionType::Unicode { name: "✅".into() }),
+        Button::secondary(SLOW_REFRESH_BUTTON_ID, "遅延更新"),
+        // リンクを押すと URL が開きます。このボタンのハンドラー登録は不要です。
+        Button::link(
+            "https://docs.discord.com/developers/components/overview",
+            "Discord の開発者向け資料",
+        ),
     ])
 }
 

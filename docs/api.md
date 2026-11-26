@@ -157,9 +157,16 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `Embed::new(title).description(text).color(rgb)` | 埋め込みの見出しと説明、`0x5865F2` のような RGB の色を指定します。 |
 | `embed.field(name, value, inline)` | 項目を一つ追加します。`inline` が `true` の項目は、表示幅に応じて横に並びます。 |
 | `Button::primary(custom_id, label)` | Discord に表示するラベルと、クリック時に使う識別子を指定します。 |
+| `Button::secondary(custom_id, label)` | 控えめに表示する操作ボタンを作ります。 |
+| `Button::success(custom_id, label)` | 確認や完了などに使う緑色の操作ボタンを作ります。 |
+| `Button::danger(custom_id, label)` | 削除などに使う赤色の操作ボタンを作ります。 |
+| `Button::link(url, label)` | クリックで URL を開くボタンを作ります。Discord からクリックのイベントは届きません。 |
+| `button.emoji(emoji)` | `model::channel::message::EmojiReactionType` で Unicode 絵文字やカスタム絵文字を付けます。 |
 | `button.disabled(true)` | 押せない状態でボタンを表示します。 |
 
 本文は最大 2,000 文字、埋め込みは最大 10 個で合計 6,000 文字までです。一つのメッセージ内で同じボタン識別子を複数使うと、送信時にエラーが返ります。テキストコマンドの返信に埋め込みを付ける場合は、Bot のチャンネル権限 **Embed Links** を確認します。[Discord のチャンネル権限](https://docs.discord.com/developers/topics/permissions#permissions-bitwise-permission-flags)
+
+操作ボタン、リンクボタン、絵文字は `UiMessage::buttons` と `ComponentsV2::buttons` の両方で使えます。リンクボタンには 512 文字以内の絶対 HTTP または HTTPS URL を指定します。URL はメッセージの送信時に検証します。
 
 `Events::on_button` で登録した関数は、サーバーやメッセージを問わず `custom_id` が完全一致すると呼ばれます。メッセージを閲覧できるユーザーがボタンを押せるため、投稿者や管理者に限定する操作では `guild_id()` と `message()` で対象を確認し、`author_id()` で操作者を特定して権限を確認します。
 

@@ -116,6 +116,8 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 
 `Button::primary` の最初の値は、クリック時に Discord から送られてくる識別子 `custom_id` です。`on_button` に同じ値を渡すと、ボタンを押したときに登録した関数が呼ばれます。`const` で一箇所に定義しておくと、表示側と登録側の値を揃えられます。`reply_ephemeral` を使うと、クリックへの返信は本人にだけ見えます。[Playground の UI 実装](../examples/ping/ui.rs) · [API リファレンス](api.md)
 
+Playground では `Button::success` に緑色の **更新** を割り当て、`EmojiReactionType::Unicode { name: "✅".into() }` で絵文字を追加しています。**遅延更新** は `Button::secondary` で控えめに表示します。`Button::link` で作った **Discord の開発者向け資料** はブラウザーで URL を開き、ハンドラーの登録は不要です。同じボタンは Components V2 にも載せられます。[Playground のボタン実装](../examples/ping/ui.rs)
+
 ### ボタンが付いているメッセージを更新する
 
 Playground の **更新** ボタンは `update_message` で、クリックされたボタンの元メッセージを更新します。**遅延更新** ボタンは、先に `defer_update` で応答してから 4 秒待ち、元の表示を更新して、`followup_ephemeral` で押した人にだけ完了を知らせます。表示の作成は共通の関数にまとめているので、どちらの更新でもボタンが残ります。[Playground の UI 実装](../examples/ping/ui.rs)

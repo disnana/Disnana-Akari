@@ -112,6 +112,7 @@ name = "disnana-akari"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "http",
  "rustls",
  "tokio",
  "twilight-gateway",
