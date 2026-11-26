@@ -23,4 +23,5 @@ twilight-model = "0.18"
 twilight-validate = "0.18"
 
 [dev-dependencies]
+static_assertions = "1.1.0"
 tokio = { version = "1", features = ["macros", "rt", "time"] }
