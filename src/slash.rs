@@ -23,7 +23,7 @@ use twilight_model::{
 use twilight_validate::command;
 
 use crate::{
-    ErrorSource, Result, Timing,
+    Error, ErrorSource, Result, Timing,
     hooks::Hooks,
     ui::{ComponentsV2, Modal, UiMessage},
 };
@@ -33,6 +33,16 @@ pub struct SlashCommands {
     guild_id: Id<GuildMarker>,
     entries: BTreeMap<String, Definition>,
     replace: bool,
+}
+
+impl std::fmt::Debug for SlashCommands {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlashCommands")
+            .field("guild_id", &self.guild_id)
+            .field("registered", &self.entries.keys().collect::<Vec<_>>())
+            .field("replace", &self.replace)
+            .finish()
+    }
 }
 
 impl SlashCommands {
@@ -78,9 +88,9 @@ impl SlashCommands {
                 });
                 Ok(())
             }
-            Entry::Occupied(_) => {
-                Err(format!("スラッシュコマンド `/{name}` は登録済みです").into())
-            }
+            Entry::Occupied(_) => Err(Error::InvalidRegistration(format!(
+                "スラッシュコマンド `/{name}` は登録済みです"
+            ))),
         }
     }
 
@@ -129,8 +139,9 @@ impl SlashCommands {
                 .chat_input(name, &definition.description)
                 .command_options(&definition.options)
                 .await
-                .map_err(|error| {
-                    format!("スラッシュコマンド `/{name}` を登録できませんでした ({error})")
+                .map_err(|source| Error::CommandRegistration {
+                    name: name.clone(),
+                    source,
                 })?
                 .model()
                 .await?;
@@ -170,27 +181,33 @@ impl SlashCommands {
 
     fn bind(mut self, registered: Vec<Command>) -> Result<ActiveSlashCommands> {
         if registered.len() != self.entries.len() {
-            return Err("Discord が返したコマンド件数が登録件数と一致しません".into());
+            return Err(Error::InvalidCommandSync(
+                "Discord が返したコマンド件数が登録件数と一致しません".to_owned(),
+            ));
         }
 
         let mut handlers = HashMap::with_capacity(registered.len());
         for command in registered {
             let name = command.name;
             if command.kind != CommandType::ChatInput {
-                return Err(
-                    format!("`/{name}` の登録結果がスラッシュコマンドではありません").into(),
-                );
+                return Err(Error::InvalidCommandSync(format!(
+                    "`/{name}` の登録結果がスラッシュコマンドではありません"
+                )));
             }
-            let id = command
-                .id
-                .ok_or_else(|| format!("`/{name}` の登録結果に ID がありません"))?;
+            let id = command.id.ok_or_else(|| {
+                Error::InvalidCommandSync(format!("`/{name}` の登録結果に ID がありません"))
+            })?;
             let definition = self.entries.remove(&name).ok_or_else(|| {
-                format!("`/{name}` の登録結果が重複しているか、登録要求に含まれていません")
+                Error::InvalidCommandSync(format!(
+                    "`/{name}` の登録結果が重複しているか、登録要求に含まれていません"
+                ))
             })?;
             if let std::collections::hash_map::Entry::Vacant(entry) = handlers.entry(id) {
                 entry.insert(definition.handler);
             } else {
-                return Err(format!("`/{name}` の登録結果の ID が重複しています").into());
+                return Err(Error::InvalidCommandSync(format!(
+                    "`/{name}` の登録結果の ID が重複しています"
+                )));
             }
         }
 
@@ -245,15 +262,13 @@ impl ActiveSlashCommands {
         };
         let name = Some(data.name.as_str());
         let Some(handler) = self.handlers.get(&data.id) else {
-            hooks.reporter.report_text(
-                ErrorSource::SlashCommand,
-                name,
-                "Akari に登録されていないスラッシュコマンドが実行されました",
-            );
+            hooks
+                .reporter
+                .report(ErrorSource::SlashCommand, name, &Error::CommandUnavailable);
             if let Some(text) = &hooks.messages.slash_command_unavailable
                 && let Err(error) = send_initial_message(http, interaction, text, true).await
             {
-                hooks.reporter.report(ErrorSource::Response, name, &*error);
+                hooks.reporter.report(ErrorSource::Response, name, &error);
             }
             return;
         };
@@ -269,7 +284,7 @@ impl ActiveSlashCommands {
         if let Err(error) = handler.call(&mut ctx).await {
             hooks
                 .reporter
-                .report(ErrorSource::SlashCommand, name, &*error);
+                .report(ErrorSource::SlashCommand, name, &error);
         }
         // 応答が済んでいない（エラー、または応答の忘れ）ときは、文言が設定されていれば知らせる。
         let Some(text) = &hooks.messages.slash_command_failed else {
@@ -281,7 +296,7 @@ impl ActiveSlashCommands {
             ResponseState::Replied | ResponseState::ModalOpened => Ok(()),
         };
         if let Err(error) = fallback {
-            hooks.reporter.report(ErrorSource::Response, name, &*error);
+            hooks.reporter.report(ErrorSource::Response, name, &error);
         }
     }
 }
@@ -293,6 +308,17 @@ pub struct SlashContext<'a> {
     data: &'a CommandData,
     response_state: &'a mut ResponseState,
     timing: Timing,
+}
+
+impl std::fmt::Debug for SlashContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlashContext")
+            .field("interaction_id", &self.interaction.id)
+            .field("timing", &self.timing)
+            .field("command", &self.data.name)
+            .field("response_state", &self.response_state)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> SlashContext<'a> {
@@ -412,7 +438,9 @@ impl<'a> SlashContext<'a> {
     /// 応答済み、無効なフォーム、または Discord が受け付けない場合に失敗します。
     pub async fn show_modal(&mut self, modal: &Modal) -> Result<()> {
         if *self.response_state != ResponseState::Pending {
-            return Err("フォームはスラッシュコマンドの初回応答で開いてください".into());
+            return Err(Error::InvalidResponseState(
+                "フォームはスラッシュコマンドの初回応答で開いてください",
+            ));
         }
         let response = modal.response()?;
         self.http
@@ -514,7 +542,7 @@ impl<'a> SlashContext<'a> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResponseState {
     Pending,
     Deferred { ephemeral: bool },
@@ -526,11 +554,13 @@ impl ResponseState {
     fn reply_action(self, ephemeral: bool) -> Result<ReplyAction> {
         match self {
             Self::Pending => Ok(ReplyAction::Initial),
-            Self::Deferred { ephemeral: false } if ephemeral => {
-                Err("遅延応答の公開範囲は変更できません".into())
-            }
+            Self::Deferred { ephemeral: false } if ephemeral => Err(Error::InvalidResponseState(
+                "遅延応答の公開範囲は変更できません",
+            )),
             Self::Deferred { .. } => Ok(ReplyAction::EditDeferred),
-            Self::Replied | Self::ModalOpened => Err("この操作にはすでに応答しました".into()),
+            Self::Replied | Self::ModalOpened => Err(Error::InvalidResponseState(
+                "この操作にはすでに応答しました",
+            )),
         }
     }
 
@@ -541,7 +571,9 @@ impl ResponseState {
         ephemeral: bool,
     ) -> Result<()> {
         if *self != Self::Pending {
-            return Err("この操作にはすでに初回応答を送りました".into());
+            return Err(Error::InvalidResponseState(
+                "この操作にはすでに初回応答を送りました",
+            ));
         }
         send_deferred_message(http, interaction, ephemeral).await?;
         *self = Self::Deferred { ephemeral };
@@ -573,7 +605,9 @@ impl ResponseState {
         ephemeral: bool,
     ) -> Result<()> {
         if *self != Self::Replied {
-            return Err("追加メッセージを送る前に reply で初回メッセージを送ってください".into());
+            return Err(Error::InvalidResponseState(
+                "追加メッセージを送る前に reply で初回メッセージを送ってください",
+            ));
         }
         send_followup_message(http, interaction, content, ephemeral).await
     }

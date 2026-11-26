@@ -60,6 +60,7 @@ pub async fn choose_mentionable(ctx: &mut MentionableSelectContext<'_>) -> Resul
         .map(|value| match value {
             Mentionable::User(id) => selection("ユーザー", Some(id.get())),
             Mentionable::Role(id) => selection("ロール", Some(id.get())),
+            _ => "この種類の選択項目には対応していません。".to_owned(),
         })
         .collect();
     ctx.reply_ephemeral(&lines.join("\n")).await

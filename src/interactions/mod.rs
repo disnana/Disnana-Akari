@@ -25,7 +25,7 @@ use twilight_model::{
 mod owner;
 
 use crate::{
-    ErrorSource, Messages, Result, Timing,
+    Error, ErrorSource, Messages, Result, Timing,
     hooks::Hooks,
     slash::{
         ResponseState, edit_ui_response, edit_v2_response, send_followup_message,
@@ -43,6 +43,20 @@ pub(crate) struct InteractionHandlers {
     channel_selects: HashMap<String, Box<dyn EntitySelectHandler<ChannelMarker>>>,
     mentionable_selects: HashMap<String, Box<dyn MentionableSelectHandler>>,
     modals: HashMap<String, Box<dyn ModalHandler>>,
+}
+
+impl std::fmt::Debug for InteractionHandlers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InteractionHandlers")
+            .field("buttons", &self.buttons.len())
+            .field("selects", &self.selects.len())
+            .field("user_selects", &self.user_selects.len())
+            .field("role_selects", &self.role_selects.len())
+            .field("channel_selects", &self.channel_selects.len())
+            .field("mentionable_selects", &self.mentionable_selects.len())
+            .field("modals", &self.modals.len())
+            .finish()
+    }
 }
 
 impl InteractionHandlers {
@@ -246,7 +260,7 @@ impl InteractionHandlers {
                 let result = handler.call(&mut ctx).await;
                 let name = Some(data.custom_id.as_str());
                 if let Err(error) = &result {
-                    hooks.reporter.report(ErrorSource::Modal, name, &**error);
+                    hooks.reporter.report(ErrorSource::Modal, name, error);
                 }
                 if let Some((content, ephemeral)) =
                     modal_fallback(ctx.response, result.is_ok(), &hooks.messages)
@@ -255,7 +269,7 @@ impl InteractionHandlers {
                         .reply(http, interaction, content, ephemeral)
                         .await
                 {
-                    hooks.reporter.report(ErrorSource::Response, name, &*error);
+                    hooks.reporter.report(ErrorSource::Response, name, &error);
                 }
             }
             None => {}
@@ -298,15 +312,15 @@ async fn dispatch_entity<M>(
 /// 選択内容を読み取れなかったことを報告し、文言が設定されていれば本人にだけ知らせる。
 async fn reject_selection(ctx: &mut ButtonContext<'_>, hooks: &Hooks) {
     let name = Some(ctx.custom_id());
-    hooks.reporter.report_text(
+    hooks.reporter.report(
         ErrorSource::Select,
         name,
-        "Discord が送った選択内容を読み取れませんでした",
+        &Error::InvalidSelection("Discord が送った選択内容を読み取れませんでした"),
     );
     if let Some(text) = &hooks.messages.select_failed
         && let Err(error) = ctx.reply_ephemeral(text).await
     {
-        hooks.reporter.report(ErrorSource::Response, name, &*error);
+        hooks.reporter.report(ErrorSource::Response, name, &error);
     }
 }
 
@@ -319,16 +333,23 @@ fn parse_select_values<T: Eq>(
     resolve: impl Fn(Id<GenericMarker>) -> Result<T>,
 ) -> Result<Vec<T>> {
     if values.len() > 25 {
-        return Err("セレクトの選択数が上限を超えています".into());
+        return Err(Error::InvalidSelection(
+            "セレクトの選択数が上限を超えています",
+        ));
     }
     let mut selections = Vec::with_capacity(values.len());
     for value in values {
         if value.starts_with('0') || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err("セレクトの値が Discord ID ではありません".into());
+            return Err(Error::InvalidSelection(
+                "セレクトの値が Discord ID ではありません",
+            ));
         }
-        let selection = resolve(value.parse()?)?;
+        let id = value
+            .parse()
+            .map_err(|_| Error::InvalidSelection("セレクトの値が Discord ID ではありません"))?;
+        let selection = resolve(id)?;
         if selections.contains(&selection) {
-            return Err("セレクトの値が重複しています".into());
+            return Err(Error::InvalidSelection("セレクトの値が重複しています"));
         }
         selections.push(selection);
     }
@@ -340,13 +361,17 @@ fn parse_mentionables(
     resolved: Option<&InteractionDataResolved>,
 ) -> Result<Vec<Mentionable>> {
     parse_select_values(values, |id| {
-        let resolved = resolved.ok_or("メンショナブルの解決済みデータがありません")?;
+        let resolved = resolved.ok_or(Error::InvalidSelection(
+            "メンショナブルの解決済みデータがありません",
+        ))?;
         let user_id = id.cast();
         let role_id = id.cast();
         match (resolved.users.get(&user_id), resolved.roles.get(&role_id)) {
             (Some(user), None) if user.id == user_id => Ok(Mentionable::User(user_id)),
             (None, Some(role)) if role.id == role_id => Ok(Mentionable::Role(role_id)),
-            _ => Err("メンショナブルの値をユーザーまたはロールの一方に特定できません".into()),
+            _ => Err(Error::InvalidSelection(
+                "メンショナブルの値をユーザーまたはロールの一方に特定できません",
+            )),
         }
     })
 }
@@ -376,14 +401,18 @@ fn register_handler<T: ?Sized>(
     handler: Box<T>,
 ) -> Result<()> {
     if !(1..=100).contains(&custom_id.chars().count()) {
-        return Err(format!("{label} ID は 1 文字以上 100 文字以下で指定してください").into());
+        return Err(Error::InvalidRegistration(format!(
+            "{label} ID は 1 文字以上 100 文字以下で指定してください"
+        )));
     }
     match handlers.entry(custom_id.into()) {
         Entry::Vacant(entry) => {
             entry.insert(handler);
             Ok(())
         }
-        Entry::Occupied(_) => Err(format!("{label} ID `{custom_id}` は登録済みです").into()),
+        Entry::Occupied(_) => Err(Error::InvalidRegistration(format!(
+            "{label} ID `{custom_id}` は登録済みです"
+        ))),
     }
 }
 
@@ -401,7 +430,7 @@ async fn finish_component(
     let name = Some(ctx.custom_id());
     match result {
         Err(error) => {
-            hooks.reporter.report(source, name, &*error);
+            hooks.reporter.report(source, name, &error);
             let Some(text) = failure else {
                 return;
             };
@@ -411,12 +440,12 @@ async fn finish_component(
                 ButtonResponse::Sent => Ok(()),
             };
             if let Err(error) = fallback {
-                hooks.reporter.report(ErrorSource::Response, name, &*error);
+                hooks.reporter.report(ErrorSource::Response, name, &error);
             }
         }
         Ok(()) if ctx.response == ButtonResponse::Pending => {
             if let Err(error) = ctx.acknowledge().await {
-                hooks.reporter.report(ErrorSource::Response, name, &*error);
+                hooks.reporter.report(ErrorSource::Response, name, &error);
             }
         }
         Ok(()) => {}
@@ -460,6 +489,17 @@ pub struct ButtonContext<'a> {
     custom_id: &'a str,
     timing: Timing,
     response: ButtonResponse,
+}
+
+impl std::fmt::Debug for ButtonContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ButtonContext")
+            .field("interaction_id", &self.interaction.id)
+            .field("timing", &self.timing)
+            .field("custom_id", &self.custom_id)
+            .field("response", &self.response)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> ButtonContext<'a> {
@@ -576,7 +616,9 @@ impl<'a> ButtonContext<'a> {
     pub async fn update_message(&mut self, message: &UiMessage) -> Result<()> {
         let action = self.response.update_action()?;
         if self.uses_components_v2() {
-            return Err("Components V2 のメッセージには update_v2 を使ってください".into());
+            return Err(Error::InvalidResponseState(
+                "Components V2 のメッセージには update_v2 を使ってください",
+            ));
         }
         message.validate()?;
         match action {
@@ -604,7 +646,9 @@ impl<'a> ButtonContext<'a> {
     pub async fn update_v2(&mut self, message: &ComponentsV2) -> Result<()> {
         let action = self.response.update_action()?;
         if !self.uses_components_v2() {
-            return Err("Components V2 で作られた元メッセージが必要です".into());
+            return Err(Error::InvalidResponseState(
+                "Components V2 で作られた元メッセージが必要です",
+            ));
         }
         message.validate()?;
         match action {
@@ -663,13 +707,16 @@ impl<'a> ButtonContext<'a> {
 
     async fn send_followup(&self, content: &str, ephemeral: bool) -> Result<()> {
         if self.response == ButtonResponse::Pending {
-            return Err("追加メッセージを送る前にボタン操作に応答してください".into());
+            return Err(Error::InvalidResponseState(
+                "追加メッセージを送る前にボタン操作に応答してください",
+            ));
         }
         send_followup_message(self.http, self.interaction, content, ephemeral).await
     }
 }
 
 /// 文字列セレクトを一回選んだときにハンドラーへ渡す情報です。
+#[derive(Debug)]
 pub struct SelectContext<'a> {
     inner: ButtonContext<'a>,
     values: &'a [String],
@@ -767,6 +814,7 @@ impl<'a> SelectContext<'a> {
 }
 
 /// ユーザー・ロール・チャンネルを選択したときにハンドラーへ渡す情報です。
+#[derive(Debug)]
 pub struct EntitySelectContext<'a, M> {
     inner: ButtonContext<'a>,
     values: Vec<Id<M>>,
@@ -784,6 +832,7 @@ pub type ChannelSelectContext<'a> = EntitySelectContext<'a, ChannelMarker>;
 
 /// メンショナブルセレクトで選択できるユーザーまたはロールです。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[non_exhaustive]
 pub enum Mentionable {
     /// 選択されたユーザーの ID です。
     User(Id<UserMarker>),
@@ -792,6 +841,7 @@ pub enum Mentionable {
 }
 
 /// メンショナブルセレクトを操作したときにハンドラーへ渡す情報です。
+#[derive(Debug)]
 pub struct MentionableSelectContext<'a> {
     inner: ButtonContext<'a>,
     values: Vec<Mentionable>,
@@ -918,6 +968,17 @@ pub struct ModalContext<'a> {
     response: ResponseState,
 }
 
+impl std::fmt::Debug for ModalContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModalContext")
+            .field("interaction_id", &self.interaction.id)
+            .field("timing", &self.timing)
+            .field("custom_id", &self.data.custom_id)
+            .field("response", &self.response)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a> ModalContext<'a> {
     /// モーダルの ID を返します。
     pub fn custom_id(&self) -> &'a str {
@@ -1028,7 +1089,7 @@ fn submitted_text<'a>(
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ButtonResponse {
     Pending,
     DeferredUpdate,
@@ -1040,7 +1101,9 @@ impl ButtonResponse {
         if self == Self::Pending {
             Ok(())
         } else {
-            Err("この操作にはすでに初回応答を送りました".into())
+            Err(Error::InvalidResponseState(
+                "この操作にはすでに初回応答を送りました",
+            ))
         }
     }
 
@@ -1048,7 +1111,9 @@ impl ButtonResponse {
         match self {
             Self::Pending => Ok(UpdateAction::Initial),
             Self::DeferredUpdate => Ok(UpdateAction::Edit),
-            Self::Sent => Err("この操作では元のメッセージを更新できません".into()),
+            Self::Sent => Err(Error::InvalidResponseState(
+                "この操作では元のメッセージを更新できません",
+            )),
         }
     }
 }

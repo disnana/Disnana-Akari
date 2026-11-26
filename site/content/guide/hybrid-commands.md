@@ -66,6 +66,7 @@ async fn where_from(ctx: &mut HybridContext<'_>) -> Result<()> {
     let text = match ctx.source() {
         CommandSource::Text => "テキストコマンドから呼ばれました。",
         CommandSource::Slash => "スラッシュコマンドから呼ばれました。",
+        _ => "この呼び出し方には対応していません。",
     };
     ctx.reply(text).await
 }

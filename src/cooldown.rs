@@ -10,6 +10,7 @@ use twilight_model::id::{Id, marker::UserMarker};
 ///
 /// 一つのインスタンスが一つの制限を表します。コマンドや呼び出し方ごとに
 /// インスタンスを作ると、それぞれ独立して制限できます。
+#[derive(Debug)]
 pub struct Cooldown {
     interval: Duration,
     active: Mutex<ActiveUsers>,
@@ -40,7 +41,7 @@ impl Cooldown {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ActiveUsers {
     by_user: HashMap<Id<UserMarker>, Instant>,
     accepted: VecDeque<(Id<UserMarker>, Instant)>,

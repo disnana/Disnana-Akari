@@ -101,6 +101,7 @@ async fn picked(ctx: &mut MentionableSelectContext<'_>) -> Result<()> {
         match item {
             Mentionable::User(id) => lines.push(format!("ユーザー `{}`", id.get())),
             Mentionable::Role(id) => lines.push(format!("ロール `{}`", id.get())),
+            _ => lines.push("この種類の選択項目には対応していません。".to_owned()),
         }
     }
     ctx.reply_ephemeral(&lines.join("\n")).await

@@ -114,6 +114,7 @@ dependencies = [
  "futures-util",
  "http",
  "rustls",
+ "thiserror",
  "tokio",
  "twilight-gateway",
  "twilight-http",

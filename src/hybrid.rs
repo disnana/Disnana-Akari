@@ -9,7 +9,7 @@ use twilight_model::{
 };
 
 use crate::{
-    CommandContext, Commands, Cooldown, Result, SlashCommands, SlashContext, Timing,
+    CommandContext, Commands, Cooldown, Error, Result, SlashCommands, SlashContext, Timing,
     ui::{ComponentsV2, UiMessage},
 };
 
@@ -75,6 +75,7 @@ fn bound_text<'a>(option_name: Option<&str>, requested: &str, args: &'a str) -> 
 
 /// コマンドの呼び出し方です。
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum CommandSource {
     /// `!ping` など、メッセージとして送信されたコマンドです。
     Text,
@@ -83,10 +84,12 @@ pub enum CommandSource {
 }
 
 /// テキストとスラッシュで同じコマンド関数を使うためのコンテキストです。
+#[derive(Debug)]
 pub struct HybridContext<'a> {
     inner: SourceContext<'a>,
 }
 
+#[derive(Debug)]
 enum SourceContext<'a> {
     Text {
         ctx: CommandContext<'a>,
@@ -129,9 +132,7 @@ impl<'a> HybridContext<'a> {
     ///
     /// 実行者の ID を取得できない場合や、待ち時間の通知を送れない場合はエラーを返します。
     pub async fn check_cooldown(&mut self, cooldown: &Cooldown) -> Result<bool> {
-        let user = self
-            .author_id()
-            .ok_or("実行したユーザーを確認できませんでした。")?;
+        let user = self.author_id().ok_or(Error::MissingAuthor)?;
         let Err(remaining) = cooldown.check(user) else {
             return Ok(true);
         };

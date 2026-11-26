@@ -65,6 +65,24 @@ fn interaction(kind: InteractionType, data: InteractionData) -> Interaction {
     }
 }
 
+#[tokio::test]
+async fn button_context_debug_omits_credentials() {
+    let bot_token = "dummy-bot-credential";
+    let interaction_token = "dummy-interaction-credential";
+    let client = twilight_http::Client::new(bot_token.to_owned());
+    let mut event = interaction(
+        InteractionType::MessageComponent,
+        component_payload(ComponentType::Button, "akari:test"),
+    );
+    event.token = interaction_token.to_owned();
+    let (_, timing) = crate::timing::Pending::new((), None).begin();
+    let ctx = ButtonContext::new(&client, &event, "akari:test", timing);
+    let debug = format!("{ctx:?}");
+    assert!(debug.contains("akari:test"));
+    assert!(!debug.contains(bot_token));
+    assert!(!debug.contains(interaction_token));
+}
+
 fn component_payload(component_type: ComponentType, id: &str) -> InteractionData {
     InteractionData::MessageComponent(Box::new(MessageComponentInteractionData {
         component_type,
