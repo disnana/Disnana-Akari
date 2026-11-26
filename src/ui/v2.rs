@@ -8,7 +8,10 @@ use twilight_validate::{component::COMPONENT_V2_COUNT, embed::COLOR_MAXIMUM, mes
 
 use crate::Result;
 
-use super::{Button, StringSelect, button_row, check_button, check_row, select_row};
+use super::{
+    Button, ChannelSelect, RoleSelect, StringSelect, UserSelect, button_row, check_button,
+    check_row, select_row,
+};
 
 const TOTAL_TEXT_LENGTH: usize = 4_000;
 
@@ -49,7 +52,22 @@ impl ComponentsV2 {
 
     /// 文字列選択メニューを一つの行として追加します。
     pub fn select(self, select: StringSelect) -> Self {
-        self.component(select_row(select))
+        self.component(select_row(select.0))
+    }
+
+    /// ユーザー選択メニューを一つの行として追加します。
+    pub fn user_select(self, select: UserSelect) -> Self {
+        self.component(select_row(select.0))
+    }
+
+    /// ロール選択メニューを一つの行として追加します。
+    pub fn role_select(self, select: RoleSelect) -> Self {
+        self.component(select_row(select.0))
+    }
+
+    /// チャンネル選択メニューを一つの行として追加します。
+    pub fn channel_select(self, select: ChannelSelect) -> Self {
+        self.component(select_row(select.0))
     }
 
     /// 複数の部品を、RGB 値で指定した色の付いたコンテナーにまとめます。

@@ -10,6 +10,7 @@
 | `events.rs` | Gateway が準備できたときや、メッセージを受け取ったときの処理を定義します。 |
 | `ui.rs` | `/ui` の埋め込み、ボタン、クリック時の処理を定義します。 |
 | `components.rs` | `/components` の Components V2、選択メニューと入力フォームを定義します。 |
+| `entities.rs` | `/entities` のユーザー、ロール、チャンネルの選択メニューを定義します。 |
 
 ## `!ping` の実行を追う
 
@@ -135,6 +136,12 @@ Playground の **更新** ボタンは `update_message` で、クリックされ
 選択する個数を変える場合は、メニューに `.min_values(1).max_values(2)` のように上限と下限を設定します。フォームでは `.min_length(1).max_length(200)` で入力の長さを指定し、`.value("下書き")` で入力欄に初期値を入れられます。
 
 フォーム送信後の処理に時間がかかる場合は、先に `ctx.defer_ephemeral().await?` で本人に処理中と伝え、処理を終えてから `ctx.reply("保存しました。").await?` で表示を書き換えます。別の通知を続ける場合は `followup_ephemeral` を使います。[フォーム送信への応答](api.md)
+
+### Discord が用意する候補から選ぶ
+
+`/entities` では `UserSelect`、`RoleSelect`、`ChannelSelect` の候補を Discord が用意します。候補のリストをハンドラーで作る代わりに、メニューごとに識別子を決め、対応する `on_user_select`、`on_role_select`、`on_channel_select` に関数を登録します。サンプルでは `channel_types(vec![ChannelType::GuildText])` で候補をテキストチャンネルに絞ります。
+
+選択時の `values()` は、ユーザー用、ロール用、チャンネル用に区別された ID の一覧を返します。`first()` で最初の ID を借り、`id.get()` で数値を取り出します。返信の数値はバッククォートで囲み、メンションを作らずに ID を表示します。[Playground の選択メニュー実装](../examples/ping/entities.rs)
 
 ## 自分のライブラリを組み込む
 

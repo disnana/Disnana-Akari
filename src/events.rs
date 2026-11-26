@@ -4,7 +4,10 @@ use twilight_model::channel::Message;
 
 pub use twilight_model::gateway::payload::incoming::Ready;
 
-use crate::{ButtonContext, ModalContext, Result, SelectContext, buttons::Buttons};
+use crate::{
+    ButtonContext, ChannelSelectContext, ModalContext, Result, RoleSelectContext, SelectContext,
+    UserSelectContext, buttons::Buttons,
+};
 
 /// Gateway イベントごとに非同期ハンドラーを登録します。
 #[derive(Default)]
@@ -59,6 +62,42 @@ impl Events {
         handler: impl AsyncFn(&mut SelectContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
         self.buttons.register_select(custom_id, handler)
+    }
+
+    /// 指定した ID のユーザー選択を処理する関数を登録します。
+    ///
+    /// # エラー
+    /// ID が無効、または同じユーザー Select ID を登録済みの場合に失敗します。
+    pub fn on_user_select(
+        &mut self,
+        custom_id: &str,
+        handler: impl AsyncFn(&mut UserSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.buttons.register_user_select(custom_id, handler)
+    }
+
+    /// 指定した ID のロール選択を処理する関数を登録します。
+    ///
+    /// # エラー
+    /// ID が無効、または同じロール Select ID を登録済みの場合に失敗します。
+    pub fn on_role_select(
+        &mut self,
+        custom_id: &str,
+        handler: impl AsyncFn(&mut RoleSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.buttons.register_role_select(custom_id, handler)
+    }
+
+    /// 指定した ID のチャンネル選択を処理する関数を登録します。
+    ///
+    /// # エラー
+    /// ID が無効、または同じチャンネル Select ID を登録済みの場合に失敗します。
+    pub fn on_channel_select(
+        &mut self,
+        custom_id: &str,
+        handler: impl AsyncFn(&mut ChannelSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.buttons.register_channel_select(custom_id, handler)
     }
 
     /// 指定した ID の Modal が送信されたときに呼ぶ関数を登録します。

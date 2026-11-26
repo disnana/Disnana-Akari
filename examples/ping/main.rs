@@ -5,6 +5,7 @@ use disnana_akari::Result;
 mod commands;
 mod components;
 mod config;
+mod entities;
 mod events;
 mod ui;
 

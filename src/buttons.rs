@@ -7,7 +7,8 @@ use std::{
 use twilight_http::Client;
 use twilight_model::{
     application::interaction::{
-        Interaction, InteractionData, InteractionMetadata, InteractionType,
+        Interaction, InteractionData, InteractionDataResolved, InteractionMetadata,
+        InteractionType,
         message_component::MessageComponentInteractionData,
         modal::{ModalInteractionComponent, ModalInteractionData},
     },
@@ -21,7 +22,7 @@ use twilight_model::{
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
         Id,
-        marker::{GuildMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
     },
 };
 
@@ -43,6 +44,9 @@ const MODAL_ACCEPTED: &str = "入力を受け付けました。";
 pub(crate) struct Buttons {
     handlers: HashMap<String, Box<dyn ButtonHandler>>,
     selects: HashMap<String, Box<dyn SelectHandler>>,
+    user_selects: HashMap<String, Box<dyn EntitySelectHandler<UserMarker>>>,
+    role_selects: HashMap<String, Box<dyn EntitySelectHandler<RoleMarker>>>,
+    channel_selects: HashMap<String, Box<dyn EntitySelectHandler<ChannelMarker>>>,
     modals: HashMap<String, Box<dyn ModalHandler>>,
 }
 
@@ -63,6 +67,45 @@ impl Buttons {
         register_handler(&mut self.selects, "セレクト", custom_id, Box::new(handler))
     }
 
+    pub(crate) fn register_user_select(
+        &mut self,
+        custom_id: &str,
+        handler: impl AsyncFn(&mut UserSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        register_handler(
+            &mut self.user_selects,
+            "ユーザーセレクト",
+            custom_id,
+            Box::new(handler),
+        )
+    }
+
+    pub(crate) fn register_role_select(
+        &mut self,
+        custom_id: &str,
+        handler: impl AsyncFn(&mut RoleSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        register_handler(
+            &mut self.role_selects,
+            "ロールセレクト",
+            custom_id,
+            Box::new(handler),
+        )
+    }
+
+    pub(crate) fn register_channel_select(
+        &mut self,
+        custom_id: &str,
+        handler: impl AsyncFn(&mut ChannelSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        register_handler(
+            &mut self.channel_selects,
+            "チャンネルセレクト",
+            custom_id,
+            Box::new(handler),
+        )
+    }
+
     pub(crate) fn register_modal(
         &mut self,
         custom_id: &str,
@@ -72,13 +115,23 @@ impl Buttons {
     }
 
     pub(crate) fn has_handlers(&self) -> bool {
-        !(self.handlers.is_empty() && self.selects.is_empty() && self.modals.is_empty())
+        !(self.handlers.is_empty()
+            && self.selects.is_empty()
+            && self.user_selects.is_empty()
+            && self.role_selects.is_empty()
+            && self.channel_selects.is_empty()
+            && self.modals.is_empty())
     }
 
     pub(crate) fn accepts(&self, interaction: &Interaction) -> bool {
         match ui_input(interaction) {
             Some(UiInput::Button(id)) => self.handlers.contains_key(id),
             Some(UiInput::Select(data)) => self.selects.contains_key(&data.custom_id),
+            Some(UiInput::UserSelect(data)) => self.user_selects.contains_key(&data.custom_id),
+            Some(UiInput::RoleSelect(data)) => self.role_selects.contains_key(&data.custom_id),
+            Some(UiInput::ChannelSelect(data)) => {
+                self.channel_selects.contains_key(&data.custom_id)
+            }
             Some(UiInput::Modal(data)) => self.modals.contains_key(&data.custom_id),
             None => false,
         }
@@ -104,6 +157,15 @@ impl Buttons {
                 };
                 let result = handler.call(&mut ctx).await;
                 finish_component(&mut ctx.inner, result, "セレクト", SELECT_FAILED).await;
+            }
+            Some(UiInput::UserSelect(data)) => {
+                dispatch_entity(&self.user_selects, http, interaction, data, timing).await;
+            }
+            Some(UiInput::RoleSelect(data)) => {
+                dispatch_entity(&self.role_selects, http, interaction, data, timing).await;
+            }
+            Some(UiInput::ChannelSelect(data)) => {
+                dispatch_entity(&self.channel_selects, http, interaction, data, timing).await;
             }
             Some(UiInput::Modal(data)) => {
                 let Some(handler) = self.modals.get(&data.custom_id) else {
@@ -133,6 +195,50 @@ impl Buttons {
             None => {}
         }
     }
+}
+
+async fn dispatch_entity<M>(
+    handlers: &HashMap<String, Box<dyn EntitySelectHandler<M>>>,
+    http: &Client,
+    interaction: &Interaction,
+    data: &MessageComponentInteractionData,
+    timing: Timing,
+) {
+    let Some(handler) = handlers.get(&data.custom_id) else {
+        return;
+    };
+    let mut inner = ButtonContext::new(http, interaction, &data.custom_id, timing);
+    let Ok(values) = parse_entity_ids(&data.values) else {
+        if inner.reply_ephemeral(SELECT_FAILED).await.is_err() {
+            eprintln!("セレクトのエラー応答に失敗しました");
+        }
+        return;
+    };
+    let mut ctx = EntitySelectContext {
+        inner,
+        values,
+        resolved: data.resolved.as_ref(),
+    };
+    let result = handler.call(&mut ctx).await;
+    finish_component(&mut ctx.inner, result, "セレクト", SELECT_FAILED).await;
+}
+
+fn parse_entity_ids<M>(values: &[String]) -> Result<Vec<Id<M>>> {
+    if values.len() > 25 {
+        return Err("セレクトの選択数が上限を超えています".into());
+    }
+    let mut ids = Vec::with_capacity(values.len());
+    for value in values {
+        if value.starts_with('0') || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("セレクトの値が Discord ID ではありません".into());
+        }
+        let id = value.parse()?;
+        if ids.contains(&id) {
+            return Err("セレクトの値が重複しています".into());
+        }
+        ids.push(id);
+    }
+    Ok(ids)
 }
 
 fn modal_fallback(state: ResponseState, succeeded: bool) -> Option<(&'static str, bool)> {
@@ -190,6 +296,9 @@ async fn finish_component(
 enum UiInput<'a> {
     Button(&'a str),
     Select(&'a MessageComponentInteractionData),
+    UserSelect(&'a MessageComponentInteractionData),
+    RoleSelect(&'a MessageComponentInteractionData),
+    ChannelSelect(&'a MessageComponentInteractionData),
     Modal(&'a ModalInteractionData),
 }
 
@@ -199,6 +308,9 @@ fn ui_input(interaction: &Interaction) -> Option<UiInput<'_>> {
             match data.component_type {
                 ComponentType::Button => Some(UiInput::Button(&data.custom_id)),
                 ComponentType::TextSelectMenu => Some(UiInput::Select(data)),
+                ComponentType::UserSelectMenu => Some(UiInput::UserSelect(data)),
+                ComponentType::RoleSelectMenu => Some(UiInput::RoleSelect(data)),
+                ComponentType::ChannelSelectMenu => Some(UiInput::ChannelSelect(data)),
                 _ => None,
             }
         }
@@ -529,6 +641,110 @@ impl<'a> SelectContext<'a> {
     }
 }
 
+/// ユーザー・ロール・チャンネルを選択したときにハンドラーへ渡す情報です。
+pub struct EntitySelectContext<'a, M> {
+    inner: ButtonContext<'a>,
+    values: Vec<Id<M>>,
+    resolved: Option<&'a InteractionDataResolved>,
+}
+
+/// ユーザーセレクトが選択されたときの情報です。
+pub type UserSelectContext<'a> = EntitySelectContext<'a, UserMarker>;
+
+/// ロールセレクトが選択されたときの情報です。
+pub type RoleSelectContext<'a> = EntitySelectContext<'a, RoleMarker>;
+
+/// チャンネルセレクトが選択されたときの情報です。
+pub type ChannelSelectContext<'a> = EntitySelectContext<'a, ChannelMarker>;
+
+impl<'a, M> EntitySelectContext<'a, M> {
+    /// セレクトメニューの ID を返します。
+    pub fn custom_id(&self) -> &'a str {
+        self.inner.custom_id()
+    }
+
+    /// 選択された項目の Discord ID を借ります。選択項目がない場合は空です。
+    pub fn values(&self) -> &[Id<M>] {
+        &self.values
+    }
+
+    /// Discord が解決済みの情報を送った場合に、その情報を借ります。
+    pub fn resolved(&self) -> Option<&'a InteractionDataResolved> {
+        self.resolved
+    }
+
+    /// セレクトを操作したユーザーの ID を返します。
+    pub fn author_id(&self) -> Option<Id<UserMarker>> {
+        self.inner.author_id()
+    }
+
+    /// 元メッセージを作るきっかけになったユーザーの ID を返します。
+    /// 判定方法は [`ButtonContext::invoker_id`] と同じです。
+    pub fn invoker_id(&self) -> Option<Id<UserMarker>> {
+        self.inner.invoker_id()
+    }
+
+    /// セレクトが操作されたサーバーの ID を返します。DM では `None` です。
+    pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
+        self.inner.guild_id()
+    }
+
+    /// セレクトが付いた Discord メッセージを借ります。
+    pub fn message(&self) -> Option<&'a Message> {
+        self.inner.message()
+    }
+
+    /// Gateway の往復時間と、セレクト操作を処理するまでの時間を返します。
+    pub fn timing(&self) -> Timing {
+        self.inner.timing()
+    }
+
+    /// Akari が使用している Twilight の REST クライアントを借ります。
+    pub fn http(&self) -> &'a Client {
+        self.inner.http()
+    }
+
+    /// セレクトを操作した本人にだけ表示する初回応答を送ります。
+    ///
+    /// # エラー
+    /// 応答済み、または Discord が受け付けなかった場合に失敗します。
+    pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
+        self.inner.reply_ephemeral(content).await
+    }
+
+    /// セレクトが付いたメッセージの本文、Embed、コンポーネントを置き換えます。
+    ///
+    /// # エラー
+    /// 更新できない応答状態、無効なメッセージ、または Discord が受け付けなかった場合に失敗します。
+    pub async fn update_message(&mut self, message: &UiMessage) -> Result<()> {
+        self.inner.update_message(message).await
+    }
+
+    /// 元の Components V2 メッセージのコンポーネントを置き換えます。
+    ///
+    /// # エラー
+    /// 更新できない応答状態、元メッセージが Components V2 以外、無効なコンポーネント、または通信の失敗でエラーになります。
+    pub async fn update_v2(&mut self, message: &ComponentsV2) -> Result<()> {
+        self.inner.update_v2(message).await
+    }
+
+    /// セレクト操作を先に受け付け、元のメッセージを後から変更できるようにします。
+    ///
+    /// # エラー
+    /// 初回応答済み、または Discord が受け付けなかった場合に失敗します。
+    pub async fn defer_update(&mut self) -> Result<()> {
+        self.inner.defer_update().await
+    }
+
+    /// 初回応答としてモーダルを開きます。
+    ///
+    /// # エラー
+    /// 初回応答済み、無効なモーダル、または Discord が受け付けなかった場合に失敗します。
+    pub async fn show_modal(&mut self, modal: &Modal) -> Result<()> {
+        self.inner.show_modal(modal).await
+    }
+}
+
 /// モーダルを一回送信したときにハンドラーへ渡す情報です。
 pub struct ModalContext<'a> {
     http: &'a Client,
@@ -719,6 +935,25 @@ handler_for!(ButtonHandler, ButtonContext);
 handler_for!(SelectHandler, SelectContext);
 handler_for!(ModalHandler, ModalContext);
 
+trait EntitySelectHandler<M>: Send + Sync {
+    fn call<'a, 'ctx>(
+        &'a self,
+        ctx: &'a mut EntitySelectContext<'ctx, M>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
+}
+
+impl<F, M> EntitySelectHandler<M> for F
+where
+    F: AsyncFn(&mut EntitySelectContext<'_, M>) -> Result<()> + Send + Sync,
+{
+    fn call<'a, 'ctx>(
+        &'a self,
+        ctx: &'a mut EntitySelectContext<'ctx, M>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        Box::pin(self(ctx))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -728,6 +963,10 @@ mod tests {
         ModalContext, ModalInteractionComponent, ModalInteractionData, ResponseState, Result,
         SelectContext, UiMessage, UpdateAction, message_invoker, message_owner, modal_fallback,
         submitted_text, update_response,
+    };
+    use super::{
+        ChannelMarker, ChannelSelectContext, RoleMarker, RoleSelectContext, UserMarker,
+        UserSelectContext, parse_entity_ids,
     };
     use crate::ui::{Button, Embed};
     use twilight_model::{
@@ -835,6 +1074,86 @@ mod tests {
             component_payload(ComponentType::TextSelectMenu, "shared"),
         );
         assert!(!handlers.accepts(&malformed));
+        Ok(())
+    }
+
+    #[test]
+    fn entity_selects_only_accept_the_registered_type_and_id() -> Result<()> {
+        async fn user_selected(ctx: &mut UserSelectContext<'_>) -> Result<()> {
+            let _: &[Id<UserMarker>] = ctx.values();
+            Ok(())
+        }
+        async fn role_selected(ctx: &mut RoleSelectContext<'_>) -> Result<()> {
+            let _: &[Id<RoleMarker>] = ctx.values();
+            Ok(())
+        }
+        async fn channel_selected(ctx: &mut ChannelSelectContext<'_>) -> Result<()> {
+            let _: &[Id<ChannelMarker>] = ctx.values();
+            Ok(())
+        }
+        let mut handlers = Buttons::default();
+        handlers.register_user_select("user", user_selected)?;
+        handlers.register_role_select("role", role_selected)?;
+        handlers.register_channel_select("channel", channel_selected)?;
+        assert!(handlers.has_handlers());
+        assert!(
+            handlers
+                .register_user_select("user", user_selected)
+                .is_err()
+        );
+        assert!(
+            handlers
+                .register_role_select("role", role_selected)
+                .is_err()
+        );
+        assert!(
+            handlers
+                .register_channel_select("channel", channel_selected)
+                .is_err()
+        );
+        for (kind, id, expected) in [
+            (ComponentType::UserSelectMenu, "user", true),
+            (ComponentType::UserSelectMenu, "role", false),
+            (ComponentType::RoleSelectMenu, "role", true),
+            (ComponentType::RoleSelectMenu, "Role", false),
+            (ComponentType::ChannelSelectMenu, "channel", true),
+            (ComponentType::ChannelSelectMenu, "user", false),
+            (ComponentType::TextSelectMenu, "channel", false),
+            (ComponentType::MentionableSelectMenu, "user", false),
+        ] {
+            let incoming = interaction(
+                InteractionType::MessageComponent,
+                component_payload(kind, id),
+            );
+            assert_eq!(handlers.accepts(&incoming), expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_canonical_unique_snowflakes_and_rejects_entire_invalid_lists() -> Result<()> {
+        let values = vec!["123".into(), u64::MAX.to_string()];
+        assert_eq!(
+            parse_entity_ids::<UserMarker>(&values)?,
+            vec![Id::new(123), Id::new(u64::MAX)]
+        );
+        assert!(parse_entity_ids::<RoleMarker>(&[])?.is_empty());
+        for invalid in [
+            "",
+            "0",
+            "01",
+            "-1",
+            "+1",
+            " 1",
+            "１",
+            "18446744073709551616",
+            "123",
+        ] {
+            let malformed = vec!["123".into(), invalid.into()];
+            assert!(parse_entity_ids::<ChannelMarker>(&malformed).is_err());
+        }
+        let too_many = (1..=26).map(|id| id.to_string()).collect::<Vec<_>>();
+        assert!(parse_entity_ids::<UserMarker>(&too_many).is_err());
         Ok(())
     }
 

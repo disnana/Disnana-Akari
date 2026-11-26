@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 use http_types::Uri;
 use twilight_model::{
+    channel::ChannelType,
     channel::message::{
         Component, EmojiReactionType,
         component::{
@@ -181,19 +182,9 @@ pub struct StringSelect(SelectMenu);
 impl StringSelect {
     /// ハンドラーと対応する ID と、1〜25 個の選択肢を設定します。
     pub fn new(custom_id: impl Into<String>, options: Vec<SelectOption>) -> Self {
-        Self(SelectMenu {
-            channel_types: None,
-            custom_id: custom_id.into(),
-            default_values: None,
-            disabled: false,
-            id: None,
-            kind: SelectMenuType::Text,
-            max_values: None,
-            min_values: None,
-            options: Some(options.into_iter().map(|option| option.0).collect()),
-            placeholder: None,
-            required: None,
-        })
+        let mut menu = new_select(custom_id, SelectMenuType::Text);
+        menu.options = Some(options.into_iter().map(|option| option.0).collect());
+        Self(menu)
     }
 
     /// 未選択の状態で表示する案内を設定します。
@@ -218,6 +209,74 @@ impl StringSelect {
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.0.disabled = disabled;
         self
+    }
+}
+
+macro_rules! entity_select {
+    ($name:ident, $kind:ident, $description:literal) => {
+        #[doc = $description]
+        #[derive(Clone, Debug)]
+        #[must_use]
+        pub struct $name(SelectMenu);
+
+        impl $name {
+            /// ハンドラーに対応する ID を指定します。Discord が選択肢を用意します。
+            pub fn new(custom_id: impl Into<String>) -> Self {
+                Self(new_select(custom_id, SelectMenuType::$kind))
+            }
+
+            /// 未選択の状態で表示する案内を設定します。
+            pub fn placeholder(mut self, text: impl Into<String>) -> Self {
+                self.0.placeholder = Some(text.into());
+                self
+            }
+
+            /// 選ぶ必要がある最小数を 0〜25 個で指定します。既定では 1 個です。
+            pub fn min_values(mut self, min: u8) -> Self {
+                self.0.min_values = Some(min);
+                self
+            }
+
+            /// 選べる最大数を 1〜25 個で指定します。既定では 1 個です。
+            pub fn max_values(mut self, max: u8) -> Self {
+                self.0.max_values = Some(max);
+                self
+            }
+
+            /// `true` を指定するとメニューを操作できなくします。
+            pub fn disabled(mut self, disabled: bool) -> Self {
+                self.0.disabled = disabled;
+                self
+            }
+        }
+    };
+}
+
+entity_select!(UserSelect, User, "ユーザーの選択メニューです。");
+entity_select!(RoleSelect, Role, "ロールの選択メニューです。");
+entity_select!(ChannelSelect, Channel, "チャンネルの選択メニューです。");
+
+impl ChannelSelect {
+    /// 選択肢に表示するチャンネルの種類を絞り込みます。
+    pub fn channel_types(mut self, channel_types: Vec<ChannelType>) -> Self {
+        self.0.channel_types = Some(channel_types);
+        self
+    }
+}
+
+fn new_select(custom_id: impl Into<String>, kind: SelectMenuType) -> SelectMenu {
+    SelectMenu {
+        channel_types: None,
+        custom_id: custom_id.into(),
+        default_values: None,
+        disabled: false,
+        id: None,
+        kind,
+        max_values: None,
+        min_values: None,
+        options: None,
+        placeholder: None,
+        required: None,
     }
 }
 
@@ -402,7 +461,25 @@ impl UiMessage {
 
     /// 文字列選択メニューを一つの行として追加します。
     pub fn select(mut self, select: StringSelect) -> Self {
-        self.components.push(select_row(select));
+        self.components.push(select_row(select.0));
+        self
+    }
+
+    /// ユーザー選択メニューを一つの行として追加します。
+    pub fn user_select(mut self, select: UserSelect) -> Self {
+        self.components.push(select_row(select.0));
+        self
+    }
+
+    /// ロール選択メニューを一つの行として追加します。
+    pub fn role_select(mut self, select: RoleSelect) -> Self {
+        self.components.push(select_row(select.0));
+        self
+    }
+
+    /// チャンネル選択メニューを一つの行として追加します。
+    pub fn channel_select(mut self, select: ChannelSelect) -> Self {
+        self.components.push(select_row(select.0));
         self
     }
 
@@ -452,10 +529,10 @@ fn button_row(buttons: Vec<Button>) -> Component {
     })
 }
 
-fn select_row(select: StringSelect) -> Component {
+fn select_row(select: SelectMenu) -> Component {
     Component::ActionRow(ActionRow {
         id: None,
-        components: vec![Component::SelectMenu(select.0)],
+        components: vec![Component::SelectMenu(select)],
     })
 }
 
@@ -735,6 +812,92 @@ mod tests {
                         SelectOption::new("別の青", "blue"),
                     ]
                 ))
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn entity_selects_keep_types_and_settings_in_both_message_formats() {
+        use super::{
+            ChannelSelect, ChannelType, ComponentsV2, RoleSelect, SelectMenuType, UserSelect,
+        };
+
+        let user = UserSelect::new("user")
+            .placeholder("選択")
+            .min_values(0)
+            .max_values(2);
+        let role = RoleSelect::new("role").disabled(true);
+        let channel = ChannelSelect::new("channel").channel_types(vec![ChannelType::GuildText]);
+
+        let legacy = UiMessage::new()
+            .user_select(user.clone())
+            .role_select(role.clone())
+            .channel_select(channel.clone());
+        let v2 = ComponentsV2::new()
+            .user_select(user)
+            .role_select(role)
+            .channel_select(channel);
+        assert!(legacy.validate().is_ok());
+        assert!(v2.validate().is_ok());
+        assert_eq!(legacy.components, v2.components);
+
+        let [user, role, channel] = legacy.components.as_slice() else {
+            panic!("3 行を想定")
+        };
+        for (item, kind) in [
+            (user, SelectMenuType::User),
+            (role, SelectMenuType::Role),
+            (channel, SelectMenuType::Channel),
+        ] {
+            let Component::ActionRow(row) = item else {
+                panic!("Action Row を想定")
+            };
+            let [Component::SelectMenu(select)] = row.components.as_slice() else {
+                panic!("選択メニュー 1 個を想定")
+            };
+            assert_eq!(select.kind, kind);
+            assert!(select.options.is_none());
+        }
+
+        let Component::ActionRow(row) = channel else {
+            unreachable!()
+        };
+        let [Component::SelectMenu(select)] = row.components.as_slice() else {
+            unreachable!()
+        };
+        assert_eq!(
+            select.channel_types.as_deref(),
+            Some(&[ChannelType::GuildText][..])
+        );
+    }
+
+    #[test]
+    fn entity_selects_check_bounds_and_custom_ids_across_rows() {
+        use super::{ChannelSelect, ComponentsV2, RoleSelect, UserSelect};
+
+        assert!(
+            UiMessage::new()
+                .user_select(UserSelect::new(""))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            UiMessage::new()
+                .role_select(RoleSelect::new("role").min_values(2).max_values(1))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            ComponentsV2::new()
+                .channel_select(ChannelSelect::new("channel").max_values(26))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            ComponentsV2::new()
+                .user_select(UserSelect::new("duplicate"))
+                .role_select(RoleSelect::new("duplicate"))
                 .validate()
                 .is_err()
         );

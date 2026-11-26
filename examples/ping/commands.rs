@@ -6,7 +6,7 @@ use disnana_akari::{
     SlashContext, Timing, register_hybrid,
 };
 
-use crate::{components, ui};
+use crate::{components, entities, ui};
 
 // pub は、この関数を別モジュール（今回は main.rs）から呼べるようにします。
 pub fn register(guild_id: Option<Id<GuildMarker>>) -> Result<(Commands, Option<SlashCommands>)> {
@@ -29,6 +29,12 @@ pub fn register(guild_id: Option<Id<GuildMarker>>) -> Result<(Commands, Option<S
             "Components V2 と入力フォームを試す",
             vec![],
             components::show,
+        )?;
+        slash.register(
+            "entities",
+            "ユーザー、ロール、チャンネルの選択を試す",
+            vec![],
+            entities::show,
         )?;
     }
 

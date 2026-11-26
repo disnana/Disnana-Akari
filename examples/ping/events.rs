@@ -1,7 +1,7 @@
 use disnana_akari::model::channel::Message;
 use disnana_akari::{Events, Ready, Result};
 
-use crate::{components, ui};
+use crate::{components, entities, ui};
 
 pub fn register() -> Result<Events> {
     let mut events = Events::new();
@@ -16,6 +16,9 @@ pub fn register() -> Result<Events> {
     events.on_select(components::SELECT_ID, components::choose)?;
     events.on_button(components::OPEN_MODAL_ID, components::open_modal)?;
     events.on_modal(components::MODAL_ID, components::submit)?;
+    events.on_user_select(entities::USER_ID, entities::choose_user)?;
+    events.on_role_select(entities::ROLE_ID, entities::choose_role)?;
+    events.on_channel_select(entities::CHANNEL_ID, entities::choose_channel)?;
     Ok(events)
 }
 

@@ -140,6 +140,9 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `events.on_message(handler)` | 人が送った新着メッセージの `&Message` を渡します。通常の投稿とテキストコマンドの両方を受け取ります。 |
 | `events.on_button(custom_id, handler) -> Result<()>` | 指定した識別子に完全一致するボタンが押されたときに `&mut ButtonContext<'_>` を渡します。識別子は 1～100 文字で、Bot の登録一覧全体で、同じ識別子に関数を一つ登録できます。 |
 | `events.on_select(custom_id, handler) -> Result<()>` | 指定した識別子の文字列選択メニューが操作されたときに `&mut SelectContext<'_>` を渡します。 |
+| `events.on_user_select(custom_id, handler) -> Result<()>` | ユーザー選択時に `&mut UserSelectContext<'_>` を渡します。 |
+| `events.on_role_select(custom_id, handler) -> Result<()>` | ロール選択時に `&mut RoleSelectContext<'_>` を渡します。 |
+| `events.on_channel_select(custom_id, handler) -> Result<()>` | チャンネル選択時に `&mut ChannelSelectContext<'_>` を渡します。 |
 | `events.on_modal(custom_id, handler) -> Result<()>` | 指定した識別子のフォームが送信されたときに `&mut ModalContext<'_>` を渡します。 |
 
 `on_ready` と `on_message` には複数の関数を登録できます。各関数が返したエラーは標準エラー出力に記録され、次のハンドラーへ進みます。コマンドとイベントの順序は [ハンドラーの実行順](#ハンドラーの実行順) を参照してください。
@@ -207,6 +210,20 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 選択メニューの既定値は一項目です。最小選択数は 0～25、最大選択数は 1～25 で、最小値は最大値以下、最大値は用意した選択肢の数以下にします。入力文字数の最小値は 0～4,000、最大値は 1～4,000 です。空でない初期値は設定した文字数の範囲に収めます。入力欄を空で始めたい場合は、初期値を省略するか空文字列にします。
 
 `SelectContext` には、メニューの `custom_id()` と選択結果の `values() -> &[String]` が渡ります。`author_id()`、`guild_id()`、`message()`、`invoker_id()` で操作者や元のメッセージを確認でき、ボタンと同じように `reply_ephemeral`、`defer_update`、`update_message`、`update_v2`、`show_modal` を呼べます。
+
+### ユーザー、ロール、チャンネルを選択する
+
+候補を Discord が用意するメニューは `UserSelect::new(custom_id)`、`RoleSelect::new(custom_id)`、`ChannelSelect::new(custom_id)` で作ります。`UiMessage` と `ComponentsV2` に `user_select`、`role_select`、`channel_select` でそれぞれ追加できます。各ビルダーは `placeholder`、`min_values`、`max_values`、`disabled` を持ちます。`ChannelSelect::channel_types(Vec<ChannelType>)` でチャンネルの種類を絞れます。
+
+| コンテキスト | `values()` の型 |
+| --- | --- |
+| `UserSelectContext<'_>` | `&[Id<UserMarker>]` |
+| `RoleSelectContext<'_>` | `&[Id<RoleMarker>]` |
+| `ChannelSelectContext<'_>` | `&[Id<ChannelMarker>]` |
+
+`values()` で対象ごとに型の付いた ID を取得できます。Discord が選択対象の情報を同梱した場合は、`resolved()` で `&InteractionDataResolved` を取得できます。操作への本人宛ての返信には `reply_ephemeral` を使います。[Playground の選択メニュー実装](../examples/ping/entities.rs)
+
+### 入力フォームを開く
 
 `show_modal` はスラッシュコマンド、ボタン、選択メニューの初回応答として呼びます。フォームを送信すると、フォームの識別子に対応する `on_modal` の関数が呼ばれます。`ModalContext::text_input(custom_id)` は、入力欄の識別子に対応する値を `Option<&str>` で返します。`custom_id()` はフォームの識別子を返し、`author_id()` と `guild_id()` は送信者とサーバーの情報を返します。
 
