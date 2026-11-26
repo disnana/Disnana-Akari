@@ -10,7 +10,7 @@
 
 ## Playground を起動する
 
-`playground/` がまだない場合は、後述の手順で作成します。`playground/.env` を開き、`DISCORD_TOKEN=` の右辺に Bot トークンを貼り付けます。`/ping` と `/echo` も試す場合は、Discord の設定で開発者モードを有効にし、テスト用サーバーを右クリックして **サーバーIDをコピー** を選びます。コピーした数字を `DISCORD_GUILD_ID=` の右辺に貼り付けます。UTF-8 で保存し、値は引用符を付けずに書きます。`playground/` は Git の除外対象です。
+`playground/` がまだない場合は、後述の手順で作成します。`playground/.env` を開き、`DISCORD_TOKEN=` の右辺に Bot トークンを貼り付けます。`/ping`、`/echo`、`/latency` も試す場合は、Discord の設定で開発者モードを有効にし、テスト用サーバーを右クリックして **サーバーIDをコピー** を選びます。コピーした数字を `DISCORD_GUILD_ID=` の右辺に貼り付けます。UTF-8 で保存し、値は引用符を付けずに書きます。`playground/` は Git の除外対象です。
 
 ```dotenv
 DISCORD_TOKEN=
@@ -33,8 +33,12 @@ cargo run --locked --manifest-path playground/Cargo.toml --target-dir target
 | --- | --- |
 | メッセージとして `!ping` を送る | `Pong!` |
 | メッセージとして `!echo こんにちは` を送る | `こんにちは` |
+| メッセージとして `!latency` を送る | Gateway RTT、キュー待ち、返信直前までの処理時間 |
 | 自分でインストールした Bot の `/ping` を選んで実行する | `Pong!` |
 | 同じ Bot の `/echo` を選び、`text` 欄に `こんにちは` と入力して実行する | `こんにちは` |
+| 同じ Bot の `/latency` を選んで実行する | `!latency` と同じ 3 項目 |
+
+遅延はミリ秒（ms）で表示されます。接続直後など、Gateway からハートビートの応答をまだ受け取っていない場合は、Gateway RTT が「未計測」と表示されます。[測定値の定義](api.md#timing)
 
 スラッシュコマンドは `DISCORD_GUILD_ID` で指定したサーバーで使えます。ID を省略するとテキストコマンドとイベント処理で起動します。Bot を止めるには、RustRover の停止ボタンか `Ctrl+C` を使います。
 

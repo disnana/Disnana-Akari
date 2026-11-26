@@ -17,12 +17,12 @@ use twilight_model::{
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
         Id,
-        marker::{CommandMarker, GuildMarker},
+        marker::{CommandMarker, GuildMarker, UserMarker},
     },
 };
 use twilight_validate::command;
 
-use crate::Result;
+use crate::{Result, Timing};
 
 /// 一つのサーバーに登録するスラッシュコマンド一覧です。
 pub struct SlashCommands {
@@ -135,7 +135,7 @@ pub(crate) struct ActiveSlashCommands {
 }
 
 impl ActiveSlashCommands {
-    pub(crate) async fn dispatch(&self, http: &Client, interaction: &Interaction) {
+    pub(crate) async fn dispatch(&self, http: &Client, interaction: &Interaction, timing: Timing) {
         if interaction.guild_id != Some(self.guild_id)
             || interaction.kind != InteractionType::ApplicationCommand
         {
@@ -151,11 +151,13 @@ impl ActiveSlashCommands {
             return;
         };
 
+        let mut responded = false;
         let mut ctx = SlashContext {
             http,
             interaction,
             data,
-            responded: false,
+            responded: &mut responded,
+            timing,
         };
         if let Err(error) = handler.call(&mut ctx).await {
             eprintln!(
@@ -163,7 +165,7 @@ impl ActiveSlashCommands {
                 data.name
             );
         }
-        if !ctx.responded
+        if !*ctx.responded
             && let Err(error) = ctx
                 .reply_ephemeral("コマンドを処理できませんでした。")
                 .await
@@ -178,10 +180,31 @@ pub struct SlashContext<'a> {
     http: &'a Client,
     interaction: &'a Interaction,
     data: &'a CommandData,
-    responded: bool,
+    responded: &'a mut bool,
+    timing: Timing,
 }
 
 impl<'a> SlashContext<'a> {
+    /// コマンドを呼び出したユーザーの ID を返します。
+    pub fn author_id(&self) -> Option<Id<UserMarker>> {
+        self.interaction.author_id()
+    }
+
+    /// Gateway の往復時間と、このコマンドの処理時間を確認します。
+    pub fn timing(&self) -> Timing {
+        self.timing
+    }
+
+    pub(crate) fn reborrow(&mut self) -> SlashContext<'_> {
+        SlashContext {
+            http: self.http,
+            interaction: self.interaction,
+            data: self.data,
+            responded: self.responded,
+            timing: self.timing,
+        }
+    }
+
     /// 指定した名前の引数を Twilight の値として返します。
     pub fn option(&self, name: &str) -> Option<&'a CommandOptionValue> {
         self.data
@@ -218,7 +241,7 @@ impl<'a> SlashContext<'a> {
     }
 
     async fn respond(&mut self, content: &str, flags: Option<MessageFlags>) -> Result<()> {
-        if self.responded {
+        if *self.responded {
             return Err("このスラッシュコマンドにはすでに応答しました".into());
         }
         let response = InteractionResponse {
@@ -234,7 +257,7 @@ impl<'a> SlashContext<'a> {
             .interaction(self.interaction.application_id)
             .create_response(self.interaction.id, &self.interaction.token, &response)
             .await?;
-        self.responded = true;
+        *self.responded = true;
         Ok(())
     }
 }

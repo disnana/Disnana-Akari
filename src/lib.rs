@@ -2,7 +2,9 @@
 
 mod commands;
 mod events;
+mod hybrid;
 mod slash;
+mod timing;
 
 use std::{env, error::Error};
 
@@ -13,8 +15,12 @@ use twilight_model::channel::{Message, message::AllowedMentions};
 
 pub use commands::{CommandContext, Commands};
 pub use events::{Events, Ready};
+pub use hybrid::{CommandSource, HybridContext, register_hybrid};
 pub use slash::{SlashCommands, SlashContext};
+pub use timing::Timing;
 pub use twilight_model as model;
+
+use timing::Pending;
 
 /// Akari とメッセージハンドラーで使う結果型です。
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -147,7 +153,8 @@ impl Bot {
         let (interactions, mut interaction_queue) = mpsc::channel(64);
 
         let handle_messages = async {
-            while let Some(event) = message_queue.recv().await {
+            while let Some(pending) = message_queue.recv().await {
+                let (event, timing) = Pending::begin(pending);
                 match event {
                     Event::Ready(ready) => {
                         events.ready(&ready).await;
@@ -157,6 +164,7 @@ impl Bot {
                             let context = Context {
                                 http: &http,
                                 message: &message.message,
+                                timing,
                             };
                             if let Err(error) = handler(context).await {
                                 eprintln!("メッセージ処理に失敗しました ({error})");
@@ -170,33 +178,39 @@ impl Bot {
         };
 
         let handle_interactions = async {
-            while let Some(interaction) = interaction_queue.recv().await {
+            while let Some(pending) = interaction_queue.recv().await {
+                let (interaction, timing) = Pending::begin(pending);
                 if let Some(commands) = &slash {
-                    commands.dispatch(&http, &interaction).await;
+                    commands.dispatch(&http, &interaction, timing).await;
                 }
             }
         };
 
         let receive = async {
             while let Some(event) = shard.next_event(event_types).await {
+                let gateway_rtt = shard.latency().recent().first().copied();
                 match event {
                     Ok(event @ Event::Ready(_)) => {
                         println!("Discord に接続しました");
-                        if messages.try_send(event).is_err() {
+                        if messages.try_send(Pending::new(event, gateway_rtt)).is_err() {
                             eprintln!("受信キューが満杯のため READY を処理できませんでした");
                         }
                     }
                     Ok(Event::MessageCreate(message))
                         if !message.author.bot && message.webhook_id.is_none() =>
                     {
-                        if messages.try_send(Event::MessageCreate(message)).is_err() {
+                        let event = Event::MessageCreate(message);
+                        if messages.try_send(Pending::new(event, gateway_rtt)).is_err() {
                             eprintln!(
                                 "受信キューが満杯のため MESSAGE_CREATE を処理できませんでした"
                             );
                         }
                     }
                     Ok(Event::InteractionCreate(interaction)) => {
-                        if interactions.try_send(interaction.0).is_err() {
+                        if interactions
+                            .try_send(Pending::new(interaction.0, gateway_rtt))
+                            .is_err()
+                        {
                             eprintln!(
                                 "受信キューが満杯のため INTERACTION_CREATE を処理できませんでした"
                             );
@@ -226,9 +240,15 @@ impl Bot {
 pub struct Context<'a> {
     http: &'a Client,
     message: &'a Message,
+    timing: Timing,
 }
 
 impl<'a> Context<'a> {
+    /// Gateway の往復時間と、このイベントの処理時間を確認します。
+    pub fn timing(&self) -> Timing {
+        self.timing
+    }
+
     /// 受信した Twilight の [`Message`] を借ります。
     pub fn message(&self) -> &'a Message {
         self.message

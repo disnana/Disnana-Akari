@@ -32,6 +32,7 @@ Gateway の受信、テキストコマンドとイベントの処理、スラッ
 | `commands.dispatch(ctx).await -> Result<()>` | 該当するコマンドを実行します。`Bot::run` の独自処理にも組み込めます。 |
 | `ctx.args() -> &str` | コマンド名に続く本文を借ります。前後の空白を除去し、引数なしの場合は空文字列を返します。 |
 | `ctx.context() -> &Context<'_>` | 元のメッセージを扱うコンテキストを借ります。 |
+| `ctx.timing() -> Timing` | このテキストコマンド呼び出しの測定値を取得します。 |
 | `ctx.reply(content).await -> Result<()>` | コマンドのメッセージに返信し、返信先の投稿者や本文中のメンションへの通知を抑止します。 |
 
 名前は大文字と小文字を区別します。最初の空白までがコマンド名です。`! ping` のようにプレフィックスの直後が空白の投稿、未登録の名前、通常の投稿は無視されます。
@@ -45,12 +46,42 @@ Gateway の受信、テキストコマンドとイベントの処理、スラッ
 | `SlashCommands::string_option(name, description, required) -> CommandOption` | 文字列引数を定義します。`required` が `true` なら Discord の入力欄で必須になります。 |
 | `ctx.option(name) -> Option<&CommandOptionValue>` | 指定した名前の引数を Twilight の値として借ります。 |
 | `ctx.string(name) -> Option<&str>` | 指定した名前の文字列を借ります。引数がない場合や他の型の場合は `None` を返します。 |
+| `ctx.author_id() -> Option<Id<UserMarker>>` | 呼び出したユーザーの ID を取得します。 |
+| `ctx.timing() -> Timing` | このスラッシュコマンド呼び出しの測定値を取得します。 |
 | `ctx.reply(content).await -> Result<()>` | チャンネルに表示される初回応答を送ります。 |
 | `ctx.reply_ephemeral(content).await -> Result<()>` | 呼び出したユーザーだけに表示される初回応答を送ります。 |
 
 関数の形は `async fn handler(ctx: &mut SlashContext<'_>) -> Result<()>` です。起動時、同じアプリの同じサーバーにある同名のスラッシュコマンドは更新されます。関数から返るまでに初回応答が成功しなかった場合は、Akari が本人にだけ見えるエラー応答を試みます。
 
 初回応答には Discord の 3 秒の期限があります。現在の API は一度の初回応答に対応しています。返信前の外部 I/O を短く保ってください。返信本文中のメンション通知は抑止します。[Discord の Interaction 応答仕様](https://docs.discord.com/developers/interactions/receiving-and-responding)
+
+## `register_hybrid` と `HybridContext<'_>`
+
+`register_hybrid(&mut commands, slash, name, description, options, handler)` は、テキストコマンドとスラッシュコマンドに同じ関数を登録します。二つ目の引数に `Some(&mut slash_commands)` を渡すと両方に登録し、`None` を渡すとテキストコマンドだけに登録します。`options` はスラッシュ側の入力欄の定義です。登録先に同名コマンドがある場合や、定義が登録先の形式に合わない場合は、追加前にエラーを返します。
+
+ハンドラーは `async fn handler(ctx: &mut HybridContext<'_>) -> Result<()>` の形で定義します。
+
+| メソッド | 動作 |
+| --- | --- |
+| `ctx.source() -> CommandSource` | テキストから呼ばれた場合は `CommandSource::Text`、スラッシュからなら `CommandSource::Slash` を返します。 |
+| `ctx.author_id() -> Option<Id<UserMarker>>` | 呼び出したユーザーの ID を返します。取得できない場合は `None` を返します。 |
+| `ctx.args() -> Option<&str>` | テキスト側ではコマンド名に続く本文を `Some` で返します。スラッシュ側では `None` を返します。 |
+| `ctx.option(name) -> Option<&CommandOptionValue>` | スラッシュ側の名前付き引数を借ります。テキスト側や該当する引数がない場合は `None` を返します。 |
+| `ctx.string(name) -> Option<&str>` | スラッシュ側の文字列引数を借ります。テキスト側、引数なし、他の型の場合は `None` を返します。 |
+| `ctx.timing() -> Timing` | 呼び出し元に応じた測定値を取得します。 |
+| `ctx.reply(content).await -> Result<()>` | テキストなら元の投稿に返信し、スラッシュなら公開の初回応答を送ります。 |
+
+呼び出し頻度を制限するときは、アプリ側で制限時間と実行履歴を管理します。例えば `(ctx.source(), user_id)` をキーにすると、同じユーザーのテキストとスラッシュの実行履歴を別々に管理できます。
+
+## `Timing`
+
+| メソッド | 測定範囲 |
+| --- | --- |
+| `gateway_rtt() -> Option<Duration>` | イベントを受信した時点で確認できた、Bot と Discord Gateway 間の直近のハートビートを送ってから Discord の応答を受け取るまでの往復時間です。応答が得られるまでは `None` です。 |
+| `queue_wait() -> Duration` | Akari がイベントを受信してから、処理する側が内部のキューから取り出すまでの時間です。 |
+| `handler_elapsed() -> Duration` | このコマンドの処理を始めてから、経過時間を取得するまでの時間です。 |
+
+`Duration` は Rust 標準ライブラリの時間の長さを表す型です。サンプルは各値をミリ秒で表示し、処理時間は返信を送る直前に取得します。
 
 ## `Events`
 
@@ -64,14 +95,17 @@ Gateway の受信、テキストコマンドとイベントの処理、スラッ
 
 ## `Context<'_>` と `Result<T>`
 
-`Context` は `Bot::run` に渡すメッセージ処理用の型です。`ctx.message()` で元の `&Message` を借りられます。`ctx.reply(content).await` は元のメッセージへの返信を送ります。
+`Context` は `Bot::run` に渡すメッセージ処理用の型です。`ctx.message()` で元の `&Message` を借りられます。`ctx.reply(content).await` は元のメッセージへの返信を送ります。`ctx.timing()` で受信から処理までの測定値を取得できます。
 
 `Result<T>` は `std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>` の別名です。関数内で `?` を使うと、失敗時にそのエラーを呼び出し元へ返します。
 
 ## 使用例
 
 ```rust,no_run
-use disnana_akari::{Bot, CommandContext, Commands, Events, Ready, Result, SlashCommands, SlashContext};
+use disnana_akari::{
+    Bot, CommandContext, Commands, Events, HybridContext, Ready, Result, SlashCommands,
+    SlashContext, register_hybrid,
+};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -81,6 +115,14 @@ async fn main() -> Result<()> {
     let guild_id = std::env::var("DISCORD_GUILD_ID")?.parse()?;
     let mut slash = SlashCommands::for_guild(guild_id);
     slash.register("ping", "Bot の応答を確認します", vec![], slash_ping)?;
+    register_hybrid(
+        &mut commands,
+        Some(&mut slash),
+        "latency",
+        "Bot のキュー待ちを確認します",
+        vec![],
+        latency,
+    )?;
 
     let mut events = Events::new();
     events.on_ready(ready);
@@ -98,6 +140,12 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 
 async fn slash_ping(ctx: &mut SlashContext<'_>) -> Result<()> {
     ctx.reply("Pong!").await
+}
+
+async fn latency(ctx: &mut HybridContext<'_>) -> Result<()> {
+    let wait = ctx.timing().queue_wait();
+    ctx.reply(&format!("キュー待ち {:.3} ms", wait.as_secs_f64() * 1_000.0))
+        .await
 }
 
 async fn ready(_event: &Ready) -> Result<()> {

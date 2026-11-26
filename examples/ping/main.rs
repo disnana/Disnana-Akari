@@ -14,18 +14,19 @@ async fn main() -> Result<()> {
     // let は変数を作ります。ここでは load() が返す 2 個の値に、それぞれ名前を付けます。
     // ? は成功した値を取り出し、エラーならこの関数をそこで終了して呼び出し元に返します。
     let (bot, guild_id) = config::load()?;
+    let (text_commands, slash_commands) = commands::register(guild_id)?;
 
     // with_events はイベント登録を持たせた Bot を返します。
     let bot = bot.with_events(events::register());
     // Some は値があること、None は値がないことを表します。
     // if let は「この形に当てはまるときだけ」と書く方法です。
-    let bot = if let Some(guild_id) = guild_id {
-        bot.with_slash_commands(commands::register_slash(guild_id)?)
+    let bot = if let Some(slash_commands) = slash_commands {
+        bot.with_slash_commands(slash_commands)
     } else {
         bot
     };
 
     // .await は非同期処理が終わるまで待ちます。最後の行のセミコロンを省くと、
     // その行の値（ここでは Bot の実行結果）が main の戻り値になります。
-    bot.run_commands(commands::register()?).await
+    bot.run_commands(text_commands).await
 }

@@ -6,7 +6,7 @@
 | --- | --- |
 | `main.rs` | 設定を読み、コマンドとイベントを登録して Bot を起動します。 |
 | `config.rs` | `.env` から Bot トークンとテスト用サーバー ID を読みます。 |
-| `commands.rs` | `!ping`、`!echo`、`/ping`、`/echo` を個別の関数に結び付けます。 |
+| `commands.rs` | `!ping`、`!echo`、`/ping`、`/echo` を個別の関数に結び付け、`!latency` と `/latency` は同じ関数につなぎます。 |
 | `events.rs` | Gateway が準備できたときや、メッセージを受け取ったときの処理を定義します。 |
 
 ## `!ping` の実行を追う
@@ -40,6 +40,14 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 `/echo` の `text` 欄は、登録時に `SlashCommands::string_option("text", "返す文章", true)` で作ります。テキストコマンドでは本文の分割を Akari が行い、スラッシュコマンドでは入力欄の値を Discord が名前付きで渡します。
 
 `ctx.string("text")` は `Option<&str>` を返します。値があれば `Some(text)`、なければ `None` です。`&mut SlashContext<'_>` はコンテキストを変更できる形で借りています。Akari はこの借用を通じて初回応答が済んだことを記録します。[コマンドの実装](../examples/ping/commands.rs)
+
+## `!latency` と `/latency` で同じ関数を使う
+
+`register_hybrid` にテキストとスラッシュの登録先を渡すと、一つの `async fn` を両方で呼び出せます。`Some(&mut slash)` は「スラッシュの登録先がある」、`None` は「テキストだけを登録する」という意味です。Playground では `DISCORD_GUILD_ID` の有無に応じて渡す値が変わります。
+
+共通の関数は `&mut HybridContext<'_>` を受け取ります。`ctx.timing()` で測定値を読み取り、表示用の文字列に整形してから `ctx.reply(&response).await` で呼び出し元に返信します。`&response` は、表示用の文字列を返信関数へ一時的に貸しています。
+
+両方で同じ処理をしつつ、呼び出し方ごとに振る舞いを変えることもできます。`ctx.source()` を `match` で分けると、`CommandSource::Text` と `CommandSource::Slash` で個別の条件を書けます。例えばユーザーごとに呼び出し頻度を制限する場合は、`ctx.author_id()` で得た ID と呼び出し元を組にして、アプリ側で最終実行時刻を管理します。[HybridContext の API](api.md)
 
 ## イベントに処理を追加する
 

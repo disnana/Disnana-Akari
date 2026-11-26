@@ -1,6 +1,6 @@
-use std::{collections::HashMap, collections::hash_map::Entry, future::Future, pin::Pin};
+use std::{collections::HashMap, future::Future, pin::Pin};
 
-use crate::{Context, Result};
+use crate::{Context, Result, Timing};
 
 /// 共通のプレフィックスを使うテキストコマンドの登録先です。
 pub struct Commands {
@@ -35,17 +35,19 @@ impl Commands {
         name: &str,
         handler: impl for<'a> AsyncFn(CommandContext<'a>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
+        self.ensure_available(name)?;
+        self.handlers.insert(name.into(), Box::new(handler));
+        Ok(())
+    }
+
+    pub(crate) fn ensure_available(&self, name: &str) -> Result<()> {
         if name.is_empty() || name.chars().any(char::is_whitespace) {
             return Err("コマンド名には空白を含まない文字列を指定してください".into());
         }
-
-        match self.handlers.entry(name.into()) {
-            Entry::Vacant(entry) => {
-                entry.insert(Box::new(handler));
-                Ok(())
-            }
-            Entry::Occupied(_) => Err(format!("コマンド `{name}` は登録済みです").into()),
+        if self.handlers.contains_key(name) {
+            return Err(format!("コマンド `{name}` は登録済みです").into());
         }
+        Ok(())
     }
 
     /// メッセージに一致するコマンドを実行します。未登録の名前や通常の投稿は無視します。
@@ -76,6 +78,11 @@ pub struct CommandContext<'a> {
 }
 
 impl<'a> CommandContext<'a> {
+    /// Gateway の往復時間と、このコマンドの処理時間を確認します。
+    pub fn timing(&self) -> Timing {
+        self.ctx.timing()
+    }
+
     /// コマンド名より後ろの本文を返します。前後の空白は除去済みです。
     pub fn args(&self) -> &'a str {
         self.args
