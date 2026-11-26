@@ -5,6 +5,7 @@ mod cooldown;
 mod events;
 mod hybrid;
 mod slash;
+mod slash_queue;
 mod timing;
 
 use std::{env, error::Error};
@@ -12,7 +13,10 @@ use std::{env, error::Error};
 use tokio::sync::mpsc;
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
 use twilight_http::Client;
-use twilight_model::channel::{Message, message::AllowedMentions};
+use twilight_model::{
+    application::interaction::Interaction,
+    channel::{Message, message::AllowedMentions},
+};
 
 pub use commands::{CommandContext, Commands};
 pub use cooldown::Cooldown;
@@ -24,6 +28,10 @@ pub use twilight_model as model;
 
 use timing::Pending;
 
+const SLASH_WORKERS: usize = 8;
+const BUSY_WORKERS: usize = 8;
+const GATEWAY_QUEUE_CAPACITY: usize = 64;
+
 /// Akari とメッセージハンドラーで使う結果型です。
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -33,6 +41,7 @@ pub struct Bot {
     events: Events,
     slash: Option<SlashCommands>,
     intents: Option<Intents>,
+    additional_intents: Intents,
 }
 
 impl Bot {
@@ -52,6 +61,7 @@ impl Bot {
             events: Events::default(),
             slash: None,
             intents: None,
+            additional_intents: Intents::empty(),
         })
     }
 
@@ -80,8 +90,16 @@ impl Bot {
     }
 
     /// 自動で算出する Gateway Intent を、指定したビット集合で置き換えます。
+    /// テキストコマンドを使う場合は `GUILD_MESSAGES` と `MESSAGE_CONTENT` を含めてください。
     pub fn with_intents(mut self, intents: Intents) -> Self {
         self.intents = Some(intents);
+        self
+    }
+
+    /// 自動で算出した Intent、または [`Self::with_intents`] の値に Intent を追加します。
+    /// 複数回指定すると和集合になり、`with_intents` との呼び出し順に関わらず適用します。
+    pub fn add_intents(mut self, intents: Intents) -> Self {
+        self.additional_intents |= intents;
         self
     }
 
@@ -97,20 +115,30 @@ impl Bot {
 
     /// Discord に接続し、登録されたテキストコマンドを実行します。
     ///
-    /// 接続とエラー処理は [`Self::run`] と同じです。
+    /// コマンド関数が失敗したときは、呼び出したメッセージへエラーを返信します。
     ///
     /// # エラー
     ///
     /// スラッシュコマンドの登録に失敗した場合や、Gateway が終了した場合に失敗します。
     pub async fn run_commands(self, commands: Commands) -> Result<()> {
-        self.run(async |ctx| commands.dispatch(ctx).await).await
+        self.run(async |ctx: Context<'_>| {
+            if let Err(error) = commands.dispatch(ctx).await {
+                if let Err(reply_error) = ctx.reply("コマンドを処理できませんでした。").await
+                {
+                    eprintln!("テキストコマンドのエラー応答に失敗しました ({reply_error})");
+                }
+                return Err(error);
+            }
+            Ok(())
+        })
+        .await
     }
 
     /// Discord に接続し、人がサーバーで送った新着メッセージを順に処理します。
     ///
     /// Tokio ランタイム内で呼び出してください。Bot や Webhook によるメッセージは
     /// ハンドラーに渡しません。ハンドラーのエラーは標準エラー出力に記録して処理を続けます。
-    /// 受信処理とハンドラー処理は並行して進みます。キュー満杯時は新着イベントを破棄します。
+    /// 受信とハンドラーは協調的に進みます。ブロッキング処理や長い計算は分離してください。
     ///
     /// # エラー
     ///
@@ -132,6 +160,7 @@ impl Bot {
             events,
             slash,
             intents,
+            additional_intents,
         } = self;
         let http = Client::new(token.clone());
         let mut event_types = EventTypeFlags::READY;
@@ -150,9 +179,12 @@ impl Bot {
             event_types |= EventTypeFlags::MESSAGE_CREATE;
         }
 
-        let mut shard = Shard::new(ShardId::ONE, token, intents.unwrap_or(default_intents));
-        let (messages, mut message_queue) = mpsc::channel(64);
-        let (interactions, mut interaction_queue) = mpsc::channel(64);
+        let intents = intents.unwrap_or(default_intents) | additional_intents;
+        let mut shard = Shard::new(ShardId::ONE, token, intents);
+        let (messages, mut message_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
+        let (interactions, interaction_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
+        let (busy, busy_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
+        let slash = slash.as_ref();
 
         let handle_messages = async {
             while let Some(pending) = message_queue.recv().await {
@@ -179,14 +211,25 @@ impl Bot {
             }
         };
 
-        let handle_interactions = async {
-            while let Some(pending) = interaction_queue.recv().await {
+        let handle_interactions = slash_queue::dispatch(
+            interaction_queue,
+            SLASH_WORKERS,
+            |pending| async {
                 let (interaction, timing) = Pending::begin(pending);
-                if let Some(commands) = &slash {
+                if let Some(commands) = slash {
                     commands.dispatch(&http, &interaction, timing).await;
                 }
+            },
+            |pending| queue_busy_response(&busy, pending.into_event()),
+        );
+        let handle_busy = slash_queue::respond(busy_queue, BUSY_WORKERS, |interaction| {
+            let http = &http;
+            async move {
+                if let Some(commands) = slash {
+                    commands.reject_busy(http, &interaction).await;
+                }
             }
-        };
+        });
 
         let receive = async {
             while let Some(event) = shard.next_event(event_types).await {
@@ -208,14 +251,13 @@ impl Bot {
                             );
                         }
                     }
-                    Ok(Event::InteractionCreate(interaction)) => {
-                        if interactions
-                            .try_send(Pending::new(interaction.0, gateway_rtt))
-                            .is_err()
+                    Ok(Event::InteractionCreate(interaction))
+                        if slash.is_some_and(|commands| commands.accepts(&interaction.0)) =>
+                    {
+                        if let Err(error) =
+                            interactions.try_send(Pending::new(interaction.0, gateway_rtt))
                         {
-                            eprintln!(
-                                "受信キューが満杯のため INTERACTION_CREATE を処理できませんでした"
-                            );
+                            queue_busy_response(&busy, error.into_inner().into_event());
                         }
                     }
                     Ok(Event::GatewayClose(Some(frame))) => {
@@ -232,13 +274,21 @@ impl Bot {
             () = receive => {},
             () = handle_messages => {},
             () = handle_interactions => {},
+            () = handle_busy => {},
         }
 
         Err("Discord Gateway の接続が終了しました".into())
     }
 }
 
+fn queue_busy_response(queue: &mpsc::Sender<Interaction>, interaction: Interaction) {
+    if queue.try_send(interaction).is_err() {
+        eprintln!("混雑応答のキューが満杯のため INTERACTION_CREATE に応答できませんでした");
+    }
+}
+
 /// ハンドラーに渡される、受信メッセージと返信先の情報です。
+#[derive(Clone, Copy)]
 pub struct Context<'a> {
     http: &'a Client,
     message: &'a Message,

@@ -33,6 +33,10 @@ pub(crate) struct Pending<T> {
 }
 
 impl<T> Pending<T> {
+    pub(crate) fn into_event(self) -> T {
+        self.event
+    }
+
     pub(crate) fn new(event: T, gateway_rtt: Option<Duration>) -> Self {
         Self {
             event,

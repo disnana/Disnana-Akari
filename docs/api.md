@@ -9,17 +9,22 @@
 | `bot.with_events(events) -> Bot` | Gateway イベントに応じて呼び出す関数の一覧を設定します。 |
 | `bot.with_slash_commands(commands) -> Bot` | スラッシュコマンドを指定サーバーで有効にします。 |
 | `bot.with_intents(intents) -> Bot` | 自動で選ぶ Gateway Intent を、渡された `Intents` の集合で置き換えます。 |
+| `bot.add_intents(intents) -> Bot` | 自動で選ぶ集合または `with_intents` で指定した集合に、渡された `Intents` を追加します。 |
 | `bot.start().await -> Result<()>` | 設定したイベントとスラッシュコマンドで Bot を起動します。 |
 | `bot.run_commands(commands).await -> Result<()>` | 上記に加えて、テキストコマンドを実行します。 |
 | `bot.run(on_message).await -> Result<()>` | テキストコマンドの代わりに、受信メッセージを自前の `async fn on_message(ctx: Context<'_>) -> Result<()>` で処理します。 |
 
-起動メソッドは Tokio ランタイム内で呼び出します。テキストコマンドやメッセージハンドラーを使う場合は、自動で `GUILD_MESSAGES` と `MESSAGE_CONTENT` を要求します。スラッシュコマンドと `on_ready` のみなら、この二つの Intent は不要です。Intent を上書きする場合は用途に必要なビットを指定します。`Intents` は `disnana_akari::model::gateway::Intents` から参照できます。
+起動メソッドは Tokio ランタイム内で呼び出します。テキストコマンドやメッセージハンドラーを使う場合は、自動で `GUILD_MESSAGES` と `MESSAGE_CONTENT` を要求します。スラッシュコマンドと `on_ready` のみなら、この二つの Intent は不要です。
+
+`with_intents` を使う場合、テキストコマンドには `GUILD_MESSAGES` と `MESSAGE_CONTENT` を明示的に含めます。自動で選ぶ Intent に別のビットを足すときは `add_intents` を使います。両方を指定した場合は、呼ぶ順序に関係なく `with_intents` で最後に指定した集合に、`add_intents` の集合が加わります。`Intents` は `disnana_akari::model::gateway::Intents` から参照できます。
 
 Bot と Webhook が送ったメッセージは除外します。復旧可能な Gateway の切断は Twilight が処理し、イベントストリームの終了やスラッシュコマンドの登録失敗は起動メソッドからエラーとして返ります。
 
 ### ハンドラーの実行順
 
-Gateway の受信、テキストコマンドとイベントの処理、スラッシュコマンドの処理は、非同期で並行して進みます。テキストコマンドとイベントは同じキュー、スラッシュコマンドは別のキューに入り、それぞれ到着順に処理されます。キューごとに待ち行列の上限は 64 件です。満杯の場合は新しく受け取ったイベントを破棄し、標準エラー出力に記録します。Gateway のイベントストリームが終わると処理中と保留中のイベントも中止します。
+Gateway の受信、テキストコマンドとイベントの処理、スラッシュコマンドの処理は、非同期で並行して進みます。テキストコマンドとイベントは一つのキューで到着順に処理し、待ち行列は最大 64 件です。満杯時は新しく届いたイベントを破棄し、標準エラー出力に記録します。
+
+スラッシュコマンドの同時実行枠は 8 件で、受信から処理への引き渡しに最大 64 件のキューを使います。同時実行枠やキューが埋まっている場合、別の処理枠から本人にだけ見える混雑通知を試みます。混雑通知も同時 8 件、待ち行列 64 件までです。通知用の待ち行列が満杯の場合や、Discord への通知が失敗した場合は、標準エラー出力に記録します。Gateway のイベントストリームが終わると処理中と保留中のイベントも中止します。
 
 ハンドラーが I/O の完了を `.await` している間は Gateway の受信を続けられます。同期 I/O や長い計算は、同じタスク内の他の処理も止めるため、Tokio の `spawn_blocking` などで切り分けます。
 
@@ -37,23 +42,38 @@ Gateway の受信、テキストコマンドとイベントの処理、スラッ
 
 名前は大文字と小文字を区別します。最初の空白までがコマンド名です。`! ping` のようにプレフィックスの直後が空白の投稿、未登録の名前、通常の投稿は無視されます。
 
+`Bot::run_commands` で登録済みのコマンドの実行に失敗した場合は、元の投稿に「コマンドを処理できませんでした。」と返信を試みます。エラーの詳細は標準エラー出力に記録されます。`commands.dispatch` を独自の処理に組み込む場合は、その呼び出し元でエラーを扱えます。
+
 ## `SlashCommands` と `SlashContext<'_>`
 
 | メソッド | 動作 |
 | --- | --- |
 | `SlashCommands::for_guild(guild_id) -> SlashCommands` | Discord のサーバー ID を指定して空のコマンド一覧を作ります。ID の型は `Id<GuildMarker>` です。 |
+| `commands.replace_guild_commands() -> SlashCommands` | 起動時に、このアプリのサーバー内の全コマンドを登録した一覧に一括で置き換えます。 |
 | `commands.register(name, description, options, handler) -> Result<()>` | 表示名、説明、引数の定義、呼び出す非同期関数を登録します。Discord の名前や説明の制約、重複名を検証します。 |
 | `SlashCommands::string_option(name, description, required) -> CommandOption` | 文字列引数を定義します。`required` が `true` なら Discord の入力欄で必須になります。 |
 | `ctx.option(name) -> Option<&CommandOptionValue>` | 指定した名前の引数を Twilight の値として借ります。 |
 | `ctx.string(name) -> Option<&str>` | 指定した名前の文字列を借ります。引数がない場合や他の型の場合は `None` を返します。 |
 | `ctx.author_id() -> Option<Id<UserMarker>>` | 呼び出したユーザーの ID を取得します。 |
 | `ctx.timing() -> Timing` | このスラッシュコマンド呼び出しの測定値を取得します。 |
-| `ctx.reply(content).await -> Result<()>` | チャンネルに表示される初回応答を送ります。 |
-| `ctx.reply_ephemeral(content).await -> Result<()>` | 呼び出したユーザーだけに表示される初回応答を送ります。 |
+| `ctx.defer().await -> Result<()>` | チャンネルに表示される処理中の初回応答を送ります。 |
+| `ctx.defer_ephemeral().await -> Result<()>` | 呼び出したユーザーだけに表示される処理中の初回応答を送ります。 |
+| `ctx.reply(content).await -> Result<()>` | チャンネルに初回応答を送ります。`defer` または `defer_ephemeral` の後は、公開範囲を維持して処理中の表示を本文に置き換えます。 |
+| `ctx.reply_ephemeral(content).await -> Result<()>` | 呼び出したユーザーだけに初回応答を送ります。`defer_ephemeral` の後は、その処理中の表示を本文に置き換えます。 |
+| `ctx.followup(content).await -> Result<()>` | 最初の本文を送った後に、チャンネルに追加のメッセージを送ります。 |
+| `ctx.followup_ephemeral(content).await -> Result<()>` | 最初の本文を送った後に、呼び出したユーザーだけに追加のメッセージを送ります。 |
 
-関数の形は `async fn handler(ctx: &mut SlashContext<'_>) -> Result<()>` です。起動時、同じアプリの同じサーバーにある同名のスラッシュコマンドは更新されます。関数から返るまでに初回応答が成功しなかった場合は、Akari が本人にだけ見えるエラー応答を試みます。
+### サーバーに登録するコマンドを同期する
 
-初回応答には Discord の 3 秒の期限があります。現在の API は一度の初回応答に対応しています。返信前の外部 I/O を短く保ってください。返信本文中のメンション通知は抑止します。[Discord の Interaction 応答仕様](https://docs.discord.com/developers/interactions/receiving-and-responding)
+既定の起動では、同名のスラッシュコマンドを追加または更新し、ほかの既存コマンドを保持します。Akari に登録していないサーバー限定のスラッシュコマンドを受信した場合は、本人にだけ「このコマンドは現在利用できません。」と返します。
+
+`replace_guild_commands()` を指定すると、登録一覧に含まれないコマンドが対象サーバーから削除されます。削除の範囲は同じアプリ・同じサーバーの全アプリケーションコマンドで、ユーザーやメッセージを右クリックして実行するコマンドも対象です。空の一覧で一括同期すると対象の全コマンドが削除されます。[Discord のサーバー単位の一括上書き](https://docs.discord.com/developers/interactions/application-commands#bulk-overwrite-guild-application-commands)
+
+### 時間がかかる処理に応答する
+
+関数の形は `async fn handler(ctx: &mut SlashContext<'_>) -> Result<()>` です。Discord は Interaction の受信後 3 秒以内に初回応答を求めます。外部サービスへの問い合わせなどがある場合は、先に `ctx.defer().await?` または `ctx.defer_ephemeral().await?` を呼び、処理後に `ctx.reply(...).await?` で処理中の表示を本文に置き換えます。公開範囲は `defer` または `defer_ephemeral` の時点で決まります。公開の `defer` の後に `reply_ephemeral` を呼ぶとエラーになります。`followup` と `followup_ephemeral` は最初の本文を送った後に呼びます。Discord の Interaction トークンの有効期間は 15 分です。[Discord の Interaction 応答仕様](https://docs.discord.com/developers/interactions/receiving-and-responding)
+
+ハンドラーが最初の本文を送れずに終了した場合は、Akari がエラー応答を試みます。初回応答が済んでいない場合は本人にだけ表示し、処理中の応答がある場合はその表示をエラー文に置き換えます。返信本文中のメンション通知は抑止します。
 
 ## `register_hybrid` と `HybridContext<'_>`
 
@@ -68,10 +88,11 @@ Gateway の受信、テキストコマンドとイベントの処理、スラッ
 | `ctx.args() -> Option<&str>` | テキスト側ではコマンド名に続く本文を `Some` で返します。スラッシュ側では `None` を返します。 |
 | `ctx.option(name) -> Option<&CommandOptionValue>` | スラッシュ側の名前付き引数を借ります。テキスト側や該当する引数がない場合は `None` を返します。 |
 | `ctx.string(name) -> Option<&str>` | スラッシュ側の文字列引数を借ります。テキスト側、引数なし、他の型の場合は `None` を返します。 |
+| `ctx.text_arg(name) -> Option<&str>` | スラッシュでは同名の文字列引数、テキストでは最初に定義したトップレベルの文字列引数に対応する残りの本文を借ります。値が空か空白だけの場合は `None` です。 |
 | `ctx.timing() -> Timing` | 呼び出し元に応じた測定値を取得します。 |
 | `ctx.reply(content).await -> Result<()>` | テキストなら元の投稿に返信し、スラッシュなら公開の初回応答を送ります。 |
 
-呼び出し頻度を制限するときは、アプリ側で制限時間と実行履歴を管理します。例えば `(ctx.source(), user_id)` をキーにすると、同じユーザーのテキストとスラッシュの実行履歴を別々に管理できます。
+テキスト側の `text_arg` は、コマンド名の後ろ全体を一つの値として返します。二つ目以降の文字列引数や他の型の引数を読む場合は、必要に応じて `args()` や `option()` を使います。ユーザーごとの呼び出し頻度を制限するときは `ctx.author_id()` と `Cooldown` を組み合わせられます。
 
 ## `Cooldown`
 
@@ -124,6 +145,14 @@ async fn main() -> Result<()> {
     register_hybrid(
         &mut commands,
         Some(&mut slash),
+        "echo",
+        "入力した文章を返します",
+        vec![SlashCommands::string_option("text", "返す文章", true)],
+        echo,
+    )?;
+    register_hybrid(
+        &mut commands,
+        Some(&mut slash),
         "latency",
         "Bot のキュー待ちを確認します",
         vec![],
@@ -146,6 +175,13 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 
 async fn slash_ping(ctx: &mut SlashContext<'_>) -> Result<()> {
     ctx.reply("Pong!").await
+}
+
+async fn echo(ctx: &mut HybridContext<'_>) -> Result<()> {
+    let Some(text) = ctx.text_arg("text") else {
+        return ctx.reply("返したい文章を入力してください。").await;
+    };
+    ctx.reply(text).await
 }
 
 async fn latency(ctx: &mut HybridContext<'_>) -> Result<()> {

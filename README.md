@@ -17,6 +17,8 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 }
 ```
 
+スラッシュコマンドだけを使う場合は、`Bot::from_env()?.with_slash_commands(slash).start().await` で起動できます。`slash` はテスト用サーバー ID とコマンドを指定した `SlashCommands` です。[API リファレンス](docs/api.md)
+
 - [日本語ドキュメント](docs/README.md)
 - [クイックスタートとローカルの実験用 Bot](docs/quickstart.md)
 - [Playground のコードを読む](docs/tutorial.md)

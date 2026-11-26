@@ -11,9 +11,13 @@ mod events;
 // Result<()> は「成功時は値を返さず、失敗時はエラーを返す」を表します。
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    // let は変数を作ります。ここでは load() が返す 2 個の値に、それぞれ名前を付けます。
+    // let は変数を作ります。ここでは Settings が持つ値を同じ名前の変数として取り出します。
     // ? は成功した値を取り出し、エラーならこの関数をそこで終了して呼び出し元に返します。
-    let (bot, guild_id) = config::load()?;
+    let config::Settings {
+        bot,
+        guild_id,
+        replace_guild_commands,
+    } = config::load()?;
     let (text_commands, slash_commands) = commands::register(guild_id)?;
 
     // with_events はイベント登録を持たせた Bot を返します。
@@ -21,6 +25,12 @@ async fn main() -> Result<()> {
     // Some は値があること、None は値がないことを表します。
     // if let は「この形に当てはまるときだけ」と書く方法です。
     let bot = if let Some(slash_commands) = slash_commands {
+        // true の場合だけ、この Bot の指定サーバー向けコマンドをコードの一覧で置き換えます。
+        let slash_commands = if replace_guild_commands {
+            slash_commands.replace_guild_commands()
+        } else {
+            slash_commands
+        };
         bot.with_slash_commands(slash_commands)
     } else {
         bot

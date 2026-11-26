@@ -5,8 +5,8 @@
 | ファイル | 担当 |
 | --- | --- |
 | `main.rs` | 設定を読み、コマンドとイベントを登録して Bot を起動します。 |
-| `config.rs` | `.env` から Bot トークンとテスト用サーバー ID を読みます。 |
-| `commands.rs` | `!ping`、`!echo`、`/ping`、`/echo` を個別の関数に結び付け、`!latency` と `/latency` は同じ関数につなぎます。 |
+| `config.rs` | `.env` から Bot トークン、テスト用サーバー ID、登録一覧を一括置換するかどうかを読みます。 |
+| `commands.rs` | `!ping` と `/ping` を個別の関数に結び付けます。`echo` と `latency` は、それぞれテキストとスラッシュで関数を共有します。 |
 | `events.rs` | Gateway が準備できたときや、メッセージを受け取ったときの処理を定義します。 |
 
 ## `!ping` の実行を追う
@@ -33,13 +33,22 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 - `CommandContext<'_>` は、Akari が持つメッセージの情報を一時的に借ります。`'_` は借用の有効な範囲をコンパイラーに推論させる記号です。
 - `Result<()>` の `()` は「成功時に返す値がない」という意味です。関数の最後の式をセミコロンなしで書くと、その式の値が返ります。`ping` は返信処理の成功かエラーをそのまま返します。
 
-`!echo こんにちは` を送ると、`ctx.args()` がコマンド名より後ろの `こんにちは` を返します。値は `&str` で、元の本文の一部を借りています。ハンドラーの終了後まで文字列が必要なら `to_owned()` で所有する `String` に変換できます。
+## `echo` の引数をテキストとスラッシュで共通化する
 
-## `/echo` が引数を受け取る仕組み
+`SlashCommands::string_option("text", "返す文章", true)` で `text` という必須の文字列引数を定義します。ハンドラーでは、どちらの形式でも `ctx.text_arg("text")` で読み出せます。
 
-`/echo` の `text` 欄は、登録時に `SlashCommands::string_option("text", "返す文章", true)` で作ります。テキストコマンドでは本文の分割を Akari が行い、スラッシュコマンドでは入力欄の値を Discord が名前付きで渡します。
+```rust
+use disnana_akari::{HybridContext, Result};
 
-`ctx.string("text")` は `Option<&str>` を返します。値があれば `Some(text)`、なければ `None` です。`&mut SlashContext<'_>` はコンテキストを変更できる形で借りています。Akari はこの借用を通じて初回応答が済んだことを記録します。[コマンドの実装](../examples/ping/commands.rs)
+async fn echo(ctx: &mut HybridContext<'_>) -> Result<()> {
+    let Some(text) = ctx.text_arg("text") else {
+        return ctx.reply("返したい文章を入力してください。").await;
+    };
+    ctx.reply(text).await
+}
+```
+
+`!echo こんにちは 世界` では、コマンド名に続く `こんにちは 世界` が最初の文字列引数になります。`/echo` では、Discord の `text` 欄に入れた値を受け取ります。`let Some(text) = ... else` は、入力があるときに `text` という名前で取り出す書き方です。入力が空なら `else` に進みます。`&str` は元の入力を借りた文字列です。ハンドラーの終了後まで必要なら `to_owned()` で所有する `String` に変換できます。[コマンドの実装](../examples/ping/commands.rs)
 
 ## `!latency` と `/latency` で同じ関数を使う
 
@@ -50,6 +59,23 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 Playground の `latency` では、`ctx.source()` を `match` で分けて、`!latency` には 3 秒、`/latency` には 1 秒のクールダウンを適用します。`ctx.author_id()` が返すユーザー ID を `cooldown.check(user)` に渡すと、まだ実行できない場合に `Err(remaining)` が返ります。直後にもう片方の形式を試しても、待ち時間は共有されません。
 
 `Cooldown::new(...)` は登録時に一度だけ実行します。`async move |ctx| ...` は、登録した関数の中に作成済みのクールダウンを持たせる書き方です。`latency` 関数は `&Cooldown` でそれを借りるため、前回の記録を次回も使えます。[コマンドの実装](../examples/ping/commands.rs) · [API リファレンス](api.md#cooldown)
+
+## 時間のかかるスラッシュコマンドに先に応答する
+
+スラッシュ専用のハンドラーには `&mut SlashContext<'_>` が渡ります。先に `defer_ephemeral` を呼ぶと、呼び出したユーザーだけに処理中の表示が出ます。調べ物が終わったら `reply` で表示を置き換え、別のメッセージも送りたい場合は `followup_ephemeral` を呼びます。
+
+```rust
+use disnana_akari::{Result, SlashContext};
+
+async fn report(ctx: &mut SlashContext<'_>) -> Result<()> {
+    ctx.defer_ephemeral().await?;
+    // 実装時は、ここでデータ取得や集計を待ちます。
+    ctx.reply("集計結果が出ました。").await?;
+    ctx.followup_ephemeral("条件を変えると再集計できます。").await
+}
+```
+
+先に `?` で応答の成否を確認すると、初回応答が失敗したときに集計を続けずに終了できます。`reply` を呼ぶまで Discord 側には処理中の表示が残ります。[API リファレンス](api.md)
 
 ## イベントに処理を追加する
 

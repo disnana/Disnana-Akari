@@ -7,7 +7,7 @@ use std::{
 use twilight_http::Client;
 use twilight_model::{
     application::{
-        command::{CommandOption, CommandOptionType, CommandType},
+        command::{Command, CommandOption, CommandOptionType, CommandType},
         interaction::{
             Interaction, InteractionData, InteractionType,
             application_command::{CommandData, CommandOptionValue},
@@ -24,10 +24,13 @@ use twilight_validate::command;
 
 use crate::{Result, Timing};
 
+const COMMAND_FAILED: &str = "コマンドを処理できませんでした。";
+
 /// 一つのサーバーに登録するスラッシュコマンド一覧です。
 pub struct SlashCommands {
     guild_id: Id<GuildMarker>,
     entries: BTreeMap<String, Definition>,
+    replace: bool,
 }
 
 impl SlashCommands {
@@ -36,7 +39,17 @@ impl SlashCommands {
         Self {
             guild_id,
             entries: BTreeMap::new(),
+            replace: false,
         }
+    }
+
+    /// 起動時に、このアプリのサーバーコマンド一覧を登録済みの定義で置き換えます。
+    ///
+    /// 一覧に含まれないスラッシュコマンドや、ユーザー・メッセージのコマンドも削除されます。
+    /// 空の一覧を指定した場合は、このアプリの対象サーバーのコマンドがすべて削除されます。
+    pub fn replace_guild_commands(mut self) -> Self {
+        self.replace = true;
+        self
     }
 
     /// Discord に表示するコマンド名、説明、引数と、呼び出す関数を設定します。
@@ -91,31 +104,94 @@ impl SlashCommands {
     }
 
     pub(crate) async fn sync(self, http: &Client) -> Result<ActiveSlashCommands> {
-        let mut handlers = HashMap::with_capacity(self.entries.len());
-        if !self.entries.is_empty() {
-            let application = http.current_user_application().await?.model().await?;
-            let client = http.interaction(application.id);
-            for (name, definition) in self.entries {
-                let registered = client
-                    .create_guild_command(self.guild_id)
-                    .chat_input(&name, &definition.description)
-                    .command_options(&definition.options)
-                    .await
-                    .map_err(|error| {
-                        format!("スラッシュコマンド `/{name}` を登録できませんでした ({error})")
-                    })?
-                    .model()
-                    .await?;
-                if let Some(id) = registered.id {
-                    handlers.insert(id, definition.handler);
-                } else {
-                    return Err(format!(
-                        "スラッシュコマンド `/{name}` の登録結果に ID がありません"
-                    )
-                    .into());
-                }
+        if self.entries.is_empty() && !self.replace {
+            return self.bind(Vec::new());
+        }
+
+        let application = http.current_user_application().await?.model().await?;
+        let client = http.interaction(application.id);
+        if self.replace {
+            let commands = self.replacement_commands()?;
+            let registered = client
+                .set_guild_commands(self.guild_id, &commands)
+                .await?
+                .models()
+                .await?;
+            return self.bind(registered);
+        }
+
+        let mut registered = Vec::with_capacity(self.entries.len());
+        for (name, definition) in &self.entries {
+            let command = client
+                .create_guild_command(self.guild_id)
+                .chat_input(name, &definition.description)
+                .command_options(&definition.options)
+                .await
+                .map_err(|error| {
+                    format!("スラッシュコマンド `/{name}` を登録できませんでした ({error})")
+                })?
+                .model()
+                .await?;
+            registered.push(command);
+        }
+
+        self.bind(registered)
+    }
+
+    #[allow(deprecated)] // Twilight の Command モデルに含まれる dm_permission は送信しない。
+    fn replacement_commands(&self) -> Result<Vec<Command>> {
+        self.entries
+            .iter()
+            .map(|(name, definition)| {
+                let command = Command {
+                    application_id: None,
+                    contexts: None,
+                    default_member_permissions: None,
+                    description: definition.description.clone(),
+                    description_localizations: None,
+                    dm_permission: None,
+                    guild_id: None,
+                    id: None,
+                    integration_types: None,
+                    kind: CommandType::ChatInput,
+                    name: name.clone(),
+                    name_localizations: None,
+                    nsfw: None,
+                    options: definition.options.clone(),
+                    version: Id::new(1),
+                };
+                command::command(&command)?;
+                Ok(command)
+            })
+            .collect()
+    }
+
+    fn bind(mut self, registered: Vec<Command>) -> Result<ActiveSlashCommands> {
+        if registered.len() != self.entries.len() {
+            return Err("Discord が返したコマンド件数が登録件数と一致しません".into());
+        }
+
+        let mut handlers = HashMap::with_capacity(registered.len());
+        for command in registered {
+            let name = command.name;
+            if command.kind != CommandType::ChatInput {
+                return Err(
+                    format!("`/{name}` の登録結果がスラッシュコマンドではありません").into(),
+                );
+            }
+            let id = command
+                .id
+                .ok_or_else(|| format!("`/{name}` の登録結果に ID がありません"))?;
+            let definition = self.entries.remove(&name).ok_or_else(|| {
+                format!("`/{name}` の登録結果が重複しているか、登録要求に含まれていません")
+            })?;
+            if let std::collections::hash_map::Entry::Vacant(entry) = handlers.entry(id) {
+                entry.insert(definition.handler);
+            } else {
+                return Err(format!("`/{name}` の登録結果の ID が重複しています").into());
             }
         }
+
         Ok(ActiveSlashCommands {
             guild_id: self.guild_id,
             handlers,
@@ -135,28 +211,66 @@ pub(crate) struct ActiveSlashCommands {
 }
 
 impl ActiveSlashCommands {
-    pub(crate) async fn dispatch(&self, http: &Client, interaction: &Interaction, timing: Timing) {
+    pub(crate) fn accepts(&self, interaction: &Interaction) -> bool {
+        self.command_data(interaction).is_some()
+    }
+
+    fn command_data<'a>(&self, interaction: &'a Interaction) -> Option<&'a CommandData> {
         if interaction.guild_id != Some(self.guild_id)
             || interaction.kind != InteractionType::ApplicationCommand
         {
-            return;
+            return None;
         }
         let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
+            return None;
+        };
+        let in_scope = match data.guild_id {
+            Some(guild_id) => guild_id == self.guild_id,
+            None => self.handlers.contains_key(&data.id),
+        };
+        (data.kind == CommandType::ChatInput && in_scope).then_some(data)
+    }
+
+    pub(crate) async fn reject_busy(&self, http: &Client, interaction: &Interaction) {
+        if self.accepts(interaction)
+            && send_initial_message(
+                http,
+                interaction,
+                "現在混雑しています。少し待ってからもう一度お試しください。",
+                true,
+            )
+            .await
+            .is_err()
+        {
+            eprintln!("スラッシュコマンドの混雑応答に失敗しました");
+        }
+    }
+
+    pub(crate) async fn dispatch(&self, http: &Client, interaction: &Interaction, timing: Timing) {
+        let Some(data) = self.command_data(interaction) else {
             return;
         };
-        if data.kind != CommandType::ChatInput {
-            return;
-        }
         let Some(handler) = self.handlers.get(&data.id) else {
+            if send_initial_message(
+                http,
+                interaction,
+                "このコマンドは現在利用できません。",
+                true,
+            )
+            .await
+            .is_err()
+            {
+                eprintln!("未登録スラッシュコマンドへの応答に失敗しました");
+            }
             return;
         };
 
-        let mut responded = false;
+        let mut response_state = ResponseState::Pending;
         let mut ctx = SlashContext {
             http,
             interaction,
             data,
-            responded: &mut responded,
+            response_state: &mut response_state,
             timing,
         };
         if let Err(error) = handler.call(&mut ctx).await {
@@ -165,12 +279,13 @@ impl ActiveSlashCommands {
                 data.name
             );
         }
-        if !*ctx.responded
-            && let Err(error) = ctx
-                .reply_ephemeral("コマンドを処理できませんでした。")
-                .await
-        {
-            eprintln!("スラッシュコマンドのエラー応答に失敗しました ({error})");
+        let fallback = match *ctx.response_state {
+            ResponseState::Pending => ctx.reply_ephemeral(COMMAND_FAILED).await,
+            ResponseState::Deferred { .. } => ctx.reply(COMMAND_FAILED).await,
+            ResponseState::Replied => Ok(()),
+        };
+        if fallback.is_err() {
+            eprintln!("スラッシュコマンドのエラー応答に失敗しました");
         }
     }
 }
@@ -180,7 +295,7 @@ pub struct SlashContext<'a> {
     http: &'a Client,
     interaction: &'a Interaction,
     data: &'a CommandData,
-    responded: &'a mut bool,
+    response_state: &'a mut ResponseState,
     timing: Timing,
 }
 
@@ -200,7 +315,7 @@ impl<'a> SlashContext<'a> {
             http: self.http,
             interaction: self.interaction,
             data: self.data,
-            responded: self.responded,
+            response_state: self.response_state,
             timing: self.timing,
         }
     }
@@ -222,29 +337,145 @@ impl<'a> SlashContext<'a> {
         }
     }
 
-    /// チャンネルに表示する初回応答を送ります。
+    /// チャンネルに初回応答を送るか、遅延応答の元メッセージを完成させます。
+    /// 遅延応答の公開範囲は `defer` の時点で決まります。
     ///
     /// # エラー
     ///
     /// 二回目の応答や、Discord が受け付けなかった場合に失敗します。
     pub async fn reply(&mut self, content: &str) -> Result<()> {
-        self.respond(content, None).await
+        self.respond(content, false).await
     }
 
-    /// 呼び出した本人にだけ見える初回応答を送ります。
+    /// 呼び出した本人にだけ見える初回応答を送るか、非公開の遅延応答を完成させます。
     ///
     /// # エラー
     ///
-    /// 二回目の応答や、Discord が受け付けなかった場合に失敗します。
+    /// 応答済み、公開の遅延応答済み、または Discord が受け付けなかった場合に失敗します。
     pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
-        self.respond(content, Some(MessageFlags::EPHEMERAL)).await
+        self.respond(content, true).await
     }
 
-    async fn respond(&mut self, content: &str, flags: Option<MessageFlags>) -> Result<()> {
-        if *self.responded {
-            return Err("このスラッシュコマンドにはすでに応答しました".into());
+    /// 初回応答としてチャンネルに処理中の表示を出します。作業が終わったら `reply` で完成させます。
+    ///
+    /// # エラー
+    ///
+    /// 初回応答済み、または Discord が受け付けなかった場合に失敗します。
+    pub async fn defer(&mut self) -> Result<()> {
+        self.defer_with_visibility(false).await
+    }
+
+    /// 初回応答として本人にだけ処理中の表示を出します。作業が終わったら `reply` で完成させます。
+    ///
+    /// # エラー
+    ///
+    /// 初回応答済み、または Discord が受け付けなかった場合に失敗します。
+    pub async fn defer_ephemeral(&mut self) -> Result<()> {
+        self.defer_with_visibility(true).await
+    }
+
+    /// 初回メッセージを送った後、チャンネルに追加メッセージを送ります。
+    ///
+    /// # エラー
+    ///
+    /// 初回メッセージが未完成、または Discord が受け付けなかった場合に失敗します。
+    pub async fn followup(&self, content: &str) -> Result<()> {
+        self.send_followup(content, false).await
+    }
+
+    /// 初回メッセージを送った後、呼び出した本人にだけ追加メッセージを送ります。
+    ///
+    /// # エラー
+    ///
+    /// 初回メッセージが未完成、または Discord が受け付けなかった場合に失敗します。
+    pub async fn followup_ephemeral(&self, content: &str) -> Result<()> {
+        self.send_followup(content, true).await
+    }
+
+    async fn defer_with_visibility(&mut self, ephemeral: bool) -> Result<()> {
+        if *self.response_state != ResponseState::Pending {
+            return Err("このスラッシュコマンドにはすでに初回応答を送りました".into());
         }
-        let response = InteractionResponse {
+        let response = initial_response(InitialResponse::Deferred, ephemeral);
+        self.http
+            .interaction(self.interaction.application_id)
+            .create_response(self.interaction.id, &self.interaction.token, &response)
+            .await?;
+        *self.response_state = ResponseState::Deferred { ephemeral };
+        Ok(())
+    }
+
+    async fn respond(&mut self, content: &str, ephemeral: bool) -> Result<()> {
+        match self.response_state.reply_action(ephemeral)? {
+            ReplyAction::Initial => {
+                send_initial_message(self.http, self.interaction, content, ephemeral).await?;
+            }
+            ReplyAction::EditDeferred => {
+                self.http
+                    .interaction(self.interaction.application_id)
+                    .update_response(&self.interaction.token)
+                    .content(Some(content))
+                    .allowed_mentions(Some(&AllowedMentions::default()))
+                    .await?;
+            }
+        }
+        *self.response_state = ResponseState::Replied;
+        Ok(())
+    }
+
+    async fn send_followup(&self, content: &str, ephemeral: bool) -> Result<()> {
+        if *self.response_state != ResponseState::Replied {
+            return Err("追加メッセージを送る前に reply で初回メッセージを送ってください".into());
+        }
+        let mentions = AllowedMentions::default();
+        let client = self.http.interaction(self.interaction.application_id);
+        let mut followup = client
+            .create_followup(&self.interaction.token)
+            .content(content)
+            .allowed_mentions(Some(&mentions));
+        if ephemeral {
+            followup = followup.flags(MessageFlags::EPHEMERAL);
+        }
+        followup.await?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResponseState {
+    Pending,
+    Deferred { ephemeral: bool },
+    Replied,
+}
+
+impl ResponseState {
+    fn reply_action(self, ephemeral: bool) -> Result<ReplyAction> {
+        match self {
+            Self::Pending => Ok(ReplyAction::Initial),
+            Self::Deferred { ephemeral: false } if ephemeral => {
+                Err("遅延応答の公開範囲は変更できません".into())
+            }
+            Self::Deferred { .. } => Ok(ReplyAction::EditDeferred),
+            Self::Replied => Err("このスラッシュコマンドにはすでに応答しました".into()),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReplyAction {
+    Initial,
+    EditDeferred,
+}
+
+enum InitialResponse<'a> {
+    Message(&'a str),
+    Deferred,
+}
+
+fn initial_response(response: InitialResponse<'_>, ephemeral: bool) -> InteractionResponse {
+    let flags = ephemeral.then_some(MessageFlags::EPHEMERAL);
+    match response {
+        InitialResponse::Message(content) => InteractionResponse {
             kind: InteractionResponseType::ChannelMessageWithSource,
             data: Some(InteractionResponseData {
                 content: Some(content.into()),
@@ -252,14 +483,28 @@ impl<'a> SlashContext<'a> {
                 flags,
                 ..Default::default()
             }),
-        };
-        self.http
-            .interaction(self.interaction.application_id)
-            .create_response(self.interaction.id, &self.interaction.token, &response)
-            .await?;
-        *self.responded = true;
-        Ok(())
+        },
+        InitialResponse::Deferred => InteractionResponse {
+            kind: InteractionResponseType::DeferredChannelMessageWithSource,
+            data: flags.map(|flags| InteractionResponseData {
+                flags: Some(flags),
+                ..Default::default()
+            }),
+        },
     }
+}
+
+async fn send_initial_message(
+    http: &Client,
+    interaction: &Interaction,
+    content: &str,
+    ephemeral: bool,
+) -> Result<()> {
+    let response = initial_response(InitialResponse::Message(content), ephemeral);
+    http.interaction(interaction.application_id)
+        .create_response(interaction.id, &interaction.token, &response)
+        .await?;
+    Ok(())
 }
 
 trait SlashHandler: Send + Sync {
@@ -283,7 +528,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandOptionType, Id, Result, SlashCommands, SlashContext};
+    use super::{
+        AllowedMentions, CommandOptionType, CommandType, Id, InitialResponse,
+        InteractionResponseType, MessageFlags, ReplyAction, ResponseState, Result, SlashCommands,
+        SlashContext, initial_response,
+    };
 
     async fn handler(_: &mut SlashContext<'_>) -> Result<()> {
         Ok(())
@@ -307,5 +556,99 @@ mod tests {
         assert_eq!(slash.entries["echo"].description, "最初の説明");
         assert_eq!(slash.entries["echo"].options[0].name, "text");
         Ok(())
+    }
+
+    fn two_commands() -> Result<SlashCommands> {
+        let mut slash = SlashCommands::for_guild(Id::new(1)).replace_guild_commands();
+        slash.register("echo", "echo text", vec![], handler)?;
+        slash.register("ping", "return pong", vec![], handler)?;
+        Ok(slash)
+    }
+
+    #[test]
+    fn replacement_binds_ids_by_name_and_accepts_empty_registry() -> Result<()> {
+        let empty = SlashCommands::for_guild(Id::new(1)).replace_guild_commands();
+        assert!(empty.replacement_commands()?.is_empty());
+        assert!(empty.bind(Vec::new())?.handlers.is_empty());
+
+        let slash = two_commands()?;
+        let mut returned = slash.replacement_commands()?;
+        assert_eq!(returned[0].name, "echo");
+        returned[0].id = Some(Id::new(12));
+        returned[1].id = Some(Id::new(34));
+        returned.reverse();
+        let active = slash.bind(returned)?;
+        assert_eq!(active.handlers.len(), 2);
+        assert!(active.handlers.contains_key(&Id::new(12)));
+        assert!(active.handlers.contains_key(&Id::new(34)));
+        Ok(())
+    }
+
+    #[test]
+    fn sync_rejects_malformed_command_results() -> Result<()> {
+        let slash = two_commands()?;
+        let mut returned = slash.replacement_commands()?;
+        returned[0].id = Some(Id::new(12));
+        returned[1].id = Some(Id::new(34));
+
+        let mut bad = returned.clone();
+        bad[1].id = bad[0].id;
+        assert!(two_commands()?.bind(bad).is_err());
+        let mut bad = returned.clone();
+        bad[1].name = bad[0].name.clone();
+        assert!(two_commands()?.bind(bad).is_err());
+        let mut bad = returned.clone();
+        bad[0].kind = CommandType::User;
+        assert!(two_commands()?.bind(bad).is_err());
+        let mut bad = returned.clone();
+        bad[1].id = None;
+        assert!(two_commands()?.bind(bad).is_err());
+        assert!(slash.bind(vec![returned.remove(0)]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn response_paths_preserve_deferred_visibility_and_reject_duplicate_initial_messages()
+    -> Result<()> {
+        let public_defer = ResponseState::Deferred { ephemeral: false };
+        let private_defer = ResponseState::Deferred { ephemeral: true };
+        assert_eq!(
+            ResponseState::Pending.reply_action(false)?,
+            ReplyAction::Initial
+        );
+        assert_eq!(public_defer.reply_action(false)?, ReplyAction::EditDeferred);
+        assert!(public_defer.reply_action(true).is_err());
+        assert_eq!(
+            private_defer.reply_action(false)?,
+            ReplyAction::EditDeferred
+        );
+        assert_eq!(private_defer.reply_action(true)?, ReplyAction::EditDeferred);
+        assert!(ResponseState::Replied.reply_action(false).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn builds_immediate_and_deferred_callbacks_with_ephemeral_flags() {
+        let immediate = initial_response(InitialResponse::Message("busy"), true);
+        assert_eq!(
+            immediate.kind,
+            InteractionResponseType::ChannelMessageWithSource
+        );
+        let data = immediate.data.unwrap();
+        assert_eq!(data.content.as_deref(), Some("busy"));
+        assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
+        assert_eq!(data.flags, Some(MessageFlags::EPHEMERAL));
+
+        let deferred = initial_response(InitialResponse::Deferred, false);
+        assert_eq!(
+            deferred.kind,
+            InteractionResponseType::DeferredChannelMessageWithSource
+        );
+        assert_eq!(deferred.data, None);
+        let data = initial_response(InitialResponse::Deferred, true)
+            .data
+            .unwrap();
+        assert_eq!(data.content, None);
+        assert_eq!(data.flags, Some(MessageFlags::EPHEMERAL));
     }
 }

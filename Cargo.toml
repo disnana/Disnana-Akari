@@ -6,6 +6,7 @@ rust-version = "1.89"
 publish = false
 
 [dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["macros", "sync"] }
 twilight-gateway = "0.18"
@@ -14,4 +15,4 @@ twilight-model = "0.18"
 twilight-validate = "0.18"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
