@@ -114,3 +114,13 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 ```
 
 `Button::primary` の最初の値は、クリック時に Discord から送られてくる識別子 `custom_id` です。`on_button` に同じ値を渡すと、ボタンを押したときに登録した関数が呼ばれます。`const` で一箇所に定義しておくと、表示側と登録側の値を揃えられます。`reply_ephemeral` を使うと、クリックへの返信は本人にだけ見えます。[Playground の UI 実装](../examples/ping/ui.rs) · [API リファレンス](api.md)
+
+### ボタンが付いているメッセージを更新する
+
+Playground の **更新** ボタンは `update_message` で、クリックされたボタンの元メッセージを更新します。**遅延更新** ボタンは、先に `defer_update` で応答してから 4 秒待ち、元の表示を更新して、`followup_ephemeral` で押した人にだけ完了を知らせます。表示の作成は共通の関数にまとめているので、どちらの更新でもボタンが残ります。[Playground の UI 実装](../examples/ping/ui.rs)
+
+## 自分のライブラリを組み込む
+
+Playground も Cargo プロジェクトなので、公開クレートはリポジトリのルートから `cargo add --manifest-path playground/Cargo.toml クレート名` で追加できます。`クレート名` を使いたいライブラリの名前に置き換えます。ローカルのライブラリは、その `Cargo.toml` があるディレクトリへの相対パスを `playground/Cargo.toml` の `[dependencies]` に指定できます。
+
+機能を別モジュールやライブラリに分ける場合は、`register(&mut Commands, &mut Events)` のような普通の Rust 関数を公開し、`main.rs` から渡された一覧にコマンドやイベントを登録できます。Discord の REST API を直接使う機能では、ハンドラーの `ctx.http()` で Bot が使っている Twilight クライアントを借りられます。[Twilight の利用例](api.md)

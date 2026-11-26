@@ -95,6 +95,14 @@ enum SourceContext<'a> {
 }
 
 impl<'a> HybridContext<'a> {
+    /// Akari が使用している Twilight の REST クライアントを借ります。
+    pub fn http(&self) -> &'a crate::http::Client {
+        match &self.inner {
+            SourceContext::Text { ctx, .. } => ctx.http(),
+            SourceContext::Slash(ctx) => ctx.http(),
+        }
+    }
+
     /// コマンドがメッセージとスラッシュのどちらで呼び出されたかを返します。
     pub fn source(&self) -> CommandSource {
         match &self.inner {

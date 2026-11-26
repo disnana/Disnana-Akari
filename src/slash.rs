@@ -17,7 +17,7 @@ use twilight_model::{
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
         Id,
-        marker::{CommandMarker, GuildMarker, UserMarker},
+        marker::{ChannelMarker, CommandMarker, GuildMarker, UserMarker},
     },
 };
 use twilight_validate::command;
@@ -290,6 +290,22 @@ impl<'a> SlashContext<'a> {
         self.interaction.author_id()
     }
 
+    /// コマンドが呼ばれたチャンネルの ID を返します。
+    /// 古い形式のペイロードでは、チャンネルオブジェクトに代わって送られる ID を使います。
+    #[allow(deprecated)]
+    pub fn channel_id(&self) -> Option<Id<ChannelMarker>> {
+        self.interaction
+            .channel
+            .as_ref()
+            .map(|channel| channel.id)
+            .or(self.interaction.channel_id)
+    }
+
+    /// Discord の REST API を直接使うために、Bot の Twilight クライアントを借ります。
+    pub fn http(&self) -> &'a Client {
+        self.http
+    }
+
     /// Gateway の往復時間と、このコマンドの処理時間を確認します。
     pub fn timing(&self) -> Timing {
         self.timing
@@ -341,36 +357,7 @@ impl<'a> SlashContext<'a> {
     ///
     /// 応答済み、メッセージの内容が無効、または Discord が受け付けなかった場合に失敗します。
     pub async fn reply_ui(&mut self, message: &UiMessage) -> Result<()> {
-        message.validate()?;
-        let client = self.http.interaction(self.interaction.application_id);
-
-        match self.response_state.reply_action(false)? {
-            ReplyAction::Initial => {
-                let response = initial_response(InitialResponse::Ui(message), false);
-                client
-                    .create_response(self.interaction.id, &self.interaction.token, &response)
-                    .await?;
-            }
-            ReplyAction::EditDeferred => {
-                let mentions = AllowedMentions::default();
-                let mut update = client
-                    .update_response(&self.interaction.token)
-                    .allowed_mentions(Some(&mentions));
-                if let Some(content) = &message.content {
-                    update = update.content(Some(content));
-                }
-                if !message.embeds.is_empty() {
-                    update = update.embeds(Some(&message.embeds));
-                }
-                if !message.components.is_empty() {
-                    update = update.components(Some(&message.components));
-                }
-                update.await?;
-            }
-        }
-
-        *self.response_state = ResponseState::Replied;
-        Ok(())
+        self.respond_ui(message, false).await
     }
 
     /// 呼び出した本人にだけ見える初回応答を送るか、非公開の遅延応答を完成させます。
@@ -380,6 +367,16 @@ impl<'a> SlashContext<'a> {
     /// 応答済み、公開の遅延応答済み、または Discord が受け付けなかった場合に失敗します。
     pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
         self.respond(content, true).await
+    }
+
+    /// 埋め込みやボタンを含む非公開の初回応答を送るか、非公開の遅延応答を完成させます。
+    /// メンション通知は抑止します。
+    ///
+    /// # エラー
+    ///
+    /// 応答済み、公開の遅延応答済み、メッセージの内容が無効、または Discord が受け付けなかった場合に失敗します。
+    pub async fn reply_ui_ephemeral(&mut self, message: &UiMessage) -> Result<()> {
+        self.respond_ui(message, true).await
     }
 
     /// 初回応答としてチャンネルに処理中の表示を出します。作業が終わったら `reply` で完成させます。
@@ -449,21 +446,29 @@ impl<'a> SlashContext<'a> {
         Ok(())
     }
 
+    async fn respond_ui(&mut self, message: &UiMessage, ephemeral: bool) -> Result<()> {
+        message.validate()?;
+        match self.response_state.reply_action(ephemeral)? {
+            ReplyAction::Initial => {
+                let response = initial_response(InitialResponse::Ui(message), ephemeral);
+                self.http
+                    .interaction(self.interaction.application_id)
+                    .create_response(self.interaction.id, &self.interaction.token, &response)
+                    .await?;
+            }
+            ReplyAction::EditDeferred => {
+                edit_ui_response(self.http, self.interaction, message).await?;
+            }
+        }
+        *self.response_state = ResponseState::Replied;
+        Ok(())
+    }
+
     async fn send_followup(&self, content: &str, ephemeral: bool) -> Result<()> {
         if *self.response_state != ResponseState::Replied {
             return Err("追加メッセージを送る前に reply で初回メッセージを送ってください".into());
         }
-        let mentions = AllowedMentions::default();
-        let client = self.http.interaction(self.interaction.application_id);
-        let mut followup = client
-            .create_followup(&self.interaction.token)
-            .content(content)
-            .allowed_mentions(Some(&mentions));
-        if ephemeral {
-            followup = followup.flags(MessageFlags::EPHEMERAL);
-        }
-        followup.await?;
-        Ok(())
+        send_followup_message(self.http, self.interaction, content, ephemeral).await
     }
 }
 
@@ -542,6 +547,40 @@ pub(crate) async fn send_initial_message(
     http.interaction(interaction.application_id)
         .create_response(interaction.id, &interaction.token, &response)
         .await?;
+    Ok(())
+}
+
+pub(crate) async fn edit_ui_response(
+    http: &Client,
+    interaction: &Interaction,
+    message: &UiMessage,
+) -> Result<()> {
+    http.interaction(interaction.application_id)
+        .update_response(&interaction.token)
+        .content(Some(message.content.as_deref().unwrap_or_default()))
+        .embeds(Some(&message.embeds))
+        .components(Some(&message.components))
+        .allowed_mentions(Some(&AllowedMentions::default()))
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn send_followup_message(
+    http: &Client,
+    interaction: &Interaction,
+    content: &str,
+    ephemeral: bool,
+) -> Result<()> {
+    let mentions = AllowedMentions::default();
+    let client = http.interaction(interaction.application_id);
+    let mut followup = client
+        .create_followup(&interaction.token)
+        .content(content)
+        .allowed_mentions(Some(&mentions));
+    if ephemeral {
+        followup = followup.flags(MessageFlags::EPHEMERAL);
+    }
+    followup.await?;
     Ok(())
 }
 
@@ -708,6 +747,16 @@ mod tests {
         assert_eq!(data.components.as_deref(), Some(rich.components.as_slice()));
         assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
         assert_eq!(data.flags, None);
+
+        let private = initial_response(InitialResponse::Ui(&rich), true)
+            .data
+            .unwrap();
+        assert_eq!(private.flags, Some(MessageFlags::EPHEMERAL));
+        assert_eq!(private.embeds.as_deref(), Some(rich.embeds.as_slice()));
+        assert_eq!(
+            private.components.as_deref(),
+            Some(rich.components.as_slice())
+        );
 
         let plain = UiMessage::new().content("本文のみ");
         let data = initial_response(InitialResponse::Ui(&plain), false)

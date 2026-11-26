@@ -30,7 +30,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | スラッシュコマンドと登録済みのボタン操作 | 合計 8 件 | 合計 64 件 | 本人にだけ見える返信を試みます。 |
 | `on_ready`、`on_message` と `Bot::run` の自前ハンドラー | 1 件 | 64 件 | 新しく届いたイベントを破棄し、標準エラー出力に記録します。 |
 
-テキストコマンド用のキューには、登録名に一致したメッセージだけが入ります。イベントは受信順に処理し、同じイベントの関数は登録順に呼びます。`Bot::run` の自前ハンドラーは、そのメッセージに対する `Events::on_message` より先に実行します。`Bot::run_commands` のコマンドとイベントの間では、実行順や完了順を保証しません。
+テキストコマンド用のキューには、登録名に一致したメッセージだけが入ります。`on_ready` と `on_message` は受信順に処理し、一件のイベントに対する関数は登録順に呼びます。ボタン操作はスラッシュコマンドと同じ枠で並行して処理します。`Bot::run` の自前ハンドラーは、そのメッセージに対する `Events::on_message` より先に実行します。`Bot::run_commands` のコマンドと `on_message` は独立して進むため、どちらが先に完了するかは処理時間によって変わります。
 
 混雑時の返信には、テキストとスラッシュ・ボタンで別々の処理枠を使います。それぞれ同時に 8 件、キューは 64 件までです。混雑返信用のキューが満杯の場合や返信に失敗した場合は、標準エラー出力に記録します。Gateway のイベントストリームが終わると、処理中と保留中のイベントも中止します。
 
@@ -42,7 +42,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | --- | --- |
 | `Commands::new(prefix) -> Result<Commands>` | `!` などのプレフィックスを指定します。空文字列と空白を含む値はエラーです。 |
 | `commands.register(name, handler) -> Result<()>` | プレフィックスを省いた名前で非同期関数を登録します。空の名前、空白がある名前、重複した名前はエラーです。 |
-| `commands.dispatch(ctx).await -> Result<()>` | 該当するコマンドを実行します。`Bot::run` の独自処理にも組み込めます。 |
+| `commands.dispatch(ctx).await -> Result<()>` | 該当するコマンドを実行し、ハンドラーが返したエラーを呼び出し元に返します。`Bot::run` の独自処理にも組み込めます。 |
 | `ctx.args() -> &str` | コマンド名に続く本文を借ります。前後の空白を除去し、引数なしの場合は空文字列を返します。 |
 | `ctx.context() -> &Context<'_>` | 元のメッセージを扱うコンテキストを借ります。 |
 | `ctx.timing() -> Timing` | このテキストコマンド呼び出しの測定値を取得します。 |
@@ -51,7 +51,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 
 名前は大文字と小文字を区別します。最初の空白までがコマンド名です。`! ping` のようにプレフィックスの直後が空白の投稿、未登録の名前、通常の投稿は無視されます。
 
-`Bot::run_commands` で登録済みのコマンドの実行に失敗した場合は、元の投稿に「コマンドを処理できませんでした。」と返信を試みます。エラーの詳細は標準エラー出力に記録されます。`commands.dispatch` を独自の処理に組み込む場合は、その呼び出し元でエラーを扱えます。
+`Bot::run_commands` で登録済みのコマンドの実行に失敗した場合は、元の投稿に「コマンドを処理できませんでした。」と返信を試み、エラーの詳細を標準エラー出力に記録します。`commands.dispatch` を直接使う場合は、呼び出し元でエラーを受け取って返信やログを扱います。
 
 ## `SlashCommands` と `SlashContext<'_>`
 
@@ -64,11 +64,13 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.option(name) -> Option<&CommandOptionValue>` | 指定した名前の引数を Twilight の値として借ります。 |
 | `ctx.string(name) -> Option<&str>` | 指定した名前の文字列を借ります。引数がない場合や他の型の場合は `None` を返します。 |
 | `ctx.author_id() -> Option<Id<UserMarker>>` | 呼び出したユーザーの ID を取得します。 |
+| `ctx.channel_id() -> Option<Id<ChannelMarker>>` | コマンドが実行されたチャンネルの ID を取得します。 |
 | `ctx.timing() -> Timing` | このスラッシュコマンド呼び出しの測定値を取得します。 |
 | `ctx.defer().await -> Result<()>` | チャンネルに表示される処理中の初回応答を送ります。 |
 | `ctx.defer_ephemeral().await -> Result<()>` | 呼び出したユーザーだけに表示される処理中の初回応答を送ります。 |
 | `ctx.reply(content).await -> Result<()>` | チャンネルに初回応答を送ります。`defer` または `defer_ephemeral` の後は、公開範囲を維持して処理中の表示を本文に置き換えます。 |
 | `ctx.reply_ui(&message).await -> Result<()>` | `UiMessage` を初回応答として返します。遅延応答の後は、公開範囲を維持して元の応答を編集します。 |
+| `ctx.reply_ui_ephemeral(&message).await -> Result<()>` | `UiMessage` を本人にだけ見える初回応答として返します。`defer_ephemeral` の後は、処理中の表示を置き換えます。 |
 | `ctx.reply_ephemeral(content).await -> Result<()>` | 呼び出したユーザーだけに初回応答を送ります。`defer_ephemeral` の後は、その処理中の表示を本文に置き換えます。 |
 | `ctx.followup(content).await -> Result<()>` | 最初の本文を送った後に、チャンネルに追加のメッセージを送ります。 |
 | `ctx.followup_ephemeral(content).await -> Result<()>` | 最初の本文を送った後に、呼び出したユーザーだけに追加のメッセージを送ります。 |
@@ -83,7 +85,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 
 関数の形は `async fn handler(ctx: &mut SlashContext<'_>) -> Result<()>` です。Discord は Interaction の受信後 3 秒以内に初回応答を求めます。外部サービスへの問い合わせなど、期限に間に合わない可能性がある処理の前に、ハンドラーから `ctx.defer().await?` または `ctx.defer_ephemeral().await?` を明示的に呼びます。処理後に `ctx.reply(...).await?` で処理中の表示を本文に置き換えます。公開範囲は `defer` または `defer_ephemeral` の時点で決まります。公開の `defer` の後に `reply_ephemeral` を呼ぶとエラーになります。`followup` と `followup_ephemeral` は最初の本文を送った後に呼びます。Discord の Interaction トークンの有効期間は 15 分です。[Discord の Interaction 応答仕様](https://docs.discord.com/developers/interactions/receiving-and-responding)
 
-ハンドラーが最初の本文を送れずに終了した場合は、Akari がエラー応答を試みます。初回応答が済んでいない場合は本人にだけ表示し、処理中の応答がある場合はその表示をエラー文に置き換えます。返信本文中のメンション通知は抑止します。
+公開の `defer` の後に `reply_ui_ephemeral` を呼ぶと、公開範囲を変更できないためエラーになります。ハンドラーが最初の本文を送れずに終了した場合は、Akari がエラー応答を試みます。初回応答が済んでいない場合は本人にだけ表示し、処理中の応答がある場合はその表示をエラー文に置き換えます。返信本文中のメンション通知は抑止します。
 
 ## `register_hybrid` と `HybridContext<'_>`
 
@@ -104,7 +106,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.reply(content).await -> Result<()>` | テキストなら元の投稿に返信し、スラッシュなら公開の初回応答を送ります。 |
 | `ctx.reply_ui(&message).await -> Result<()>` | `UiMessage` をテキストコマンドまたはスラッシュコマンドへの返信に使います。 |
 
-テキスト側の `text_arg` は、コマンド名の後ろ全体を最初のトップレベルの文字列引数に割り当てます。たとえば、文字列 `text` と整数 `count` を定義した `/repeat` では Discord の入力欄から `text` と `count` を別々に取得できます。`!repeat こんにちは 3` では `text_arg("text")` が `こんにちは 3` 全体を返します。名前付きの数値引数はスラッシュ側の `option("count")` で取得できます。テキスト側の本文を複数の値に分けたい場合は、`args()` の値をハンドラーで解析します。
+テキスト側の `text_arg` は、コマンド名の後ろ全体を最初のトップレベルの文字列引数に割り当てます。たとえば `count`（整数）と `text`（文字列）を定義した場合、`!cmd 3 hello` の `text_arg("text")` は `3 hello` 全体を返します。`/cmd count:3 text:hello` では `option("count")` が整数の `3` を返し、`text_arg("text")` は `hello` を返します。テキスト側で整数などの型付き引数が必要な場合は、ハンドラーで `args()` を分割・変換します。
 
 クールダウンは応答や重い処理の前に確認します。`if !ctx.check_cooldown(&cooldown).await? { return Ok(()); }` とすると、残り時間を返信した場合にハンドラーを終了できます。ユーザー ID を取得できない場合や返信に失敗した場合はエラーを返します。
 
@@ -131,7 +133,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `Events::new() -> Events` | 空のイベントハンドラー一覧を作ります。 |
 | `events.on_ready(handler)` | Gateway が新規セッションを確立したときに受け取る `&Ready` を渡します。 |
 | `events.on_message(handler)` | 人が送った新着メッセージの `&Message` を渡します。通常の投稿とテキストコマンドの両方を受け取ります。 |
-| `events.on_button(custom_id, handler) -> Result<()>` | 指定した識別子のボタンが押されたときに `&mut ButtonContext<'_>` を渡します。識別子は 1～100 文字で、同じ識別子に関数を一つ登録できます。 |
+| `events.on_button(custom_id, handler) -> Result<()>` | 指定した識別子に完全一致するボタンが押されたときに `&mut ButtonContext<'_>` を渡します。識別子は 1～100 文字で、Bot の登録一覧全体で、同じ識別子に関数を一つ登録できます。 |
 
 `on_ready` と `on_message` には複数の関数を登録できます。各関数が返したエラーは標準エラー出力に記録され、次のハンドラーへ進みます。コマンドとイベントの順序は [ハンドラーの実行順](#ハンドラーの実行順) を参照してください。
 
@@ -151,24 +153,47 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 
 本文は最大 2,000 文字、埋め込みは最大 10 個で合計 6,000 文字までです。一つのメッセージ内で同じボタン識別子を複数使うと、送信時にエラーが返ります。テキストコマンドの返信に埋め込みを付ける場合は、Bot のチャンネル権限 **Embed Links** を確認します。[Discord のチャンネル権限](https://docs.discord.com/developers/topics/permissions#permissions-bitwise-permission-flags)
 
-`Events::on_button` で登録した関数は、同じ `custom_id` のボタンが押されると呼ばれます。登録していない識別子のボタン操作は対象外です。
+`Events::on_button` で登録した関数は、サーバーやメッセージを問わず `custom_id` が完全一致すると呼ばれます。メッセージを閲覧できるユーザーがボタンを押せるため、投稿者や管理者に限定する操作では `guild_id()` と `message()` で対象を確認し、`author_id()` で操作者を特定して権限を確認します。
 
 | メソッド | 動作 |
 | --- | --- |
 | `ctx.custom_id() -> &str` | ボタンの識別子を取得します。 |
 | `ctx.author_id() -> Option<Id<UserMarker>>` | ボタンを押したユーザーの ID を取得します。 |
+| `ctx.guild_id() -> Option<Id<GuildMarker>>` | ボタンが押されたサーバーの ID を取得します。 |
 | `ctx.message() -> Option<&Message>` | ボタンが付いた元のメッセージを借ります。 |
 | `ctx.timing() -> Timing` | ボタン操作の受信時点と処理開始時点をもとにした測定値を取得します。 |
 | `ctx.reply_ephemeral(content).await -> Result<()>` | ボタンを押した本人にだけ見える初回応答を送ります。 |
-| `ctx.acknowledge().await -> Result<()>` | 追加メッセージを表示せず、操作を受け付けたことを Discord に伝えます。 |
+| `ctx.update_message(&message).await -> Result<()>` | ボタンの元メッセージを `UiMessage` で更新します。その場で初回応答として更新するか、`defer_update` 後に更新できます。 |
+| `ctx.defer_update().await -> Result<()>` | 追加メッセージを表示せず、操作を先に受け付けます。処理後に `update_message` を呼べます。 |
+| `ctx.acknowledge().await -> Result<()>` | `defer_update` と同じ確認応答を送ります。 |
+| `ctx.followup(content).await -> Result<()>` | 初回応答の後、チャンネルに追加のメッセージを送ります。 |
+| `ctx.followup_ephemeral(content).await -> Result<()>` | 初回応答の後、ボタンを押した本人にだけ追加のメッセージを送ります。 |
 
-`reply_ephemeral` と `acknowledge` は、どちらか一方を一回だけ呼びます。ハンドラーが初回応答を送らずに成功した場合は、Akari が `acknowledge` を試みます。初回応答の前にエラーを返した場合は、本人にだけ見えるエラー応答を試みます。[埋め込みとボタンのチュートリアル](tutorial.md)
+`update_message` は本文、埋め込み、ボタンの行をまとめて置き換えます。次の表示にも残したい埋め込みやボタンは、新しい `UiMessage` に含めます。更新は一回のクリックにつき一度です。時間のかかる処理では、先に `defer_update` を呼んで 3 秒以内に初回応答を送り、処理の完了後に `update_message` で表示を変更します。
+
+ハンドラーが初回応答を送らずに成功した場合は、Akari が確認応答を試みます。初回応答の前にエラーを返した場合は、本人にだけ見える初回応答を試みます。`defer_update` 後にハンドラーが失敗した場合は、元のメッセージを保ったまま、本人にだけ追加でエラーを知らせます。[埋め込みとボタンのチュートリアル](tutorial.md)
 
 ## `Context<'_>` と `Result<T>`
 
 `Context` は `Bot::run` に渡すメッセージ処理用の型です。`ctx.message()` で元の `&Message` を借りられます。`ctx.reply(content).await` と `ctx.reply_ui(&message).await` は元のメッセージへの返信を送ります。`ctx.timing()` で受信から処理までの測定値を取得できます。
 
 `Result<T>` は `std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>` の別名です。関数内で `?` を使うと、失敗時にそのエラーを呼び出し元へ返します。
+
+## Twilight の型と REST クライアントを使う
+
+`disnana_akari::model` は Twilight のモデル型、`disnana_akari::http` は Twilight の HTTP API です。`Context`、`CommandContext`、`SlashContext`、`HybridContext`、`ButtonContext` の `http()` は、Bot と同じ `&http::Client` を返します。Akari の返信と同じ接続やレート制限の処理を利用できます。
+
+```rust,no_run
+use disnana_akari::{Context, Result, model::channel::Channel};
+
+async fn fetch_channel(ctx: Context<'_>) -> Result<Channel> {
+    let response = ctx.http().channel(ctx.message().channel_id).await?;
+    let channel = response.model().await?;
+    Ok(channel)
+}
+```
+
+スラッシュコマンドとボタン操作の応答は、`reply`、`defer`、`update_message` など対応するコンテキストのメソッドで送ります。これらのメソッドは、初回応答や更新が済んだかどうかを Akari に記録します。[Twilight HTTP の API](https://docs.rs/twilight-http/0.18.0/twilight_http/)
 
 ## 使用例
 
@@ -236,7 +261,9 @@ async fn show(ctx: &mut SlashContext<'_>) -> Result<()> {
 }
 
 async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
-    ctx.reply_ephemeral("確認しました。").await
+    let message = UiMessage::new().content("確認済みです。");
+    ctx.update_message(&message).await?;
+    ctx.followup_ephemeral("確認しました。").await
 }
 
 async fn echo(ctx: &mut HybridContext<'_>) -> Result<()> {

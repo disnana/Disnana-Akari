@@ -92,6 +92,11 @@ pub struct CommandContext<'a> {
 }
 
 impl<'a> CommandContext<'a> {
+    /// Akari が使用している Twilight の REST クライアントを借ります。
+    pub fn http(&self) -> &'a crate::http::Client {
+        self.ctx.http()
+    }
+
     /// Gateway の往復時間と、このコマンドの処理時間を確認します。
     pub fn timing(&self) -> Timing {
         self.ctx.timing()

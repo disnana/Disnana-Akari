@@ -9,8 +9,10 @@ pub fn register() -> Result<Events> {
     // コマンド名の代わりに「いつ呼ぶか」を指定して、関数を登録します。
     events.on_ready(on_ready);
     events.on_message(on_message);
-    // ボタンの ID が一致したときにだけ、ui.rs の click 関数を呼びます。
+    // ボタンの ID と関数を組にして登録します。押された ID の関数が呼ばれます。
     events.on_button(ui::BUTTON_ID, ui::click)?;
+    events.on_button(ui::REFRESH_BUTTON_ID, ui::refresh)?;
+    events.on_button(ui::SLOW_REFRESH_BUTTON_ID, ui::slow_refresh)?;
     Ok(events)
 }
 

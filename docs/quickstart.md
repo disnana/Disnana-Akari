@@ -39,6 +39,8 @@ cargo run --locked --manifest-path playground/Cargo.toml --target-dir target
 | 同じ Bot の `/echo` を選び、`text` 欄に `こんにちは` と入力して実行する | `こんにちは` |
 | 同じ Bot の `/latency` を選んで実行する | `!latency` と同じ 3 項目 |
 | 同じ Bot の `/ui` を実行して、表示された **Ping** ボタンを押す | 埋め込みとボタンがチャンネルに表示され、`Pong!` は押した人にだけ表示されます。 |
+| `/ui` の **更新** ボタンを押す | ボタンが付いているメッセージの表示が変わります。 |
+| `/ui` の **遅延更新** ボタンを押す | 約 4 秒後に元のメッセージが更新され、完了の通知は押した人にだけ表示されます。 |
 
 遅延はミリ秒（ms）で表示されます。接続直後など、Gateway からハートビートの応答をまだ受け取っていない場合は、Gateway RTT が「未計測」と表示されます。[測定値の定義](api.md#timing)
 
@@ -78,7 +80,7 @@ cargo run --locked --example ping
 ```powershell
 cargo new --bin --vcs none --name akari-playground playground
 cargo add --manifest-path playground/Cargo.toml --path .
-cargo add --manifest-path playground/Cargo.toml tokio --features macros,rt
+cargo add --manifest-path playground/Cargo.toml tokio --features macros,rt,time
 Copy-Item examples/ping/*.rs playground/src/
 New-Item -ItemType File -Path playground/.env
 cargo generate-lockfile --manifest-path playground/Cargo.toml

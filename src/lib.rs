@@ -27,6 +27,7 @@ pub use events::{Events, Ready};
 pub use hybrid::{CommandSource, HybridContext, register_hybrid};
 pub use slash::{SlashCommands, SlashContext};
 pub use timing::Timing;
+pub use twilight_http as http;
 pub use twilight_model as model;
 
 use timing::Pending;
@@ -371,6 +372,11 @@ pub struct Context<'a> {
 }
 
 impl<'a> Context<'a> {
+    /// Akari が使用している Twilight の REST クライアントを借ります。
+    pub fn http(&self) -> &'a Client {
+        self.http
+    }
+
     /// Gateway の往復時間と、このイベントの処理時間を確認します。
     pub fn timing(&self) -> Timing {
         self.timing
