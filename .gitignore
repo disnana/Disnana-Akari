@@ -2,3 +2,9 @@
 /.env
 /.idea/
 /playground/
+
+# ローカルで確認するときにコピーする生成物
+/site/content/reference/changelog.md
+/site/node_modules/
+/site/.vitepress/cache/
+/site/.vitepress/dist/
