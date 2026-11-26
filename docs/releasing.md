@@ -1,6 +1,6 @@
 # crates.io へ公開する前の確認
 
-Disnana Akari のパッケージ名は `disnana-akari`、Rust コードでのクレート名は `disnana_akari` です。公開先とライセンスを確定するまでは `Cargo.toml` の `publish = false` を維持します。
+Disnana Akari のパッケージ名は `disnana-akari`、Rust コードでのクレート名は `disnana_akari` です。[MIT ライセンス](../LICENSE)を採用しています。公開準備が完了するまでは `Cargo.toml` の `publish = false` を維持します。
 
 ## 配布内容を確認する
 
@@ -15,9 +15,9 @@ cargo package --offline --list
 ## リリース候補を確認する
 
 - [ ] crates.io で `disnana-akari` を利用できることと、公開するアカウントを確認する。
-- [ ] 採用するライセンスを決める。ライセンス文書を追加し、`license` または `license-file` を設定する。配布ファイル一覧で、必要な文書が揃っていることを確認する。
+- [ ] 配布ファイル一覧に `LICENSE` があり、`Cargo.toml` で `license = "MIT"` が設定されていることを確認する。
 - [ ] パッケージのバージョンと [変更履歴](../CHANGELOG.md) を揃え、公開 API と互換性に関わる変更を記載する。
 - [ ] `cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked` を通す。最小対応バージョンとして宣言した Rust 1.89 でもテストする。
-- [ ] 配布するファイルの一覧を確認する。公開先と設定を確定した後、クリーンな作業ツリーで `cargo publish --dry-run` を実行し、`.crate` からのビルドを確認する。
+- [ ] 公開先と設定を確定した後、クリーンな作業ツリーで `cargo publish --dry-run` を実行し、`.crate` からのビルドを確認する。
 
 [crates.io への公開手順](https://doc.rust-lang.org/cargo/reference/publishing.html) · [Cargo のメタデータ仕様](https://doc.rust-lang.org/cargo/reference/manifest.html)
