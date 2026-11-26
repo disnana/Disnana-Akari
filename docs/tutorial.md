@@ -47,7 +47,9 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 
 共通の関数は `&mut HybridContext<'_>` を受け取ります。`ctx.timing()` で測定値を読み取り、表示用の文字列に整形してから `ctx.reply(&response).await` で呼び出し元に返信します。`&response` は、表示用の文字列を返信関数へ一時的に貸しています。
 
-両方で同じ処理をしつつ、呼び出し方ごとに振る舞いを変えることもできます。`ctx.source()` を `match` で分けると、`CommandSource::Text` と `CommandSource::Slash` で個別の条件を書けます。例えばユーザーごとに呼び出し頻度を制限する場合は、`ctx.author_id()` で得た ID と呼び出し元を組にして、アプリ側で最終実行時刻を管理します。[HybridContext の API](api.md)
+Playground の `latency` では、`ctx.source()` を `match` で分けて、`!latency` には 3 秒、`/latency` には 1 秒のクールダウンを適用します。`ctx.author_id()` が返すユーザー ID を `cooldown.check(user)` に渡すと、まだ実行できない場合に `Err(remaining)` が返ります。直後にもう片方の形式を試しても、待ち時間は共有されません。
+
+`Cooldown::new(...)` は登録時に一度だけ実行します。`async move |ctx| ...` は、登録した関数の中に作成済みのクールダウンを持たせる書き方です。`latency` 関数は `&Cooldown` でそれを借りるため、前回の記録を次回も使えます。[コマンドの実装](../examples/ping/commands.rs) · [API リファレンス](api.md#cooldown)
 
 ## イベントに処理を追加する
 

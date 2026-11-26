@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use disnana_akari::model::id::{Id, marker::GuildMarker};
 use disnana_akari::{
-    CommandContext, Commands, HybridContext, Result, SlashCommands, SlashContext, Timing,
-    register_hybrid,
+    CommandContext, CommandSource, Commands, Cooldown, HybridContext, Result, SlashCommands,
+    SlashContext, Timing, register_hybrid,
 };
 
 // pub は、この関数を別モジュール（今回は main.rs）から呼べるようにします。
@@ -32,13 +32,17 @@ pub fn register(guild_id: Option<Id<GuildMarker>>) -> Result<(Commands, Option<S
     // 一つの関数を !latency と /latency の両方に登録します。
     // as_mut() で一覧全体を渡さず、Some の中身だけを一時的に借りて渡します。
     // None のときは !latency だけが登録されます。
+    let text_cooldown = Cooldown::new(Duration::from_secs(3));
+    let slash_cooldown = Cooldown::new(Duration::from_secs(1));
     register_hybrid(
         &mut commands,
         slash_commands.as_mut(),
         "latency",
         "Bot の通信と処理時間を確認する",
         vec![],
-        latency,
+        // async move |ctx| は非同期の無名関数です。move で二つの制限を関数の中に持たせます。
+        // 実行するたびに制限を作ると前回の記録を忘れるので、ここで一度だけ作ります。
+        async move |ctx| latency(ctx, &text_cooldown, &slash_cooldown).await,
     )?;
 
     // 丸括弧で二つの値をまとめ、main.rs に返します。
@@ -76,9 +80,29 @@ async fn slash_echo(ctx: &mut SlashContext<'_>) -> Result<()> {
     ctx.reply(text).await
 }
 
-async fn latency(ctx: &mut HybridContext<'_>) -> Result<()> {
+async fn latency(
+    ctx: &mut HybridContext<'_>,
+    text_cooldown: &Cooldown,
+    slash_cooldown: &Cooldown,
+) -> Result<()> {
+    let Some(user) = ctx.author_id() else {
+        return ctx.reply("実行したユーザーを確認できませんでした。").await;
+    };
+
+    // match で呼び出し方に応じた制限を選びます。同じ人でも ! と / の待ち時間は別々です。
+    let cooldown = match ctx.source() {
+        CommandSource::Text => text_cooldown,
+        CommandSource::Slash => slash_cooldown,
+    };
+    // check が Err を返したら、計測結果を出す前に残り時間だけ返信して終わります。
+    if let Err(remaining) = cooldown.check(user) {
+        let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+        return ctx
+            .reply(&format!("あと {seconds} 秒待ってから試してください。"))
+            .await;
+    }
+
     // HybridContext を使うと、どちらのコマンドからも同じ書き方で計測や返信ができます。
-    // ctx.source() で呼び出し方を判別でき、ctx.author_id() はユーザーごとの連打制限に使えます。
     let response = latency_report(ctx.timing());
     // &response で文字列を一時的に借り、返信にかかった時間は測定に含めません。
     ctx.reply(&response).await

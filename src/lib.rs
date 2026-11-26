@@ -1,6 +1,7 @@
 #![doc = include_str!("../docs/api.md")]
 
 mod commands;
+mod cooldown;
 mod events;
 mod hybrid;
 mod slash;
@@ -14,6 +15,7 @@ use twilight_http::Client;
 use twilight_model::channel::{Message, message::AllowedMentions};
 
 pub use commands::{CommandContext, Commands};
+pub use cooldown::Cooldown;
 pub use events::{Events, Ready};
 pub use hybrid::{CommandSource, HybridContext, register_hybrid};
 pub use slash::{SlashCommands, SlashContext};
