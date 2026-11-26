@@ -27,6 +27,7 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 - [API リファレンス](docs/api.md)
 - [変更履歴](CHANGELOG.md)
 - [公開前の確認](docs/releasing.md)
+- [セキュリティ報告](SECURITY.md)
 
 ## ライセンス
 

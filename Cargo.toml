@@ -9,7 +9,7 @@ readme = "README.md"
 license = "MIT"
 keywords = ["discord", "bot", "twilight", "framework"]
 categories = ["api-bindings", "asynchronous"]
-include = ["/src/**", "/examples/**", "/docs/**", "/README.md", "/CHANGELOG.md", "/LICENSE*", "/NOTICE*"]
+include = ["/src/**", "/examples/**", "/docs/**", "/README.md", "/CHANGELOG.md", "/SECURITY.md", "/LICENSE*", "/NOTICE*"]
 publish = ["crates-io"]
 
 [dependencies]
