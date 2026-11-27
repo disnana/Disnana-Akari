@@ -1,7 +1,7 @@
 use std::{collections::HashMap, future::Future, pin::Pin};
 
 use crate::{
-    Context, Error, ErrorSource, Result, Timing,
+    Context, ErrorSource, HandlerKind, RegistrationError, Result, Timing,
     error::adapt_handler,
     hooks::Hooks,
     ui::{ComponentsV2, UiMessage},
@@ -30,9 +30,7 @@ impl Commands {
     /// プレフィックスが空、または空白を含む場合に失敗します。
     pub fn new(prefix: &str) -> Result<Self> {
         if prefix.is_empty() || prefix.chars().any(char::is_whitespace) {
-            return Err(Error::InvalidRegistration(
-                "プレフィックスには空白を含まない文字列を指定してください".to_owned(),
-            ));
+            return Err(RegistrationError::InvalidPrefix.into());
         }
 
         Ok(Self {
@@ -65,14 +63,14 @@ impl Commands {
 
     pub(crate) fn ensure_available(&self, name: &str) -> Result<()> {
         if name.is_empty() || name.chars().any(char::is_whitespace) {
-            return Err(Error::InvalidRegistration(
-                "コマンド名には空白を含まない文字列を指定してください".to_owned(),
-            ));
+            return Err(RegistrationError::InvalidCommandName.into());
         }
         if self.handlers.contains_key(name) {
-            return Err(Error::InvalidRegistration(format!(
-                "コマンド `{name}` は登録済みです"
-            )));
+            return Err(RegistrationError::Duplicate {
+                kind: HandlerKind::TextCommand,
+                name: name.to_owned(),
+            }
+            .into());
         }
         Ok(())
     }

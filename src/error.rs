@@ -22,12 +22,12 @@ pub enum Error {
          MESSAGE_CONTENT は特権 Intent なので、Developer Portal の Bot ページでも有効にします。"
     )]
     MissingIntents(Intents),
-    /// コマンドや Interaction ハンドラーの登録内容が無効です。
-    #[error("{0}")]
-    InvalidRegistration(String),
+    /// コマンドやハンドラーの登録内容が無効です。
+    #[error(transparent)]
+    Registration(#[from] RegistrationError),
     /// Discord が返したスラッシュコマンドの登録結果が要求と一致しません。
-    #[error("{0}")]
-    InvalidCommandSync(String),
+    #[error(transparent)]
+    CommandSync(#[from] CommandSyncError),
     /// 指定のスラッシュコマンドを Discord に登録できませんでした。
     #[error("スラッシュコマンド `/{name}` を登録できませんでした")]
     CommandRegistration {
@@ -44,17 +44,17 @@ pub enum Error {
     #[error("{0}")]
     InvalidUi(&'static str),
     /// 現在の Interaction の応答状態では、指定された操作ができません。
-    #[error("{0}")]
-    InvalidResponseState(&'static str),
+    #[error(transparent)]
+    ResponseState(#[from] ResponseStateError),
     /// Discord が送った選択内容を読み取れませんでした。
-    #[error("{0}")]
-    InvalidSelection(&'static str),
+    #[error(transparent)]
+    Selection(#[from] SelectionError),
     /// コマンドを実行したユーザーを取得できませんでした。
     #[error("実行したユーザーを確認できませんでした。")]
     MissingAuthor,
     /// 同時処理枠か待ち行列がいっぱいです。
-    #[error("{0}")]
-    QueueFull(&'static str),
+    #[error("{}", .0.message())]
+    QueueFull(QueueKind),
     /// Gateway が終了し、Bot の処理が止まりました。
     #[error("Discord Gateway の接続が終了しました")]
     GatewayEnded,
@@ -144,6 +144,193 @@ impl std::error::Error for HandlerError {
     /// 元のエラーの原因を返します。元のエラー自身は、表示に含まれています。
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.0.source()
+    }
+}
+
+/// ハンドラーの種類です。登録のエラーで、どの種類の登録かを示します。
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum HandlerKind {
+    /// テキストコマンドです。
+    TextCommand,
+    /// スラッシュコマンドです。
+    SlashCommand,
+    /// ボタンです。
+    Button,
+    /// 文字列の選択メニューです。
+    Select,
+    /// ユーザーの選択メニューです。
+    UserSelect,
+    /// ロールの選択メニューです。
+    RoleSelect,
+    /// チャンネルの選択メニューです。
+    ChannelSelect,
+    /// ユーザーとロールの選択メニューです。
+    MentionableSelect,
+    /// 入力フォームです。
+    Modal,
+}
+
+impl HandlerKind {
+    /// 種類を表す短い日本語の名前を返します。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TextCommand => "テキストコマンド",
+            Self::SlashCommand => "スラッシュコマンド",
+            Self::Button => "ボタン",
+            Self::Select => "セレクト",
+            Self::UserSelect => "ユーザーセレクト",
+            Self::RoleSelect => "ロールセレクト",
+            Self::ChannelSelect => "チャンネルセレクト",
+            Self::MentionableSelect => "メンショナブルセレクト",
+            Self::Modal => "モーダル",
+        }
+    }
+}
+
+impl std::fmt::Display for HandlerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// コマンドやハンドラーを登録できなかった理由です。
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum RegistrationError {
+    /// プレフィックスが空、または空白を含みます。
+    #[error("プレフィックスには空白を含まない文字列を指定してください")]
+    InvalidPrefix,
+    /// コマンド名が空、または空白を含みます。
+    #[error("コマンド名には空白を含まない文字列を指定してください")]
+    InvalidCommandName,
+    /// `custom_id` が 1 文字以上 100 文字以下ではありません。
+    #[error("{kind} ID は 1 文字以上 100 文字以下で指定してください")]
+    InvalidCustomId {
+        /// 登録しようとしたハンドラーの種類です。
+        kind: HandlerKind,
+    },
+    /// 同じ名前、または同じ `custom_id` が、すでに登録されています。
+    #[error("{kind} `{name}` は登録済みです")]
+    Duplicate {
+        /// 登録しようとしたハンドラーの種類です。
+        kind: HandlerKind,
+        /// 重複した名前、または `custom_id` です。
+        name: String,
+    },
+}
+
+/// Discord が返したスラッシュコマンドの登録結果が、要求と合わなかった理由です。
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CommandSyncError {
+    /// 返ってきたコマンドの件数が、登録した件数と一致しません。
+    #[error("Discord が返したコマンド件数（{returned}）が登録件数（{expected}）と一致しません")]
+    CountMismatch {
+        /// 登録を求めた件数です。
+        expected: usize,
+        /// Discord が返した件数です。
+        returned: usize,
+    },
+    /// 返ってきたコマンドが、スラッシュコマンドではありません。
+    #[error("`/{name}` の登録結果がスラッシュコマンドではありません")]
+    NotChatInput {
+        /// コマンド名です。
+        name: String,
+    },
+    /// 返ってきたコマンドに ID がありません。
+    #[error("`/{name}` の登録結果に ID がありません")]
+    MissingId {
+        /// コマンド名です。
+        name: String,
+    },
+    /// 返ってきたコマンドが重複しているか、登録を求めていない名前です。
+    #[error("`/{name}` の登録結果が重複しているか、登録要求に含まれていません")]
+    UnexpectedName {
+        /// コマンド名です。
+        name: String,
+    },
+    /// 返ってきたコマンドの ID が重複しています。
+    #[error("`/{name}` の登録結果の ID が重複しています")]
+    DuplicateId {
+        /// コマンド名です。
+        name: String,
+    },
+}
+
+/// Interaction の応答の状態が、行おうとした操作と合わなかった理由です。
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ResponseStateError {
+    /// すでに初回応答を送っています。
+    #[error("この操作にはすでに応答しました")]
+    AlreadyResponded,
+    /// 公開の遅延応答の後に、本人にだけ見える応答へは変えられません。
+    #[error("遅延応答の公開範囲は変更できません")]
+    VisibilityLocked,
+    /// 追加メッセージは、最初の応答を送ってからでないと送れません。
+    #[error("追加メッセージを送る前に、最初の応答（reply など）を送ってください")]
+    FollowupBeforeResponse,
+    /// フォームは、スラッシュコマンドの初回応答として開く必要があります。
+    #[error("フォームはスラッシュコマンドの初回応答で開いてください")]
+    ModalNotFirstResponse,
+    /// この操作では、元のメッセージを更新できません。
+    #[error("この操作では元のメッセージを更新できません")]
+    CannotUpdate,
+    /// Components V2 のメッセージの更新には、`update_v2` を使う必要があります。
+    #[error("Components V2 のメッセージには update_v2 を使ってください")]
+    UseUpdateV2,
+    /// `update_v2` には、Components V2 で作られた元メッセージが必要です。
+    #[error("Components V2 で作られた元メッセージが必要です")]
+    NeedsV2Message,
+}
+
+/// Discord が送った選択内容を、読み取れなかった理由です。
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SelectionError {
+    /// 選択内容を読み取れませんでした。
+    #[error("Discord が送った選択内容を読み取れませんでした")]
+    Unreadable,
+    /// 選択数が上限（25）を超えています。
+    #[error("セレクトの選択数が上限を超えています")]
+    TooMany,
+    /// 値が Discord の ID ではありません。
+    #[error("セレクトの値が Discord ID ではありません")]
+    NotAnId,
+    /// 同じ値が重複しています。
+    #[error("セレクトの値が重複しています")]
+    Duplicate,
+    /// メンショナブルの解決済みデータがありません。
+    #[error("メンショナブルの解決済みデータがありません")]
+    MissingResolved,
+    /// メンショナブルの値を、ユーザーかロールの一方に特定できません。
+    #[error("メンショナブルの値をユーザーまたはロールの一方に特定できません")]
+    AmbiguousMention,
+}
+
+/// 処理枠か待ち行列がいっぱいだった場所です。
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum QueueKind {
+    /// `on_ready` や `on_message` などのイベントの待ち行列です。
+    Event,
+    /// テキストコマンドの処理枠です。
+    TextCommand,
+    /// スラッシュコマンド、ボタン、選択メニュー、フォームの処理枠です。
+    Interaction,
+    /// 混雑の通知を返すための待ち行列です。
+    BusyNotice,
+}
+
+impl QueueKind {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::Event => "イベントの待ち行列がいっぱいで、処理できませんでした",
+            Self::TextCommand => "処理枠がいっぱいで、コマンドを実行できませんでした",
+            Self::Interaction => "処理枠がいっぱいで、操作を実行できませんでした",
+            Self::BusyNotice => "混雑の通知の待ち行列がいっぱいで、通知できませんでした",
+        }
     }
 }
 
