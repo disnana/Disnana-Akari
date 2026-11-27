@@ -20,6 +20,9 @@ use twilight_model::{
 
 use crate::{Error, Events, Result, message_events::MemberUpdateFields};
 
+mod bootstrap;
+pub(crate) use bootstrap::{BootstrapConfig, BootstrapWorker};
+
 /// 保存済みのサーバーメンバーが更新されたときのスナップショットです。
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -42,10 +45,10 @@ pub struct CachedMemberRemove {
     pub member: Arc<Member>,
 }
 
-/// Gateway で受信したサーバーメンバーを参照する、読み取り専用ハンドルです。
+/// 保存済みのサーバーメンバーを参照する、読み取り専用ハンドルです。
 ///
 /// [`crate::Bot::with_member_cache`] で取得します。保存対象は受信済みの一部で、
-/// 容量超過、未受信、退出などで見つからないことがあります。Discord への問い合わせは行いません。
+/// 容量超過、未受信、退出などで見つからないことがあります。読み取り時に Discord へ問い合わせません。
 /// Gateway の再接続中は、そのシャードの項目を一時的に取得できません。
 #[derive(Clone)]
 pub struct MemberCacheHandle(Arc<RwLock<Option<MemberCache>>>);
@@ -99,6 +102,7 @@ pub(crate) enum CachedMemberEvent {
 pub(crate) struct MemberCacheRuntime {
     cache: MemberStore,
     events: EventTypeFlags,
+    bootstrap: Option<bootstrap::Bootstrap>,
 }
 
 enum MemberStore {
@@ -127,9 +131,10 @@ impl MemberCacheRuntime {
         events: &Events,
         intents: Intents,
         handle: Option<MemberCacheHandle>,
+        bootstrap: Option<BootstrapConfig>,
     ) -> Result<Option<Self>> {
         let events = events.cached_member_types();
-        if events.is_empty() && handle.is_none() {
+        if events.is_empty() && handle.is_none() && bootstrap.is_none() {
             return Ok(None);
         }
         let capacity = NonZeroUsize::new(capacity).ok_or(Error::MemberCacheRequired)?;
@@ -138,6 +143,14 @@ impl MemberCacheRuntime {
                 return Err(Error::MissingEventIntents { any_of: intent });
             }
         }
+        let (handle, bootstrap) = match bootstrap {
+            Some(config) => {
+                let handle = handle.unwrap_or_else(MemberCacheHandle::new);
+                let bootstrap = bootstrap::Bootstrap::new(config, handle.clone(), capacity);
+                (Some(handle), Some(bootstrap))
+            }
+            None => (handle, None),
+        };
         let cache = MemberCache::new(capacity);
         let cache = match handle {
             Some(handle) => {
@@ -148,7 +161,15 @@ impl MemberCacheRuntime {
             }
             None => MemberStore::Local(RefCell::new(cache)),
         };
-        Ok(Some(Self { cache, events }))
+        Ok(Some(Self {
+            cache,
+            events,
+            bootstrap,
+        }))
+    }
+
+    pub(crate) fn bootstrap_worker(&self) -> Option<BootstrapWorker> {
+        self.bootstrap.as_ref().map(bootstrap::Bootstrap::worker)
     }
 
     pub(crate) fn event_types(&self) -> EventTypeFlags {
@@ -173,6 +194,7 @@ impl MemberCacheRuntime {
             && let Some(cache) = cache.as_mut()
         {
             cache.suspended.insert(shard);
+            cache.bootstrap.cancel_shard(shard);
         }
     }
 
@@ -212,6 +234,9 @@ impl MemberCacheRoute<'_> {
             }
             Event::Resumed => {
                 cache.suspended.remove(&self.shard);
+                if let Some(bootstrap) = &self.runtime.bootstrap {
+                    bootstrap.wake();
+                }
             }
             Event::GuildCreate(guild) => {
                 cache.clear_guild(self.shard, guild.id());
@@ -219,12 +244,23 @@ impl MemberCacheRoute<'_> {
                     for member in guild.members.iter().take(cache.capacity.get()) {
                         cache.insert(self.shard, guild.id, member);
                     }
+                    if let Some(bootstrap) = &self.runtime.bootstrap {
+                        bootstrap.schedule(cache, self.shard, guild);
+                    }
                 }
             }
             Event::GuildDelete(guild) => cache.clear_guild(self.shard, guild.id),
             Event::RoleDelete(role) => cache.remove_role(self.shard, role.guild_id, role.role_id),
-            Event::MemberAdd(event) => cache.insert(self.shard, event.guild_id, &event.member),
+            Event::MemberAdd(event) => {
+                cache
+                    .bootstrap
+                    .touch(self.shard, event.guild_id, event.member.user.id);
+                cache.insert(self.shard, event.guild_id, &event.member);
+            }
             Event::MemberRemove(event) => {
+                cache
+                    .bootstrap
+                    .touch(self.shard, event.guild_id, event.user.id);
                 let member = cache.remove(self.shard, (event.guild_id, event.user.id))?;
                 if self.runtime.events.contains(EventTypeFlags::MEMBER_REMOVE) {
                     return Some(CachedMemberEvent::Remove(CachedMemberRemove {
@@ -292,6 +328,7 @@ struct MemberCache {
     order: BTreeMap<u64, Key>,
     next: u64,
     suspended: HashSet<ShardId>,
+    bootstrap: bootstrap::Pending,
 }
 
 struct Entry {
@@ -308,14 +345,19 @@ impl MemberCache {
             order: BTreeMap::new(),
             next: 0,
             suspended: HashSet::new(),
+            bootstrap: bootstrap::Pending::default(),
         }
     }
 
     fn insert(&mut self, shard: ShardId, guild: Id<GuildMarker>, member: &Member) {
+        self.insert_snapshot(shard, guild, Arc::new(member.clone()));
+    }
+
+    fn insert_snapshot(&mut self, shard: ShardId, guild: Id<GuildMarker>, member: Arc<Member>) {
         let key = (guild, member.user.id);
         if let Some(entry) = self.entry_mut(key) {
             entry.shard = shard;
-            entry.member = Arc::new(member.clone());
+            entry.member = member;
             return;
         }
         if self.order.len() == self.capacity.get()
@@ -334,7 +376,7 @@ impl MemberCache {
             Entry {
                 shard,
                 order,
-                member: Arc::new(member.clone()),
+                member,
             },
         );
     }
@@ -374,10 +416,12 @@ impl MemberCache {
     }
 
     fn reset(&mut self, shard: ShardId) {
+        self.bootstrap.cancel_shard(shard);
         self.clear_matching(|_, entry| entry.shard == shard);
     }
 
     fn clear_guild(&mut self, shard: ShardId, guild: Id<GuildMarker>) {
+        self.bootstrap.cancel_guild(shard, guild);
         if let Some(members) = self.entries.get_mut(&guild) {
             members.retain(|_, entry| {
                 if entry.shard == shard {
@@ -407,6 +451,7 @@ impl MemberCache {
     }
 
     fn remove_role(&mut self, shard: ShardId, guild: Id<GuildMarker>, role: Id<RoleMarker>) {
+        self.bootstrap.cancel_guild(shard, guild);
         let Some(members) = self.entries.get_mut(&guild) else {
             return;
         };
@@ -426,6 +471,7 @@ impl MemberCache {
         fields: MemberUpdateFields,
         notify: bool,
     ) -> Option<CachedMemberUpdate> {
+        self.bootstrap.touch(shard, event.guild_id, event.user.id);
         let entry = self.entry_mut((event.guild_id, event.user.id))?;
         if entry.shard != shard {
             return None;

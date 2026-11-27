@@ -30,11 +30,13 @@ pub mod validation;
 mod voice_gateway;
 mod work_queue;
 
-use std::{env, fmt, sync::Arc, time::Duration};
+use std::{env, fmt, num::NonZeroU16, sync::Arc, time::Duration};
 
 use events::{ActivityEvent, ReactionEvent};
 use gateway_runtime::GatewayPlan;
-use member_cache::{CachedMemberEvent, MemberCacheRoute, MemberCacheRuntime};
+use member_cache::{
+    BootstrapConfig, BootstrapWorker, CachedMemberEvent, MemberCacheRoute, MemberCacheRuntime,
+};
 use message_cache::{MessageCacheRoute, MessageCacheRuntime};
 use message_events::{GatewayDecodeOptions, IncomingEvent};
 use tokio::sync::mpsc;
@@ -128,6 +130,7 @@ pub struct Bot {
     message_cache_capacity: usize,
     member_cache_capacity: usize,
     member_cache_handle: Option<MemberCacheHandle>,
+    member_cache_bootstrap: Option<BootstrapConfig>,
     presence: Option<PresenceHandle>,
     shutdown: Option<ShutdownHandle>,
     recommended_shards: bool,
@@ -187,6 +190,7 @@ impl Bot {
             message_cache_capacity: 0,
             member_cache_capacity: 0,
             member_cache_handle: None,
+            member_cache_bootstrap: None,
             presence: None,
             shutdown: None,
             recommended_shards: false,
@@ -357,13 +361,31 @@ impl Bot {
     /// 保存済みのメンバーを読み取れるハンドルを取得します。
     ///
     /// `GUILDS` と `GUILD_MEMBERS` Intent、および正の容量が必要です。
-    /// メンバーの通知を登録しなくても保存し、Discord から届いた情報だけを参照できます。
+    /// メンバーの通知を登録しなくても保存し、ハンドルから保存済みの情報を参照できます。
     #[must_use]
     pub fn with_member_cache(mut self, capacity: usize) -> (Self, MemberCacheHandle) {
         let handle = MemberCacheHandle::new();
         self.member_cache_capacity = capacity;
         self.member_cache_handle = Some(handle.clone());
         (self, handle)
+    }
+
+    /// 指定したサーバーのメンバーを、空きのあるキャッシュに REST で追加します。
+    ///
+    /// [`Self::cache_members`] または [`Self::with_member_cache`] で正の容量を設定し、
+    /// `GUILDS` と `GUILD_MEMBERS` Intent を指定してください。サーバーが利用可能になった時点で
+    /// 1 ページだけ取得します。1 サーバーの取得上限は `per_guild_limit`、1,000 件、
+    /// キャッシュ容量の最小値です。取得はバックグラウンドで進むので Ready の処理を待たせません。
+    /// 保存済みのメンバーや取得中に更新・退出したメンバーは上書きしません。
+    /// 空のリストを渡すと REST 取得を無効にします。
+    #[must_use]
+    pub fn with_member_cache_bootstrap(
+        mut self,
+        guilds: impl IntoIterator<Item = Id<GuildMarker>>,
+        per_guild_limit: NonZeroU16,
+    ) -> Self {
+        self.member_cache_bootstrap = BootstrapConfig::new(guilds, per_guild_limit);
+        self
     }
 
     /// ボイスチャンネルの参加や退出を要求できるハンドルを取得します。
@@ -469,6 +491,7 @@ impl Bot {
             message_cache_capacity,
             member_cache_capacity,
             member_cache_handle,
+            member_cache_bootstrap,
             presence,
             shutdown,
             recommended_shards,
@@ -502,6 +525,7 @@ impl Bot {
             &events,
             intents,
             member_cache_handle,
+            member_cache_bootstrap,
         )?;
         if voice_gateway.is_some() && !intents.contains(Intents::GUILD_VOICE_STATES) {
             return Err(Error::MissingEventIntents {
@@ -576,20 +600,7 @@ impl Bot {
         let handle_interactions = work_queue::dispatch(
             interaction_queue,
             limits.interaction_workers,
-            |pending| async {
-                let (InteractionEvent { interaction, radio }, timing) = Pending::begin(pending);
-                if matches!(
-                    interaction.kind,
-                    InteractionType::MessageComponent | InteractionType::ModalSubmit
-                ) {
-                    events
-                        .interaction_handlers
-                        .dispatch(&http, &interaction, timing, &hooks, &radio)
-                        .await;
-                } else if let Some(commands) = slash {
-                    commands.dispatch(&http, &interaction, timing, &hooks).await;
-                }
-            },
+            |pending| dispatch_interaction(pending, &events, slash, &http, &hooks),
             move |pending| queue_busy_response(&interaction_overflow, pending, worker_hooks),
         );
         let handle_busy = work_queue::respond(busy_queue, limits.notice_workers, |pending| {
@@ -697,7 +708,15 @@ impl Bot {
             tokio::join!(handle_events, handle_text, handle_interactions, handle_busy);
         };
         tokio::pin!(workers);
-        let stopped = shutdown::drive(receive, workers.as_mut(), &mut shutdown).await;
+        let stopped = BootstrapWorker::drive(
+            member_cache
+                .as_ref()
+                .and_then(MemberCacheRuntime::bootstrap_worker),
+            &http,
+            &hooks.reporter,
+            shutdown::drive(receive, workers.as_mut(), &mut shutdown),
+        )
+        .await;
         suspend_member_reads(member_cache.as_ref());
         if let Err(error) = stopped {
             if recommended_shards {
@@ -709,6 +728,27 @@ impl Bot {
         drop((event_tx, text_ingress, interactions, busy));
         shutdown::finish(gateways.close(), workers).await;
         Ok(())
+    }
+}
+
+async fn dispatch_interaction(
+    pending: Pending<InteractionEvent>,
+    events: &Events,
+    slash: Option<&slash::ActiveSlashCommands>,
+    http: &Client,
+    hooks: &Hooks,
+) {
+    let (InteractionEvent { interaction, radio }, timing) = pending.begin();
+    if matches!(
+        interaction.kind,
+        InteractionType::MessageComponent | InteractionType::ModalSubmit
+    ) {
+        events
+            .interaction_handlers
+            .dispatch(http, &interaction, timing, hooks, &radio)
+            .await;
+    } else if let Some(commands) = slash {
+        commands.dispatch(http, &interaction, timing, hooks).await;
     }
 }
 

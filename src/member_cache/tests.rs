@@ -26,13 +26,13 @@ fn requires_capacity_and_both_explicit_intents_only_for_cached_handlers() {
     let mut events = Events::new();
     events.on_gateway(async |_: &MemberUpdate| -> Result<()> { Ok(()) });
     assert!(
-        MemberCacheRuntime::prepare(10, &events, Intents::empty(), None)
+        MemberCacheRuntime::prepare(10, &events, Intents::empty(), None, None)
             .unwrap()
             .is_none()
     );
     let events = subscribed();
     assert!(matches!(
-        MemberCacheRuntime::prepare(0, &events, INTENTS, None),
+        MemberCacheRuntime::prepare(0, &events, INTENTS, None, None),
         Err(Error::MemberCacheRequired)
     ));
     for (configured, missing) in [
@@ -40,10 +40,10 @@ fn requires_capacity_and_both_explicit_intents_only_for_cached_handlers() {
         (Intents::GUILD_MEMBERS, Intents::GUILDS),
     ] {
         assert!(
-            matches!(MemberCacheRuntime::prepare(2, &events, configured, None), Err(Error::MissingEventIntents { any_of }) if any_of == missing)
+            matches!(MemberCacheRuntime::prepare(2, &events, configured, None, None), Err(Error::MissingEventIntents { any_of }) if any_of == missing)
         );
     }
-    let runtime = MemberCacheRuntime::prepare(2, &events, INTENTS, None)
+    let runtime = MemberCacheRuntime::prepare(2, &events, INTENTS, None, None)
         .unwrap()
         .unwrap();
     assert!(runtime.event_types().contains(
@@ -63,13 +63,13 @@ fn shared_lookup_works_without_event_listeners_and_hides_replayed_changes_until_
     let other_guild = Id::new(4_194_304);
     assert!(handle.get(guild, user_id).is_none());
     assert!(matches!(
-        MemberCacheRuntime::prepare(0, &events, INTENTS, Some(handle.clone())),
+        MemberCacheRuntime::prepare(0, &events, INTENTS, Some(handle.clone()), None),
         Err(Error::MemberCacheRequired)
     ));
     assert!(
-        matches!(MemberCacheRuntime::prepare(2, &events, Intents::GUILDS, Some(handle.clone())), Err(Error::MissingEventIntents { any_of }) if any_of == Intents::GUILD_MEMBERS)
+        matches!(MemberCacheRuntime::prepare(2, &events, Intents::GUILDS, Some(handle.clone()), None), Err(Error::MissingEventIntents { any_of }) if any_of == Intents::GUILD_MEMBERS)
     );
-    let runtime = MemberCacheRuntime::prepare(2, &events, INTENTS, Some(handle.clone()))
+    let runtime = MemberCacheRuntime::prepare(2, &events, INTENTS, Some(handle.clone()), None)
         .unwrap()
         .unwrap();
     let first = runtime.shard(ShardId::new(0, 2));
@@ -113,9 +113,10 @@ fn shared_lookup_works_without_event_listeners_and_hides_replayed_changes_until_
 #[test]
 fn shared_snapshot_is_bounded_and_the_replacement_session_does_not_publish_old_members() {
     let handle = MemberCacheHandle::new();
-    let runtime = MemberCacheRuntime::prepare(2, &Events::new(), INTENTS, Some(handle.clone()))
-        .unwrap()
-        .unwrap();
+    let runtime =
+        MemberCacheRuntime::prepare(2, &Events::new(), INTENTS, Some(handle.clone()), None)
+            .unwrap()
+            .unwrap();
     let guild = Id::new(2);
     let route = runtime.shard(ShardId::ONE);
     for id in ["6", "7", "8"] {
@@ -306,7 +307,7 @@ fn update(route: MemberCacheRoute<'_>, payload: Value) -> Option<CachedMemberUpd
 
 #[test]
 fn partial_updates_keep_omitted_fields_and_clear_explicit_null_or_false() {
-    let runtime = MemberCacheRuntime::prepare(2, &subscribed(), INTENTS, None)
+    let runtime = MemberCacheRuntime::prepare(2, &subscribed(), INTENTS, None, None)
         .unwrap()
         .unwrap();
     let route = runtime.shard(ShardId::ONE);
@@ -349,7 +350,7 @@ fn partial_updates_keep_omitted_fields_and_clear_explicit_null_or_false() {
 
 #[test]
 fn guild_create_seeds_no_more_than_the_configured_capacity() {
-    let runtime = MemberCacheRuntime::prepare(1, &subscribed(), INTENTS, None)
+    let runtime = MemberCacheRuntime::prepare(1, &subscribed(), INTENTS, None, None)
         .unwrap()
         .unwrap();
     let route = runtime.shard(ShardId::ONE);
@@ -368,7 +369,7 @@ fn guild_create_seeds_no_more_than_the_configured_capacity() {
 
 #[test]
 fn bounds_members_and_discards_only_matching_guild_and_shard() {
-    let runtime = MemberCacheRuntime::prepare(2, &subscribed(), INTENTS, None)
+    let runtime = MemberCacheRuntime::prepare(2, &subscribed(), INTENTS, None, None)
         .unwrap()
         .unwrap();
     let first = runtime.shard(ShardId::new(0, 2));
@@ -434,7 +435,7 @@ fn bounds_members_and_discards_only_matching_guild_and_shard() {
 
 #[test]
 fn replacement_ready_and_missing_updates_reset_only_the_affected_shard() {
-    let runtime = MemberCacheRuntime::prepare(3, &subscribed(), INTENTS, None)
+    let runtime = MemberCacheRuntime::prepare(3, &subscribed(), INTENTS, None, None)
         .unwrap()
         .unwrap();
     let first = runtime.shard(ShardId::new(0, 2));
@@ -498,7 +499,7 @@ async fn dispatches_raw_then_cached_in_fifo_and_keeps_raw_cache_misses() {
             .push(("cached", update.after.user.id.get()));
         Ok(())
     });
-    let runtime = MemberCacheRuntime::prepare(1, &events, INTENTS, None)
+    let runtime = MemberCacheRuntime::prepare(1, &events, INTENTS, None, None)
         .unwrap()
         .unwrap();
     let route = runtime.shard(ShardId::ONE);

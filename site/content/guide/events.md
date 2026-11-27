@@ -262,3 +262,27 @@ async fn main() -> Result<()> {
 ## 実行の順序
 
 `on_ready`、`on_message`、メッセージの raw イベントは、**受信した順に 1 件ずつ** 処理されます。処理が遅いと、あとのイベントが待たされます。重い処理は、コマンドやボタンのハンドラー（並行して実行されます）に置くか、`tokio::spawn` で切り分けてください。詳しくは [Akari の動き方](how-it-works.md) を参照してください。
+
+## 起動時に指定サーバーのメンバーを補う
+
+`with_member_cache_bootstrap` を使うと、明示したサーバーが利用可能になったときに、メンバーを REST で1ページだけ取得します。取得はバックグラウンドで進み、`on_ready` では結果を待ちません。`GUILDS` と特権 Intent の `GUILD_MEMBERS` を設定します。
+
+```rust
+use std::num::NonZeroU16;
+use disnana_akari::{Bot, MemberCacheHandle};
+use disnana_akari::model::{
+    gateway::Intents,
+    id::{Id, marker::GuildMarker},
+};
+
+fn enable_seed(bot: Bot, guild: Id<GuildMarker>, page: NonZeroU16)
+    -> (Bot, MemberCacheHandle)
+{
+    let (bot, members) = bot
+        .add_intents(Intents::GUILDS | Intents::GUILD_MEMBERS)
+        .with_member_cache(512);
+    (bot.with_member_cache_bootstrap([guild], page), members)
+}
+```
+
+キャッシュの空きだけを使います。取得中に Gateway から更新・退出が届いたメンバーは、その REST 結果で上書き・再追加しません。全件同期が必要な処理では、取得前後の変化も考慮して別途設計してください。[Discord の List Guild Members](https://docs.discord.com/developers/resources/guild#list-guild-members)
