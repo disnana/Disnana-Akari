@@ -13,7 +13,7 @@ include = ["/src/**", "/tests/**", "/examples/**", "/docs/**", "/README.md", "/C
 publish = ["crates-io"]
 
 [dependencies]
-futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "std"] }
 http-types = { package = "http", version = "1" }
 # コードでは使わないが、削らないこと。TLS の暗号プロバイダーに `ring` を選ぶための依存で、
 # 外すとプロバイダーが 1 つもなくなり、最初の TLS 接続で失敗する。

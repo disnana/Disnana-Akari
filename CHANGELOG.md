@@ -21,6 +21,7 @@
 
 ### 追加
 
+- **利用者の関数が `panic` しても、Bot が止まらないようにしました。** コマンド、イベント、ボタン、選択メニュー、フォーム、補完などのハンドラーの `panic` を受け止めて、`Error::HandlerPanic` として、ほかのエラーと同じように報告します（`on_error`、`tracing` のログ、失敗の文言）。以前は、1 つのハンドラーの `panic` で、`Bot::run` ごと止まっていました。
 - **Bot のステータスとアクティビティを設定できるようにしました。** `PresenceHandle` と `Bot::with_presence` で、起動時の設定と、実行中の変更（`set`、`set_status`、`set_activity`）ができます。送信キューに入れる前の更新は最新の値にまとめ、追加の間隔を 5 秒以上空けます。再接続したときは、最後の値を再びキューに入れます。`Status::Offline` は `Invisible` として送ります。
 - **権限付きのギルドコマンドを追加しました。** `SlashCommands::register_with_permissions` と `group_with_permissions` が、Discord の一覧での表示条件と、ハンドラーを呼ぶ前の権限チェックを、同じ権限でまとめて設定します。足りないときは、ハンドラーを呼ばずに `Messages::check_failed` を本人にだけ返し、入力補完は空の候補を返します。グローバル登録では使えません。
 - **ログを `tracing` で発行します。** `error`（ハンドラーのエラー、Gateway の切断）、`warn`（処理枠の満杯、自動応答の失敗）、`info`（Gateway の準備と再開、コマンドの同期）、`debug`（Interaction への初回応答と時間）です。
