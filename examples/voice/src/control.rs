@@ -16,6 +16,7 @@ use disnana_akari::{
             marker::{ChannelMarker, GuildMarker},
         },
     },
+    validation::AttachmentLimits,
 };
 use tokio::{
     io::AsyncReadExt,
@@ -216,7 +217,8 @@ async fn upload_recording(
         return Err(READ_FAILED);
     }
     let max_bytes = u64::from(MAX_UPLOAD_BYTES);
-    if metadata.len() > max_bytes {
+    let limits = AttachmentLimits::default().max_file_bytes(Some(max_bytes));
+    if limits.validate(0, [metadata.len()], None).is_err() {
         return Err(TOO_LARGE);
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
@@ -224,7 +226,7 @@ async fn upload_recording(
         .read_to_end(&mut bytes)
         .await
         .map_err(|_| READ_FAILED)?;
-    if bytes.len() > MAX_UPLOAD_BYTES as usize {
+    if limits.validate(0, [bytes.len() as u64], None).is_err() {
         return Err(TOO_LARGE);
     }
     let files = [Attachment::from_bytes("akari-voice.wav".into(), bytes, 0)];

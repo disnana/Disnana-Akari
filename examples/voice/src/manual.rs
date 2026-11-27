@@ -5,7 +5,8 @@ use std::{
 };
 
 use disnana_akari::{
-    Bot, Error, InfoEvent, Result, VoiceConnection, VoiceConnectionStatus, VoiceGateway,
+    Bot, Error, ErrorReport, InfoEvent, Messages, Result, VoiceConnection, VoiceConnectionStatus,
+    VoiceGateway,
     model::{
         gateway::Intents,
         id::{
@@ -35,6 +36,10 @@ pub(super) async fn run(guild: Id<GuildMarker>, directory: PathBuf) -> Result<()
         .await
         .map_err(Error::handler)?;
     let (commands, receiver) = control::commands(guild)?;
+    let mut messages = Messages::default();
+    messages.slash_command_unavailable = Some(
+        "このコマンドを利用できませんでした。Discord のコマンド一覧を開き直して選び直してください。".into(),
+    );
     let (bot, voice) = Bot::from_env()?
         .with_intents(Intents::GUILDS | Intents::GUILD_VOICE_STATES)
         .on_info(|event| match event {
@@ -44,6 +49,8 @@ pub(super) async fn run(guild: Id<GuildMarker>, directory: PathBuf) -> Result<()
             InfoEvent::GatewayReady => println!("Playground VC の Gateway が準備できました"),
             _ => {}
         })
+        .with_messages(messages)
+        .on_error(log_runtime_error)
         .with_slash_commands(commands)
         .with_voice_gateway();
     let (bot, shutdown) = bot.with_shutdown();
@@ -63,6 +70,27 @@ pub(super) async fn run(guild: Id<GuildMarker>, directory: PathBuf) -> Result<()
             bot.await?;
             result
         }
+    }
+}
+
+fn log_runtime_error(report: &ErrorReport<'_>) {
+    use disnana_akari::http::error::ErrorType;
+
+    let source = report.source;
+    let name = report
+        .name
+        .filter(|name| matches!(*name, "vc-join" | "vc-record" | "vc-stop" | "vc-leave"))
+        .unwrap_or("VC");
+    match report.error {
+        Error::CommandUnavailable => eprintln!("[{source}] {name} に一致する登録経路がありません"),
+        Error::Http(error) => {
+            if let ErrorType::Response { status, .. } = error.kind() {
+                eprintln!("[{source}] {name} の Discord HTTP ステータスは {status}");
+            } else {
+                eprintln!("[{source}] {name} の Discord HTTP 通信に失敗しました");
+            }
+        }
+        _ => eprintln!("[{source}] {name} の操作に失敗しました"),
     }
 }
 
