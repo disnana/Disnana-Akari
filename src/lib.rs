@@ -9,6 +9,7 @@ mod hooks;
 mod hybrid;
 mod interactions;
 mod limits;
+mod module;
 mod permissions;
 mod slash;
 mod timing;
@@ -48,6 +49,7 @@ pub use interactions::{
     MentionableSelectContext, ModalContext, RoleSelectContext, SelectContext, UserSelectContext,
 };
 pub use limits::Limits;
+pub use module::{Module, Registry};
 pub use slash::{CommandGroup, SlashCommands, SlashContext};
 pub use timing::Timing;
 pub use twilight_http as http;

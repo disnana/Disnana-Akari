@@ -58,6 +58,7 @@ export default defineConfig({
           { text: 'スラッシュコマンド', link: '/guide/slash-commands' },
           { text: 'ハイブリッドコマンド', link: '/guide/hybrid-commands' },
           { text: '権限の確認', link: '/guide/permissions' },
+          { text: 'モジュールで整理する', link: '/guide/modules' },
           { text: 'イベントを受け取る', link: '/guide/events' },
           { text: '応答のしかた', link: '/guide/responding' },
           { text: 'エラーと自動で送る文言', link: '/guide/errors' },
