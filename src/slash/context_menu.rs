@@ -13,12 +13,9 @@ use twilight_model::{
 };
 use twilight_validate::command;
 
-use super::{
-    Scope, SlashCommands, SlashContext, SlashHandler,
-    settings::{CommandPayload, create_configured_command},
-};
+use super::{Scope, SlashCommands, SlashContext, SlashHandler, settings::CommandPayload};
 use crate::{
-    CommandSyncError, Error, HandlerKind, RegistrationError, Result,
+    Error, HandlerKind, RegistrationError, Result,
     error::{adapt_handler, handler_error},
 };
 
@@ -210,26 +207,6 @@ impl MenuCommands {
 
     pub(super) fn remove(&mut self, kind: MenuKind, name: &str) -> Option<Box<dyn SlashHandler>> {
         self.entries_mut(kind).remove(name)
-    }
-
-    pub(super) async fn sync(
-        &self,
-        http: &Client,
-        application_id: Id<ApplicationMarker>,
-        commands: &SlashCommands,
-        registered: &mut Vec<Command>,
-    ) -> Result<()> {
-        for (kind, name) in self.names() {
-            let definition = commands.menu_model(kind, name)?;
-            let command =
-                create_configured_command(http, application_id, commands.scope, &definition)
-                    .await?;
-            if command.kind != kind.into() || command.name != name {
-                return Err(CommandSyncError::UnexpectedName { name: command.name }.into());
-            }
-            registered.push(command);
-        }
-        Ok(())
     }
 }
 

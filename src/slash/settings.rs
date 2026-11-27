@@ -13,7 +13,7 @@ use twilight_model::{
 };
 use twilight_validate::command;
 
-use super::{Scope, SlashCommands, context_menu::MenuKind};
+use super::{Scope, SlashCommands, context_menu::MenuKind, validation::validate_command_size};
 use crate::{Error, RegistrationError, Result};
 
 /// Discord が表示するアプリコマンドの利用場所、インストール先、翻訳を設定します。
@@ -213,6 +213,17 @@ impl SlashCommands {
             .into());
         }
         settings.validate(self.scope, kind)?;
+        if kind == CommandType::ChatInput
+            && let Some(definition) = self.entries.get(name)
+        {
+            validate_command_size(
+                name,
+                Some(&settings.names),
+                &definition.description,
+                Some(&settings.descriptions),
+                &definition.option_tree(),
+            )?;
+        }
         self.settings
             .entry(kind)
             .or_default()

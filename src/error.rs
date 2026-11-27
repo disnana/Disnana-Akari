@@ -355,6 +355,12 @@ pub enum RegistrationError {
         /// 問題がある設定の名前です。
         field: &'static str,
     },
+    /// スラッシュコマンドとその引数を合わせた文字数が Discord の上限を超えました。
+    #[error("スラッシュコマンドの合計は {characters} 文字です。上限は 8000 文字です")]
+    SlashCommandTooLarge {
+        /// 各フィールドの最長翻訳を使って数えた文字数です。
+        characters: usize,
+    },
 }
 
 /// 実行前の確認（権限など）に通らなかった理由です。

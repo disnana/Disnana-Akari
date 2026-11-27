@@ -5,7 +5,10 @@ use twilight_validate::command;
 
 use crate::Result;
 
-use super::settings::{invalid_setting, validate_locale};
+use super::{
+    settings::{invalid_setting, validate_locale},
+    validation::validate_choice_settings,
+};
 
 type Names = HashMap<String, String>;
 
@@ -134,6 +137,7 @@ pub(crate) fn validate_options(options: &[CommandOption]) -> Result<()> {
 
 fn validate_option_localizations(options: &[CommandOption]) -> Result<()> {
     for (index, option) in options.iter().enumerate() {
+        validate_choice_settings(option)?;
         validate_translations(
             option.name_localizations.iter().flatten(),
             option.description_localizations.iter().flatten(),

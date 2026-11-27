@@ -44,6 +44,7 @@ mod localizations;
 mod original_response;
 mod settings;
 mod v2_attachments;
+mod validation;
 pub use context_menu::UserMenuTarget;
 use context_menu::{MenuCommands, MenuKind, replace_application_commands};
 pub use localizations::CommandOptionLocalizations;
@@ -52,6 +53,7 @@ pub(crate) use localizations::validate_options;
 pub use settings::CommandSettings;
 use settings::{SettingsByKind, create_configured_command};
 pub(crate) use v2_attachments::edit_v2_response;
+use validation::validate_command_size;
 
 /// 一つのサーバー、またはアプリ全体に登録するアプリコマンド一覧です。
 ///
@@ -175,6 +177,7 @@ impl SlashCommands {
         command::chat_input_name(name)?;
         command::description(description)?;
         validate_options(&options)?;
+        validate_command_size(name, None, description, None, &options)?;
         match self.entries.entry(name.into()) {
             Entry::Vacant(entry) => Ok(entry.insert(Definition {
                 description: description.into(),
@@ -333,7 +336,7 @@ impl SlashCommands {
                 .into());
             }
         }
-        command::options(&root.option_tree())?;
+        self.chat_model(name, root)?;
         Ok(())
     }
 
@@ -513,10 +516,10 @@ impl SlashCommands {
             return self.bind(Vec::new());
         }
 
+        let commands = self.replacement_commands()?;
         let application = http.current_user_application().await?.model().await?;
         let client = http.interaction(application.id);
         let registered = if self.replace {
-            let commands = self.replacement_commands()?;
             if self.menus.is_empty() {
                 match self.scope {
                     Scope::Guild(guild_id) => {
@@ -538,32 +541,36 @@ impl SlashCommands {
                 replace_application_commands(http, application.id, self.scope, &commands).await?
             }
         } else {
-            let mut registered = Vec::with_capacity(self.entries.len() + self.menus.len());
-            for (name, definition) in &self.entries {
-                if self
-                    .settings
-                    .get(&CommandType::ChatInput)
-                    .is_some_and(|settings| settings.contains_key(name))
+            let mut registered = Vec::with_capacity(commands.len());
+            for model in &commands {
+                let name = &model.name;
+                if model.kind != CommandType::ChatInput
+                    || self
+                        .settings
+                        .get(&model.kind)
+                        .is_some_and(|settings| settings.contains_key(name))
                 {
-                    let command = self.chat_model(name, definition)?;
-                    registered.push(
-                        create_configured_command(http, application.id, self.scope, &command)
-                            .await?,
-                    );
+                    let command =
+                        create_configured_command(http, application.id, self.scope, model).await?;
+                    if model.kind != CommandType::ChatInput
+                        && (command.kind != model.kind || command.name != *name)
+                    {
+                        return Err(CommandSyncError::UnexpectedName { name: command.name }.into());
+                    }
+                    registered.push(command);
                     continue;
                 }
                 let registration = |source| Error::CommandRegistration {
                     name: name.clone(),
                     source,
                 };
-                let options = definition.option_tree();
                 let command = match self.scope {
                     Scope::Guild(guild_id) => {
                         let mut request = client
                             .create_guild_command(guild_id)
-                            .chat_input(name, &definition.description)
-                            .command_options(&options);
-                        if let Some(permissions) = definition.permissions.discord_default() {
+                            .chat_input(name, &model.description)
+                            .command_options(&model.options);
+                        if let Some(permissions) = model.default_member_permissions {
                             request = request.default_member_permissions(permissions);
                         }
                         request.await
@@ -571,9 +578,9 @@ impl SlashCommands {
                     Scope::Global => {
                         let mut request = client
                             .create_global_command()
-                            .chat_input(name, &definition.description)
-                            .command_options(&options);
-                        if let Some(permissions) = definition.permissions.discord_default() {
+                            .chat_input(name, &model.description)
+                            .command_options(&model.options);
+                        if let Some(permissions) = model.default_member_permissions {
                             request = request.default_member_permissions(permissions);
                         }
                         request.await
@@ -584,9 +591,6 @@ impl SlashCommands {
                 .await?;
                 registered.push(command);
             }
-            self.menus
-                .sync(http, application.id, &self, &mut registered)
-                .await?;
             registered
         };
 
@@ -618,14 +622,23 @@ impl SlashCommands {
             &definition.description,
             definition.option_tree(),
             definition.permissions.discord_default(),
-        )?;
+        );
         self.configure_command(&mut command);
+        validate_options(&command.options)?;
+        validate_command_size(
+            &command.name,
+            command.name_localizations.as_ref(),
+            &command.description,
+            command.description_localizations.as_ref(),
+            &command.options,
+        )?;
         Ok(command)
     }
 
     fn menu_model(&self, kind: MenuKind, name: &str) -> Result<Command> {
-        let mut command = command_model(kind.into(), name, "", Vec::new(), None)?;
+        let mut command = command_model(kind.into(), name, "", Vec::new(), None);
         self.configure_command(&mut command);
+        command::command(&command)?;
         Ok(command)
     }
 
@@ -684,8 +697,8 @@ fn command_model(
     description: &str,
     options: Vec<CommandOption>,
     default_member_permissions: Option<Permissions>,
-) -> Result<Command> {
-    let command = Command {
+) -> Command {
+    Command {
         application_id: None,
         contexts: None,
         default_member_permissions,
@@ -701,9 +714,7 @@ fn command_model(
         nsfw: None,
         options,
         version: Id::new(1),
-    };
-    command::command(&command)?;
-    Ok(command)
+    }
 }
 
 /// サブコマンドを登録する先です。[`SlashCommands::group`] で作ります。
