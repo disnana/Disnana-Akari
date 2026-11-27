@@ -7,6 +7,7 @@
 | `Bot::new(token) -> Result<Bot>` | トークンの前後の空白を除去して Bot を作ります。値が空の場合はエラーを返します。 |
 | `Bot::from_env() -> Result<Bot>` | 環境変数 `DISCORD_TOKEN` から Bot を作ります。 |
 | `bot.with_events(events) -> Bot` | Gateway イベントに応じて呼び出す関数の一覧を設定します。 |
+| `bot.with_presence(handle) -> Bot` | 起動時と実行中の Discord 上のステータスを共有ハンドルから設定します。 |
 | `bot.with_slash_commands(commands) -> Bot` | スラッシュコマンドを指定サーバーで有効にします。 |
 | `bot.with_intents(intents) -> Bot` | 要求する Gateway Intent を、渡された `Intents` の集合にします。既定は空です。 |
 | `bot.add_intents(intents) -> Bot` | 要求する Intent に、渡された `Intents` を追加します。 |
@@ -19,6 +20,14 @@
 | `bot.run(on_message).await -> Result<()>` | テキストコマンドの代わりに、受信メッセージを自前の `async fn on_message(ctx: Context<'_>) -> Result<()>` で処理します。 |
 
 起動メソッドは Tokio ランタイム内で呼び出します。
+
+### Bot のステータスとアクティビティ
+
+`PresenceHandle::new(Presence::new(Status::Online))` を作り、クローンを `bot.with_presence(handle.clone())` に渡します。実行中はハンドラーなどから `handle.set(Presence::new(Status::Idle))` を呼びます。`Presence::with_activity` には Twilight の `MinimalActivity` を渡せます。アクティビティを消すときは `Presence::new(status)` だけで作った値を設定します。
+
+現在のアクティビティを保ってオンライン状態だけ変える場合は `handle.set_status(status)`、オンライン状態を保ってアクティビティだけ変える場合は `handle.set_activity(Some(activity))` を使います。`handle.set_activity(None)` でアクティビティだけ消せます。`Status::Offline` を指定すると、Discord には `Status::Invisible` を送ります。
+
+送信キューに入れる前の更新は最新の値にまとめ、キューへの追加間隔を5秒以上空けます。Gateway への送信時刻は接続状況と Twilight の送信処理に依存します。`set` は Discord での表示完了を待ちません。接続が回復したときは最後に設定した値を再びキューに入れます。[管理者向けのステータス変更サンプル](../examples/presence/main.rs)
 
 ### Intent
 
@@ -110,6 +119,14 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.reply_ephemeral(content).await -> Result<()>` | 呼び出したユーザーだけに初回応答を送ります。`defer_ephemeral` の後は、その処理中の表示を本文に置き換えます。 |
 | `ctx.followup(content).await -> Result<()>` | 最初の本文を送った後に、チャンネルに追加のメッセージを送ります。 |
 | `ctx.followup_ephemeral(content).await -> Result<()>` | 最初の本文を送った後に、呼び出したユーザーだけに追加のメッセージを送ります。 |
+
+### 特定の権限を持つ人にコマンドを表示する
+
+`SlashCommands::for_guild` で `register_with_permissions` に `Permissions::MANAGE_GUILD` などを渡すと、Discord のコマンド一覧での既定の表示条件と、Akari の実行前チェックに同じ権限を使います。管理者専用にする場合は `Permissions::ADMINISTRATOR` を渡します。サーバー側で一覧の表示条件が上書きされても、ハンドラーに処理を渡す前の権限チェックは残ります。
+
+サブコマンドをまとめて制限するには `group_with_permissions` を使います。最上位の表示条件に加え、配下のサブコマンドと入力補完にも同じ権限を適用します。実行時の拒否は `Messages::check_failed` で通知され、入力補完では空の候補を返します。
+
+表示条件だけを設定し、実行時の確認を `ctx.require_permissions(..)?` で自分で行う場合は `default_member_permissions` を使います。権限付きとして登録したコマンドの表示条件は、登録時の指定で決まります。[Discord のコマンド権限](https://docs.discord.com/developers/docs/interactions/slash-commands#permissions)
 
 ### サーバーに登録するコマンドを同期する
 

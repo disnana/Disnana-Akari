@@ -121,23 +121,40 @@ impl SlashCommands {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
+        self.insert(
+            name,
+            description,
+            options,
+            Some(Box::new(
+                adapt_handler!(handler, ctx: &mut SlashContext<'_>),
+            )),
+            PermissionPolicy::Unrestricted,
+        )?;
+        Ok(())
+    }
+
+    fn insert(
+        &mut self,
+        name: &str,
+        description: &str,
+        options: Vec<CommandOption>,
+        handler: Option<Box<dyn SlashHandler>>,
+        permissions: PermissionPolicy,
+    ) -> Result<&mut Definition> {
         command::chat_input_name(name)?;
         command::description(description)?;
         command::options(&options)?;
         match self.entries.entry(name.into()) {
-            Entry::Vacant(entry) => {
-                entry.insert(Definition {
-                    description: description.into(),
-                    options,
-                    default_permissions: None,
-                    handler: Some(Box::new(
-                        adapt_handler!(handler, ctx: &mut SlashContext<'_>),
-                    )),
-                    children: BTreeMap::new(),
+            Entry::Vacant(entry) => Ok(entry.insert(Definition {
+                description: description.into(),
+                options,
+                permissions,
+                handlers: RouteHandlers {
+                    command: handler,
                     autocompletes: HashMap::new(),
-                });
-                Ok(())
-            }
+                },
+                children: BTreeMap::new(),
+            })),
             Entry::Occupied(_) => Err(RegistrationError::Duplicate {
                 kind: HandlerKind::SlashCommand,
                 name: name.to_owned(),
@@ -173,15 +190,17 @@ impl SlashCommands {
         };
         let (root, rest) = path.split_first().ok_or_else(unknown)?;
         let definition = self.entries.get_mut(*root).ok_or_else(unknown)?;
-        let options = match (rest, &mut definition.children) {
-            ([], children) if children.is_empty() => &mut definition.options,
+        let (options, handlers) = match (rest, &mut definition.children) {
+            ([], children) if children.is_empty() => {
+                (&mut definition.options, &mut definition.handlers)
+            }
             ([sub], children) => match children.get_mut(*sub) {
-                Some(Child::Sub(sub)) => &mut sub.options,
+                Some(Child::Sub(sub)) => (&mut sub.options, &mut sub.handlers),
                 _ => return Err(unknown().into()),
             },
             ([group, sub], children) => match children.get_mut(*group) {
                 Some(Child::Group { subs, .. }) => match subs.get_mut(*sub) {
-                    Some(sub) => &mut sub.options,
+                    Some(sub) => (&mut sub.options, &mut sub.handlers),
                     None => return Err(unknown().into()),
                 },
                 _ => return Err(unknown().into()),
@@ -205,11 +224,7 @@ impl SlashCommands {
             }
             .into());
         }
-        let key = (
-            rest.iter().map(|part| (*part).to_owned()).collect(),
-            option.to_owned(),
-        );
-        match definition.autocompletes.entry(key) {
+        match handlers.autocompletes.entry(option.to_owned()) {
             HashEntry::Vacant(entry) => {
                 target.autocomplete = Some(true);
                 entry.insert(Box::new(
@@ -250,29 +265,73 @@ impl SlashCommands {
     ///
     /// 名前や説明が Discord の制約に合わない場合と、重複した名前を拒否します。
     pub fn group(&mut self, name: &str, description: &str) -> Result<CommandGroup<'_>> {
-        command::chat_input_name(name)?;
-        command::description(description)?;
-        match self.entries.entry(name.into()) {
-            Entry::Vacant(entry) => {
-                let definition = entry.insert(Definition {
-                    description: description.into(),
-                    options: Vec::new(),
-                    default_permissions: None,
-                    handler: None,
-                    children: BTreeMap::new(),
-                    autocompletes: HashMap::new(),
-                });
-                Ok(CommandGroup {
-                    root: definition,
-                    group: None,
-                })
-            }
-            Entry::Occupied(_) => Err(RegistrationError::Duplicate {
-                kind: HandlerKind::SlashCommand,
-                name: name.to_owned(),
-            }
-            .into()),
+        let root = self.insert(
+            name,
+            description,
+            Vec::new(),
+            None,
+            PermissionPolicy::Unrestricted,
+        )?;
+        Ok(CommandGroup { root, group: None })
+    }
+
+    /// Discord 上の既定の表示と、実行時の両方で権限を確認するギルドコマンドを登録します。
+    /// `Permissions::ADMINISTRATOR` または空の権限集合を渡すと管理者専用になります。
+    /// 実行時にはサーバー内であることも確認するため、DM からは使えません。
+    ///
+    /// # エラー
+    ///
+    /// グローバル登録、Discord の制約に合わない定義、重複した名前を拒否します。
+    pub fn register_with_permissions<E>(
+        &mut self,
+        name: &str,
+        description: &str,
+        options: Vec<CommandOption>,
+        required: Permissions,
+        handler: impl AsyncFn(&mut SlashContext<'_>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let permissions = self.required_permissions(required)?;
+        self.insert(
+            name,
+            description,
+            options,
+            Some(Box::new(
+                adapt_handler!(handler, ctx: &mut SlashContext<'_>),
+            )),
+            permissions,
+        )?;
+        Ok(())
+    }
+
+    /// 権限の確認が必要なギルドコマンドのグループを登録します。
+    /// 最上位の表示条件と、配下のすべてのサブコマンド・補完に適用します。
+    /// 権限の指定とエラーは [`Self::register_with_permissions`] と同じです。
+    pub fn group_with_permissions(
+        &mut self,
+        name: &str,
+        description: &str,
+        required: Permissions,
+    ) -> Result<CommandGroup<'_>> {
+        let permissions = self.required_permissions(required)?;
+        let root = self.insert(name, description, Vec::new(), None, permissions)?;
+        Ok(CommandGroup { root, group: None })
+    }
+
+    fn required_permissions(&self, required: Permissions) -> Result<PermissionPolicy> {
+        if matches!(self.scope, Scope::Global) {
+            return Err(RegistrationError::RestrictedCommandRequiresGuild.into());
         }
+        Ok(PermissionPolicy::Required(if required.is_empty() {
+            Permissions::ADMINISTRATOR
+        } else {
+            required
+        }))
     }
 
     /// 登録済みのコマンドを、既定で使える人の権限を絞って Discord に登録します。
@@ -284,15 +343,21 @@ impl SlashCommands {
     ///
     /// # エラー
     ///
-    /// 登録されていない名前を指定した場合に失敗します。
+    /// 登録されていない名前、または実行時の権限確認も設定済みの名前を指定した場合に失敗します。
     pub fn default_member_permissions(
         &mut self,
         name: &str,
         permissions: Permissions,
     ) -> Result<()> {
         match self.entries.get_mut(name) {
+            Some(definition) if matches!(definition.permissions, PermissionPolicy::Required(_)) => {
+                Err(RegistrationError::CommandPermissionsAlreadyRequired {
+                    name: name.to_owned(),
+                }
+                .into())
+            }
             Some(definition) => {
-                definition.default_permissions = Some(permissions);
+                definition.permissions = PermissionPolicy::Visibility(permissions);
                 Ok(())
             }
             None => Err(RegistrationError::UnknownCommand {
@@ -391,7 +456,7 @@ impl SlashCommands {
                             .create_guild_command(guild_id)
                             .chat_input(name, &definition.description)
                             .command_options(&options);
-                        if let Some(permissions) = definition.default_permissions {
+                        if let Some(permissions) = definition.permissions.discord_default() {
                             request = request.default_member_permissions(permissions);
                         }
                         request.await
@@ -401,7 +466,7 @@ impl SlashCommands {
                             .create_global_command()
                             .chat_input(name, &definition.description)
                             .command_options(&options);
-                        if let Some(permissions) = definition.default_permissions {
+                        if let Some(permissions) = definition.permissions.discord_default() {
                             request = request.default_member_permissions(permissions);
                         }
                         request.await
@@ -435,7 +500,7 @@ impl SlashCommands {
                 let command = Command {
                     application_id: None,
                     contexts: None,
-                    default_member_permissions: definition.default_permissions,
+                    default_member_permissions: definition.permissions.discord_default(),
                     description: definition.description.clone(),
                     description_localizations: None,
                     dm_permission: None,
@@ -549,7 +614,12 @@ impl CommandGroup<'_> {
         let definition = SubDefinition {
             description: description.into(),
             options,
-            handler: Box::new(adapt_handler!(handler, ctx: &mut SlashContext<'_>)),
+            handlers: RouteHandlers {
+                command: Some(Box::new(
+                    adapt_handler!(handler, ctx: &mut SlashContext<'_>),
+                )),
+                autocompletes: HashMap::new(),
+            },
         };
         let siblings = match &self.group {
             None => &mut self.root.children,
@@ -628,50 +698,105 @@ fn duplicate_sub(name: &str) -> Error {
     .into()
 }
 
-/// 経路から、先頭のコマンド名を除いた、サブコマンドの部分。
-fn sub_path<'a, 'b>(path: &'a [&'b str]) -> &'a [&'b str] {
-    path.get(1..).unwrap_or_default()
-}
-
 /// コマンド名に、呼ばれたサブコマンドとグループの名前を続けた経路。
 pub(crate) fn command_path(data: &CommandData) -> Vec<&str> {
     let mut path = vec![data.name.as_str()];
     let mut options = data.options.as_slice();
-    while let [option] = options {
-        match &option.value {
-            CommandOptionValue::SubCommand(inner) | CommandOptionValue::SubCommandGroup(inner) => {
-                path.push(option.name.as_str());
-                options = inner;
-            }
-            _ => break,
-        }
+    while let Some((name, inner)) = next_subcommand(options) {
+        path.push(name);
+        options = inner;
     }
     path
 }
 
 /// サブコマンドの入れ子をたどった先の、実際の引数。
 pub(crate) fn leaf_options(mut options: &[CommandDataOption]) -> &[CommandDataOption] {
-    while let [option] = options {
-        match &option.value {
-            CommandOptionValue::SubCommand(inner) | CommandOptionValue::SubCommandGroup(inner) => {
-                options = inner;
-            }
-            _ => break,
-        }
+    while let Some((_, inner)) = next_subcommand(options) {
+        options = inner;
     }
     options
+}
+
+fn next_subcommand(options: &[CommandDataOption]) -> Option<(&str, &[CommandDataOption])> {
+    let [option] = options else { return None };
+    match &option.value {
+        CommandOptionValue::SubCommand(inner) | CommandOptionValue::SubCommandGroup(inner) => {
+            Some((&option.name, inner))
+        }
+        _ => None,
+    }
+}
+
+fn routing_path<'data, 'path>(
+    mut options: &'data [CommandDataOption],
+    path: &'path mut [&'data str; 2],
+) -> Option<&'path [&'data str]> {
+    // Discord の最上位コマンドからは、グループとサブコマンドの2段までたどれる。
+    let mut depth = 0;
+    while let Some((name, inner)) = next_subcommand(options) {
+        *path.get_mut(depth)? = name;
+        depth += 1;
+        options = inner;
+    }
+    path.get(..depth)
+}
+
+fn report_command_error(hooks: &Hooks, source: ErrorSource, data: &CommandData, error: &Error) {
+    if next_subcommand(&data.options).is_none() {
+        hooks.reporter.report(source, Some(&data.name), error);
+    } else {
+        hooks
+            .reporter
+            .report(source, Some(&command_path(data).join(" ")), error);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PermissionPolicy {
+    Unrestricted,
+    Visibility(Permissions),
+    Required(Permissions),
+}
+
+impl PermissionPolicy {
+    fn discord_default(self) -> Option<Permissions> {
+        match self {
+            Self::Unrestricted => None,
+            Self::Visibility(permissions) => Some(permissions),
+            Self::Required(permissions) if permissions.contains(Permissions::ADMINISTRATOR) => {
+                Some(Permissions::empty())
+            }
+            Self::Required(permissions) => Some(permissions),
+        }
+    }
+
+    fn check(self, interaction: &Interaction) -> Result<()> {
+        if let Self::Required(required) = self {
+            check_permissions(
+                interaction.guild_id,
+                interaction_permissions(interaction),
+                required,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn interaction_permissions(interaction: &Interaction) -> Option<Permissions> {
+    interaction
+        .member
+        .as_ref()
+        .and_then(|member| member.permissions)
 }
 
 struct Definition {
     description: String,
     options: Vec<CommandOption>,
-    default_permissions: Option<Permissions>,
-    /// サブコマンドを持たない、普通のコマンドの関数。
-    handler: Option<Box<dyn SlashHandler>>,
-    /// サブコマンドと、そのグループ。持つ場合、`options` と `handler` は使わない。
+    permissions: PermissionPolicy,
+    /// サブコマンドを持たない、普通のコマンドの関数と補完。
+    handlers: RouteHandlers,
+    /// サブコマンドと、そのグループ。
     children: BTreeMap<String, Child>,
-    /// オートコンプリートの関数。キーは、サブコマンドの経路（コマンド名を除く）と引数名。
-    autocompletes: HashMap<(Vec<String>, String), Box<dyn AutocompleteHandler>>,
 }
 
 enum Child {
@@ -685,7 +810,7 @@ enum Child {
 struct SubDefinition {
     description: String,
     options: Vec<CommandOption>,
-    handler: Box<dyn SlashHandler>,
+    handlers: RouteHandlers,
 }
 
 impl Definition {
@@ -730,49 +855,70 @@ impl Definition {
 
     /// 受信側で、呼ぶ関数を引くための表に変える。
     fn into_route(self) -> Route {
-        let mut subs = HashMap::new();
-        for (name, child) in self.children {
-            match child {
-                Child::Sub(sub) => {
-                    subs.insert(vec![name], sub.handler);
-                }
-                Child::Group { subs: inner, .. } => {
-                    for (sub_name, sub) in inner {
-                        subs.insert(vec![name.clone(), sub_name], sub.handler);
-                    }
-                }
-            }
-        }
         Route {
-            root: self.handler,
-            subs,
-            autocompletes: self.autocompletes,
+            root: self.handlers,
+            children: self
+                .children
+                .into_iter()
+                .map(|(name, child)| {
+                    let child = match child {
+                        Child::Sub(sub) => ChildRoute::Sub(sub.handlers),
+                        Child::Group { subs, .. } => ChildRoute::Group(
+                            subs.into_iter()
+                                .map(|(name, sub)| (name, sub.handlers))
+                                .collect(),
+                        ),
+                    };
+                    (name, child)
+                })
+                .collect(),
+            permissions: self.permissions,
         }
     }
 }
 
 /// 一つのコマンドについて、サブコマンドの経路ごとの関数。
 struct Route {
-    root: Option<Box<dyn SlashHandler>>,
-    subs: HashMap<Vec<String>, Box<dyn SlashHandler>>,
-    autocompletes: HashMap<(Vec<String>, String), Box<dyn AutocompleteHandler>>,
+    root: RouteHandlers,
+    children: HashMap<String, ChildRoute>,
+    permissions: PermissionPolicy,
+}
+
+enum ChildRoute {
+    Sub(RouteHandlers),
+    Group(HashMap<String, RouteHandlers>),
+}
+
+struct RouteHandlers {
+    command: Option<Box<dyn SlashHandler>>,
+    autocompletes: HashMap<String, Box<dyn AutocompleteHandler>>,
 }
 
 impl Route {
     fn find(&self, path: &[&str]) -> Option<&dyn SlashHandler> {
-        if path.is_empty() {
-            return self.root.as_deref();
-        }
-        let key: Vec<String> = path.iter().map(|part| (*part).to_owned()).collect();
-        self.subs.get(&key).map(AsRef::as_ref)
+        self.handlers(path)?.command.as_deref()
     }
 
     fn find_autocomplete(&self, path: &[&str], option: &str) -> Option<&dyn AutocompleteHandler> {
-        let key = (
-            path.iter().map(|part| (*part).to_owned()).collect(),
-            option.to_owned(),
-        );
-        self.autocompletes.get(&key).map(AsRef::as_ref)
+        self.handlers(path)?
+            .autocompletes
+            .get(option)
+            .map(AsRef::as_ref)
+    }
+
+    fn handlers(&self, path: &[&str]) -> Option<&RouteHandlers> {
+        match path {
+            [] => Some(&self.root),
+            [sub] => match self.children.get(*sub)? {
+                ChildRoute::Sub(handlers) => Some(handlers),
+                ChildRoute::Group(_) => None,
+            },
+            [group, sub] => match self.children.get(*group)? {
+                ChildRoute::Group(subs) => subs.get(*sub),
+                ChildRoute::Sub(_) => None,
+            },
+            _ => None,
+        }
     }
 }
 
@@ -815,7 +961,7 @@ impl ActiveSlashCommands {
         &self,
         initial: InitialResponder<'_>,
         data: &CommandData,
-        path: &[&str],
+        path: Option<&[&str]>,
         hooks: &Hooks,
     ) {
         let mut ctx = AutocompleteContext {
@@ -823,29 +969,20 @@ impl ActiveSlashCommands {
             data,
             responded: false,
         };
-        let name = path.join(" ");
-        let Some(handler) = self
-            .handlers
-            .get(&data.id)
-            .and_then(|route| route.find_autocomplete(sub_path(path), ctx.focused_name()))
-        else {
-            // 関数のない引数には、候補なしを返して、入力欄を読み込み中のままにしない。
-            if let Err(error) = ctx.respond_empty_if_needed().await {
-                hooks
-                    .reporter
-                    .report(ErrorSource::Response, Some(&name), &error);
-            }
-            return;
-        };
-        if let Err(error) = handler.call(&mut ctx).await {
-            hooks
-                .reporter
-                .report(ErrorSource::SlashCommand, Some(&name), &error);
+        let handler = path.and_then(|path| {
+            self.handlers
+                .get(&data.id)
+                .filter(|route| route.permissions.check(initial.interaction).is_ok())
+                .and_then(|route| route.find_autocomplete(path, ctx.focused_name()))
+        });
+        if let Some(handler) = handler
+            && let Err(error) = handler.call(&mut ctx).await
+        {
+            report_command_error(hooks, ErrorSource::SlashCommand, data, &error);
         }
+        // 権限や関数がない場合も、空の候補を返す。
         if let Err(error) = ctx.respond_empty_if_needed().await {
-            hooks
-                .reporter
-                .report(ErrorSource::Response, Some(&name), &error);
+            report_command_error(hooks, ErrorSource::Response, data, &error);
         }
     }
 
@@ -859,9 +996,8 @@ impl ActiveSlashCommands {
         let Some(data) = self.command_data(interaction) else {
             return;
         };
-        let path = command_path(data);
-        let full_name = path.join(" ");
-        let name = Some(full_name.as_str());
+        let mut path_buffer = [""; 2];
+        let path = routing_path(&data.options, &mut path_buffer);
         let initial = InitialResponder {
             http,
             interaction,
@@ -869,22 +1005,24 @@ impl ActiveSlashCommands {
             info: &hooks.info,
         };
         if interaction.kind == InteractionType::ApplicationCommandAutocomplete {
-            self.dispatch_autocomplete(initial, data, &path, hooks)
-                .await;
+            self.dispatch_autocomplete(initial, data, path, hooks).await;
             return;
         }
-        let Some(handler) = self
-            .handlers
-            .get(&data.id)
-            .and_then(|route| route.find(sub_path(&path)))
-        else {
-            hooks
-                .reporter
-                .report(ErrorSource::SlashCommand, name, &Error::CommandUnavailable);
+        let Some((route, handler)) = path.and_then(|path| {
+            self.handlers
+                .get(&data.id)
+                .and_then(|route| route.find(path).map(|handler| (route, handler)))
+        }) else {
+            report_command_error(
+                hooks,
+                ErrorSource::SlashCommand,
+                data,
+                &Error::CommandUnavailable,
+            );
             if let Some(text) = &hooks.messages.slash_command_unavailable
                 && let Err(error) = initial.message(text, true).await
             {
-                hooks.reporter.report(ErrorSource::Response, name, &error);
+                report_command_error(hooks, ErrorSource::Response, data, &error);
             }
             return;
         };
@@ -895,12 +1033,14 @@ impl ActiveSlashCommands {
             data,
             response_state: &mut response_state,
         };
-        let check_failed = match handler.call(&mut ctx).await {
+        let result = match route.permissions.check(interaction) {
+            Ok(()) => handler.call(&mut ctx).await,
+            Err(error) => Err(error),
+        };
+        let check_failed = match result {
             Ok(()) => false,
             Err(error) => {
-                hooks
-                    .reporter
-                    .report(ErrorSource::SlashCommand, name, &error);
+                report_command_error(hooks, ErrorSource::SlashCommand, data, &error);
                 matches!(error, Error::Check(_))
             }
         };
@@ -914,7 +1054,7 @@ impl ActiveSlashCommands {
             return;
         };
         if let Err(error) = ctx.reply_fallback(text, check_failed).await {
-            hooks.reporter.report(ErrorSource::Response, name, &error);
+            report_command_error(hooks, ErrorSource::Response, data, &error);
         }
     }
 }
@@ -967,11 +1107,7 @@ impl<'a> SlashContext<'a> {
     /// Discord が、ロールとチャンネルごとの上書きを反映して計算した値です。
     /// 管理者は、すべての権限を持つものとして返ります。
     pub fn permissions(&self) -> Option<Permissions> {
-        self.initial
-            .interaction
-            .member
-            .as_ref()
-            .and_then(|member| member.permissions)
+        interaction_permissions(self.initial.interaction)
     }
 
     /// サーバーの中で呼ばれたことを確認し、その ID を返します。
@@ -1492,11 +1628,16 @@ mod tests {
         ActiveSlashCommands, AllowedMentions, AutocompleteContext, CommandData, CommandDataOption,
         CommandOptionType, CommandOptionValue, CommandType, Error, GuildMarker, Id,
         InitialResponder, InitialResponse, Interaction, InteractionData, InteractionResponseType,
-        MessageFlags, Permissions, ReplyAction, ResponseState, ResponseStateError, Result, Route,
-        Scope, SlashCommands, SlashContext, command_path, initial_response, leaf_options,
-        v2_update_response,
+        MessageFlags, PermissionPolicy, Permissions, ReplyAction, ResponseState,
+        ResponseStateError, Result, Route, Scope, SlashCommands, SlashContext, command_path,
+        initial_response, leaf_options, routing_path, v2_update_response,
     };
-    use crate::ui::{Button, ComponentsV2, Embed, UiMessage};
+    use crate::{
+        RegistrationError,
+        hooks::Hooks,
+        ui::{Button, ComponentsV2, Embed, UiMessage},
+    };
+    use twilight_http::Client;
 
     async fn handler(_: &mut SlashContext<'_>) -> Result<()> {
         Ok(())
@@ -1583,11 +1724,14 @@ mod tests {
         handlers.insert(
             Id::new(5),
             Route {
-                root: Some(Box::new(async |_: &mut SlashContext<'_>| -> Result<()> {
-                    Ok(())
-                })),
-                subs: HashMap::new(),
-                autocompletes: HashMap::new(),
+                root: super::RouteHandlers {
+                    command: Some(Box::new(async |_: &mut SlashContext<'_>| -> Result<()> {
+                        Ok(())
+                    })),
+                    autocompletes: HashMap::new(),
+                },
+                children: HashMap::new(),
+                permissions: PermissionPolicy::Unrestricted,
             },
         );
         ActiveSlashCommands { scope, handlers }
@@ -1597,11 +1741,7 @@ mod tests {
     async fn a_failed_check_after_public_defer_sends_the_reason_only_in_a_private_followup()
     -> Result<()> {
         use std::time::Duration;
-        use tokio::{
-            io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-            net::TcpListener,
-            time::timeout,
-        };
+        use tokio::{net::TcpListener, time::timeout};
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1613,7 +1753,7 @@ mod tests {
             )
             .build();
         let mut commands = active(Scope::Global);
-        commands.handlers.get_mut(&Id::new(5)).unwrap().root =
+        commands.handlers.get_mut(&Id::new(5)).unwrap().root.command =
             Some(Box::new(async |ctx: &mut SlashContext<'_>| -> Result<()> {
                 ctx.defer().await?;
                 ctx.require_permissions(Permissions::MANAGE_MESSAGES)
@@ -1630,35 +1770,12 @@ mod tests {
                 ("PATCH", false, false),
                 ("POST", true, true),
             ] {
-                let (stream, _) = listener.accept().await?;
-                let mut stream = BufReader::new(stream);
-                let mut line = String::new();
-                stream.read_line(&mut line).await?;
-                assert_eq!(line.split_whitespace().next(), Some(method));
-                let mut length = 0;
-                loop {
-                    line.clear();
-                    if stream.read_line(&mut line).await? == 0 || line == "\r\n" {
-                        break;
-                    }
-                    if let Some((name, value)) = line.split_once(':')
-                        && name.eq_ignore_ascii_case("content-length")
-                    {
-                        length = value.trim().parse().unwrap();
-                    }
-                }
-                let mut body = vec![0; length];
-                stream.read_exact(&mut body).await?;
-                let body = String::from_utf8(body).unwrap();
+                let body = capture_response(&listener, method).await?;
                 assert_eq!(body.contains("private check failure"), contains_denial);
                 assert_eq!(body.contains("\"flags\":64"), private);
                 if method == "PATCH" {
                     assert!(body.contains("処理を終了しました。"));
                 }
-                stream
-                    .get_mut()
-                    .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
-                    .await?;
             }
             Ok::<_, std::io::Error>(())
         };
@@ -1671,6 +1788,179 @@ mod tests {
         .await
         .map_err(Error::handler)?;
         server.map_err(Error::handler)
+    }
+
+    async fn capture_response(
+        listener: &tokio::net::TcpListener,
+        method: &str,
+    ) -> std::io::Result<String> {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let (stream, _) = listener.accept().await?;
+        let mut stream = BufReader::new(stream);
+        let mut line = String::new();
+        stream.read_line(&mut line).await?;
+        assert_eq!(line.split_whitespace().next(), Some(method));
+        let mut length = 0;
+        loop {
+            line.clear();
+            if stream.read_line(&mut line).await? == 0 || line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                length = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await?;
+        stream
+            .get_mut()
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .await?;
+        Ok(String::from_utf8(body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn protected_subcommand_checks_permissions_for_execution_and_autocomplete() -> Result<()>
+    {
+        use twilight_model::application::interaction::InteractionType;
+
+        let guild_id = Id::new(1);
+        let command_id = Id::new(5);
+        let mut slash = SlashCommands::for_guild(guild_id).replace_commands();
+        slash
+            .group_with_permissions("ping", "管理", Permissions::MANAGE_GUILD)?
+            .group("advanced", "詳細")?
+            .subcommand(
+                "run",
+                "実行",
+                vec![SlashCommands::string_option("key", "対象", true)],
+                async |ctx: &mut SlashContext<'_>| -> Result<()> {
+                    ctx.reply_ephemeral("protected command ran").await
+                },
+            )?;
+        slash.autocomplete(
+            &["ping", "advanced", "run"],
+            "key",
+            async |ctx: &mut AutocompleteContext<'_>| -> Result<()> {
+                ctx.respond(vec![SlashCommands::string_choice(
+                    "protected suggestion",
+                    "key",
+                )])
+                .await
+            },
+        )?;
+        assert!(matches!(
+            slash.default_member_permissions("ping", Permissions::empty()),
+            Err(Error::Registration(
+                RegistrationError::CommandPermissionsAlreadyRequired { .. }
+            ))
+        ));
+        let mut registered = slash.replacement_commands()?;
+        assert_eq!(
+            registered[0].default_member_permissions,
+            Some(Permissions::MANAGE_GUILD)
+        );
+        registered[0].id = Some(command_id);
+        let commands = slash.bind(registered)?;
+        let mut interaction = command_interaction(Some(guild_id), Some(guild_id), command_id.get());
+        assert!(matches!(
+            commands.handlers[&command_id]
+                .permissions
+                .check(&interaction),
+            Err(Error::Check(crate::CheckFailure::PermissionsUnavailable))
+        ));
+        interaction.member = Some(twilight_model::guild::PartialMember {
+            avatar: None,
+            avatar_decoration_data: None,
+            banner: None,
+            communication_disabled_until: None,
+            deaf: false,
+            flags: twilight_model::guild::MemberFlags::empty(),
+            joined_at: None,
+            mute: false,
+            nick: None,
+            permissions: Some(Permissions::VIEW_CHANNEL),
+            premium_since: None,
+            roles: Vec::new(),
+            user: None,
+        });
+        assert!(matches!(
+            commands.handlers[&command_id].permissions.check(&interaction),
+            Err(Error::Check(crate::CheckFailure::MissingPermissions(required))) if required == Permissions::MANAGE_GUILD
+        ));
+        let Some(InteractionData::ApplicationCommand(data)) = &mut interaction.data else {
+            panic!("想定外の構造");
+        };
+        let nested_options = |value| {
+            vec![option(
+                "advanced",
+                CommandOptionValue::SubCommandGroup(vec![option(
+                    "run",
+                    CommandOptionValue::SubCommand(vec![option("key", value)]),
+                )]),
+            )]
+        };
+        data.options = nested_options(CommandOptionValue::String("key".into()));
+        interaction.token = "test-token".into();
+        let mut autocomplete = interaction.clone();
+        let Some(InteractionData::ApplicationCommand(data)) = &mut autocomplete.data else {
+            panic!("想定外の構造");
+        };
+        data.options = nested_options(CommandOptionValue::Focused(
+            "k".into(),
+            CommandOptionType::String,
+        ));
+        autocomplete.kind = InteractionType::ApplicationCommandAutocomplete;
+
+        let mut allowed = interaction.clone();
+        allowed.member.as_mut().unwrap().permissions = Some(Permissions::MANAGE_GUILD);
+        let mut allowed_autocomplete = autocomplete.clone();
+        allowed_autocomplete.member.clone_from(&allowed.member);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(Error::handler)?;
+        let http = Client::builder()
+            .proxy(
+                listener.local_addr().map_err(Error::handler)?.to_string(),
+                true,
+            )
+            .build();
+        let mut hooks = Hooks::default();
+        hooks.messages.check_failed = Some("private check failure".into());
+        let (_, timing) = crate::timing::Pending::new((), None).begin();
+        for (input, expected, absent) in [
+            (
+                &interaction,
+                "private check failure",
+                "protected command ran",
+            ),
+            (&allowed, "protected command ran", "private check failure"),
+            (&autocomplete, "\"choices\":[]", "protected suggestion"),
+            (
+                &allowed_autocomplete,
+                "protected suggestion",
+                "private check failure",
+            ),
+        ] {
+            let (_, response) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    commands.dispatch(&http, input, timing, &hooks),
+                    capture_response(&listener, "POST"),
+                )
+            })
+            .await
+            .map_err(Error::handler)?;
+            let response = response.map_err(Error::handler)?;
+            assert!(response.contains(expected), "{response}");
+            assert!(!response.contains(absent), "{response}");
+            if input.kind == InteractionType::ApplicationCommand {
+                assert!(response.contains("\"flags\":64"), "{response}");
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -1711,6 +2001,41 @@ mod tests {
         };
         assert_eq!(
             commands[0].default_member_permissions,
+            Some(Permissions::BAN_MEMBERS)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restricted_registration_sets_discord_default_permissions() -> Result<()> {
+        let mut global = SlashCommands::global();
+        assert!(
+            global
+                .register_with_permissions("ban", "追放", vec![], Permissions::BAN_MEMBERS, handler)
+                .is_err()
+        );
+        let mut slash = SlashCommands::for_guild(Id::new(1)).replace_commands();
+        slash.register_with_permissions(
+            "admin",
+            "管理",
+            vec![],
+            Permissions::ADMINISTRATOR,
+            handler,
+        )?;
+        slash.register_with_permissions(
+            "ban",
+            "追放",
+            vec![],
+            Permissions::BAN_MEMBERS,
+            handler,
+        )?;
+        let commands = slash.replacement_commands()?;
+        assert_eq!(
+            commands[0].default_member_permissions,
+            Some(Permissions::empty())
+        );
+        assert_eq!(
+            commands[1].default_member_permissions,
             Some(Permissions::BAN_MEMBERS)
         );
         Ok(())
@@ -1787,6 +2112,10 @@ mod tests {
             target_id: None,
         };
         assert_eq!(command_path(&data), ["config", "advanced", "set"]);
+        assert_eq!(
+            routing_path(&data.options, &mut [""; 2]),
+            Some(["advanced", "set"].as_slice())
+        );
         let leaf = leaf_options(&data.options);
         assert_eq!(leaf.len(), 1);
         assert_eq!(leaf[0].name, "value");
@@ -1796,7 +2125,23 @@ mod tests {
             ..data
         };
         assert_eq!(command_path(&plain), ["config"]);
+        assert_eq!(
+            routing_path(&plain.options, &mut [""; 2]),
+            Some([].as_slice())
+        );
         assert_eq!(leaf_options(&plain.options).len(), 1);
+
+        let malformed = [option(
+            "one",
+            CommandOptionValue::SubCommandGroup(vec![option(
+                "two",
+                CommandOptionValue::SubCommandGroup(vec![option(
+                    "three",
+                    CommandOptionValue::SubCommand(vec![]),
+                )]),
+            )]),
+        )];
+        assert!(routing_path(&malformed, &mut [""; 2]).is_none());
     }
 
     #[test]
@@ -1866,13 +2211,26 @@ mod tests {
                 vec![SlashCommands::string_option("key", "名前", true)],
                 handler,
             )?;
+            config.group("advanced", "詳細設定")?.subcommand(
+                "set",
+                "設定",
+                vec![SlashCommands::string_option("key", "名前", true)],
+                handler,
+            )?;
         }
         // サブコマンドを持つコマンドの直下には付けられない。
         assert!(slash.autocomplete(&["config"], "key", complete).is_err());
         slash.autocomplete(&["config", "set"], "key", complete)?;
+        slash.autocomplete(&["config", "advanced", "set"], "key", complete)?;
         let route = slash.entries.remove("config").unwrap().into_route();
         assert!(route.find_autocomplete(&["set"], "key").is_some());
+        assert!(
+            route
+                .find_autocomplete(&["advanced", "set"], "key")
+                .is_some()
+        );
         assert!(route.find_autocomplete(&["set"], "other").is_none());
+        assert!(route.find_autocomplete(&["advanced"], "key").is_none());
         assert!(route.find_autocomplete(&[], "key").is_none());
         Ok(())
     }
