@@ -34,6 +34,47 @@ discord.py と比べて不便な点を洗い出し、Akari の方針（シンプ
 - Bot 自身の権限、別のメンバーの権限、ロール階層、サーバーの所有者、ロールの所持は調べられません。
 - 毎回 `.await?` と `contains` を書く必要があります。足りない権限を名前で取り出す方法がありません。
 
+### 層 0: 数値やビットを名前で扱う
+
+d.py は、Discord が数値で返す権限、フラグ、設定の種類を、名前で読み書きできる型にしています。Twilight は、これらをすでに型（ビットフラグと列挙型）にしているので、生の数値を書く必要はありません。足りないのは、d.py にある次の補助です。
+
+- `perms.manage_messages` のような、名前のアクセサ
+- `text()`、`voice()` などのプリセット
+- 持っているものを名前で列挙する、不足分を調べる
+- 人が読める名前（`MANAGE_MESSAGES` → 「メッセージの管理」）
+
+#### 作り方（原則から決めたこと）
+
+| 原則 | 決めたこと |
+| --- | --- |
+| シンプル | ラッパー型を作りません。Twilight の `Permissions` などに、拡張トレイトを足します。変換は不要で、`ctx.can(..)` が返す型と同じ型をそのまま使えます。 |
+| 規則的 | 全部のフラグ型が、同じ名前のメソッドを持ちます。フラグ 1 つにつき名前を 1 か所だけ書く表から、アクセサ、日本語名、列挙を、マクロで生成します。 |
+| 重複させない | 更新は、すでにある `insert`、`remove`、`set`（ビットフラグの標準）を使います。`update(**kwargs)` に当たる別の方法は足しません。 |
+| 高速 | すべて `const` かインライン化できる関数です。割り当ては行わず、列挙はイテレーターで返します。通信は発生しません。 |
+| 安定 | テストで、Twilight の全ビットが表に載っていることを確かめます。Twilight が新しい権限を足すと、表に無い状態を CI が検出して落ちます。表に無いビットは、表示では 16 進数で出し、黙って捨てません。 |
+| わかりやすい | `use disnana_akari::prelude::*;` でトレイトを取り込みます。名前のアクセサは、エディターの補完で見つかります。 |
+
+#### 対象
+
+| 対象 | 追加するもの |
+| --- | --- |
+| `Permissions` | 名前のアクセサ、プリセット（`text`、`voice`、`moderator` など）、`names()`、`labels()`、日本語名 |
+| `MessageFlags`、`UserFlags`、`SystemChannelFlags`、`ChannelFlags` | 名前のアクセサ、`names()`、日本語名 |
+| `ChannelType`、`VerificationLevel`、通知レベル、コンテンツフィルター、MFA、NSFW レベル、ブーストの段階 | 日本語名（`label()`） |
+
+<!-- no-check -->
+```rust
+use disnana_akari::prelude::*;
+
+let perms = ctx.permissions().await?;
+if perms.manage_messages() { /* ... */ }
+for label in (Permissions::text() - perms).labels() {
+    // 「メッセージの管理」のような日本語名で、不足分を列挙できる
+}
+```
+
+`CheckFailure::MissingPermissions` のメッセージも、この日本語名で表示します（`Debug` の表示は変えません）。
+
 ### 層 1: 登録時に必要な権限を宣言する
 
 <!-- no-check -->
