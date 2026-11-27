@@ -6,7 +6,7 @@
 
 1. **最初の応答は 3 秒以内。** 間に合わないと、Discord に「アプリケーションが応答しませんでした」と表示されます。
 2. **最初の応答は 1 回だけ。** 2 回目以降は、`followup`（追加のメッセージ）を使います。
-3. **応答の期限は 15 分。** 最初の応答から 15 分たつと、続きのメッセージは送れません。
+3. **応答に使うトークンの有効期間は 15 分。** 続きのメッセージは有効期間内に送ります。
 
 ## 流れ
 
@@ -49,7 +49,7 @@ async fn report(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 `_ephemeral` が付くメソッドは、操作した本人にだけ見えるメッセージを送ります。エラーの説明や、個人向けの結果に向いています。
 
-**公開範囲は最初の応答で決まります。** 公開の `defer` のあとに `reply_ephemeral` を呼ぶと、エラーになります。本人にだけ見せたいときは、最初から `defer_ephemeral` を使ってください。
+**元の応答の公開範囲は、最初の応答で決まります。** 公開の `defer` のあとに `reply_ephemeral` を呼ぶと、エラーになります。元の応答を本人にだけ見せたいときは、最初から `defer_ephemeral` を使ってください。追加メッセージの公開範囲は、呼び出す `followup` 系メソッドで個別に選べます。
 
 ## 使えるメソッドの一覧
 
@@ -60,7 +60,31 @@ async fn report(ctx: &mut SlashContext<'_>) -> Result<()> {
 | 処理中にする | `defer` / `defer_ephemeral` | `defer_update` | `defer` / `defer_ephemeral` |
 | 元のメッセージを更新 | – | `update_message` / `update_v2` | – |
 | 追加のメッセージ | `followup` / `followup_ephemeral` | `followup` / `followup_ephemeral` | `followup` / `followup_ephemeral` |
+| ファイル付きの追加メッセージ | `followup_files` / `followup_files_ephemeral` | `followup_files` / `followup_files_ephemeral` | `followup_files` / `followup_files_ephemeral` |
 | フォームを開く | `show_modal` | `show_modal` | – |
+
+## 元の応答を取得・更新・削除する
+
+スラッシュコマンドやコンテキストメニューの `SlashContext` では、`original_response().await` で初回の応答メッセージを取得できます。非公開で送った応答も対象です。`edit_original_response` は本文だけ、`edit_original_ui` は本文・Embed・従来の部品、`edit_original_v2` は Components V2 の部品を更新します。公開範囲は元のままです。
+
+```rust
+use disnana_akari::{Result, SlashContext};
+
+async fn report(ctx: &mut SlashContext<'_>) -> Result<()> {
+    ctx.reply_ephemeral("集計しています。").await?;
+    ctx.edit_original_response("集計が終わりました。").await?;
+    let original = ctx.original_response().await?;
+    ctx.followup_ephemeral(&format!("応答 ID: {}", original.id)).await
+}
+```
+
+応答を取り除く場合は `delete_original_response().await` を使います。フォームを開く操作は元の応答メッセージを作りません。応答がない状態や削除済みの状態では、取得・編集・削除がエラーになります。遅延応答だけを削除した場合は追加応答もできません。追加応答を送る場合は、先に遅延応答を完成させてください。[Discord の応答メッセージ API](https://docs.discord.com/developers/interactions/receiving-and-responding#get-original-interaction-response)
+
+## 送る前に制限を確認する
+
+Akari の返信メソッドは、通常の本文が2,000文字以内か、HTTP リクエストを送る前に確認します。自分で確認したいときは `validation::message_content` を使います。`UiMessage::validate`、`ComponentsV2::validate`、`Modal::validate` は、本文や部品の配置、個数などをまとめて確認できます。
+
+添付付きの V2 応答は、保持する分と新しいアップロードの合計が10件を超える場合に失敗します。Discord が Interaction に通知した1ファイルのサイズ上限も、ファイル本体を読み直さずに確認します。通常のチャンネル投稿でサイズ上限が分からない場合は、Discord の送信結果を確認します。[Discord のメッセージ仕様](https://docs.discord.com/developers/resources/message#create-message) · [ファイルの送信仕様](https://docs.discord.com/developers/reference#uploading-files)
 
 ## 何も応答しなかったら
 
@@ -75,3 +99,57 @@ Akari が、種類ごとに補います。文言は [`Messages`](errors.md) で�
 
 > [!TIP]
 > エラーの原因を利用者に説明したいときは、`Err` を返さずに、自分で `reply_ephemeral` で理由を伝えて `Ok(())` で終わります。
+
+## 通常の返信にファイルを添付する
+
+`reply_files` はテキスト、スラッシュ、ハイブリッドで使えます。添付だけを送りたいときは本文に空文字を渡します。スラッシュの `reply_files_ephemeral` は実行者のみに表示します。先に defer した場合は、その応答の表示範囲に合わせます。
+
+```rust
+use disnana_akari::{
+    CommandContext, Result, model::http::attachment::Attachment, validation::AttachmentLimits,
+};
+
+async fn report(ctx: CommandContext<'_>) -> Result<()> {
+    let files = [Attachment::from_bytes(
+        "report.txt".into(),
+        b"Report ready".to_vec(),
+        0,
+    )];
+    let limits = AttachmentLimits::default().max_file_bytes(Some(1024 * 1024));
+    ctx.reply_files("", &files, limits).await
+}
+```
+
+`AttachmentLimits` は Components V2 と共有できます。通常の返信も、本文の長さ、添付数、名前と ID、ファイルサイズを送信前に検証します。チャンネルへの添付返信では multipart の情報も含めて 25 MiB のリクエスト上限を確認します。アプリ独自の上限を使わない場合は `AttachmentLimits::default()` を渡します。[Discord のメッセージ作成仕様](https://docs.discord.com/developers/resources/message#create-message)
+
+## 追加のメッセージにファイルを添付する
+
+公開の追加メッセージには `followup_files`、操作した本人にだけ送るときは `followup_files_ephemeral` を使います。ファイルだけを送るときは本文に空文字を指定できます。通常の添付返信と同じ `AttachmentLimits` を渡します。[Discord の追加メッセージ API](https://docs.discord.com/developers/interactions/receiving-and-responding#create-followup-message)
+
+スラッシュコマンドとフォーム送信では、`defer` や `defer_ephemeral` のあとに `reply` などで待機表示を完成させてから送ります。下の例では、集計の完了を知らせたあと、結果ファイルを本人にだけ追加で送ります。
+
+```rust
+use disnana_akari::{
+    Result, SlashContext, model::http::attachment::Attachment, validation::AttachmentLimits,
+};
+
+async fn export_report(ctx: &mut SlashContext<'_>) -> Result<()> {
+    ctx.defer_ephemeral().await?;
+    let files = [Attachment::from_bytes(
+        "summary.csv".into(),
+        b"item,count\nprocessed,12\n".to_vec(),
+        0,
+    )];
+    ctx.reply("集計が完了しました。").await?;
+    ctx.followup_files_ephemeral("", &files, AttachmentLimits::default())
+        .await
+}
+```
+
+ボタンと選択メニューでは `defer_update` で操作を受け付けた時点から、同じメソッドでファイル付きの追加メッセージを送れます。ボタンやメニューが付いた元の投稿はそのままです。
+
+## 初回応答の失敗を調べる
+
+`Bot::on_info` の `InfoEvent::InteractionResponseFailed` は、初回応答の HTTP リクエストが失敗したときに届きます。JSON と添付付きのどちらでも、Interaction ID、HTTP ステータス、Discord の数値エラーコード、キュー待ち、REST 待ちを確認できます。トークンとレスポンス本文は含みません。
+
+たとえば、Discord のコード `10062` は Interaction を見つけられなかったことを示します。Bot が受信してからの経過時間を合わせて見れば、Discord が求める3秒の期限と照らし合わせられます。[Discord の応答期限](https://docs.discord.com/developers/interactions/receiving-and-responding#interaction-callback) · [Discord のエラー番号](https://docs.discord.com/developers/topics/opcodes-and-status-codes#json)

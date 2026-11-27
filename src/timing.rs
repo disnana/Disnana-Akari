@@ -45,6 +45,10 @@ impl<T> Pending<T> {
         }
     }
 
+    pub(crate) fn event(&self) -> &T {
+        &self.event
+    }
+
     pub(crate) fn begin(self) -> (T, Timing) {
         let started_at = Instant::now();
         let timing = Timing {

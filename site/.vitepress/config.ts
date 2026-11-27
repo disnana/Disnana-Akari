@@ -59,6 +59,7 @@ export default defineConfig({
           { text: 'ハイブリッドコマンド', link: '/guide/hybrid-commands' },
           { text: '権限の確認', link: '/guide/permissions' },
           { text: 'モジュールで整理する', link: '/guide/modules' },
+          { text: '定期処理', link: '/guide/tasks' },
           { text: 'ステータスとアクティビティ', link: '/guide/presence' },
           { text: 'イベントを受け取る', link: '/guide/events' },
           { text: '応答のしかた', link: '/guide/responding' },
@@ -71,6 +72,7 @@ export default defineConfig({
           { text: 'クールダウン', link: '/guide/cooldowns' },
           { text: 'Akari の動き方', link: '/guide/how-it-works' },
           { text: 'Twilight を直接使う', link: '/guide/twilight' },
+          { text: 'Discord の REST 操作', link: '/guide/discord-rest' },
         ],
       },
       {

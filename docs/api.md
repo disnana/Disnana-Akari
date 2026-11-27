@@ -16,6 +16,13 @@
 | `bot.on_error(hook) -> Bot` | エラーを一件ずつ受け取る関数を設定します。[エラーと自動で送る文言](#エラーと自動で送る文言) |
 | `bot.with_messages(messages) -> Bot` | Akari が利用者へ自動で送る文言を設定します。 |
 | `bot.start().await -> Result<()>` | 設定したイベントとスラッシュコマンドで Bot を起動します。 |
+| `bot.with_shutdown() -> (Bot, ShutdownHandle)` | `shutdown.request()` で停止を要求できます。要求後は、Gateway の切断を最大2秒、受付済みの処理を最大5秒、並行して待ち、起動メソッドが正常に終了します。 |
+| `bot.with_recommended_shards() -> Bot` | Discord の推奨シャード数とセッション開始枠を起動時に調べ、同じプロセスで全シャードを起動します。通常は単一接続です。 |
+| `bot.with_voice_gateway() -> (Bot, VoiceGateway)` | ボイスチャンネルの参加・移動・退出を担当シャードへ要求します。`GUILD_VOICE_STATES` が必要です。 |
+| `bot.with_member_cache(capacity) -> (Bot, MemberCacheHandle)` | 保存済みメンバーを `handle.get(guild, user)` または `handle.guild_members(guild)` で参照できます。 |
+| `bot.cache_members(capacity)` | キャッシュ付きのメンバー更新・退出通知が使う最大保存件数です。`GUILDS` と `GUILD_MEMBERS` が必要です。 |
+| `bot.cache_messages(capacity)` | キャッシュ付きの編集・削除イベントが使うメッセージの最大保存件数を指定します。既定値と `0` は無効です。 |
+| `bot.with_gateway_status() -> (Bot, GatewayStatusHandle)` | `status.shards()` で現在のシャード一覧を読み、`status.subscribe()` で変化を購読します。 |
 | `bot.run_commands(commands).await -> Result<()>` | 上記に加えて、テキストコマンドを実行します。 |
 | `bot.run(on_message).await -> Result<()>` | テキストコマンドの代わりに、受信メッセージを自前の `async fn on_message(ctx: Context<'_>) -> Result<()>` で処理します。 |
 
@@ -34,6 +41,7 @@
 Akari は Intent を **自動では追加しません**。要求する Intent は、`with_intents` と `add_intents` で指定したものだけです。`with_intents` で基本の集合を決め、`add_intents` で足します。両方を指定した場合は、呼ぶ順序に関係なく和集合になります。`Intents` は `disnana_akari::model::gateway::Intents` から参照できます。
 
 - テキストコマンド、`Events::on_message`、`Bot::run` のメッセージ処理を使うには、`GUILD_MESSAGES` と `MESSAGE_CONTENT` が必要です。足りない場合は、Discord に接続する前に、足りない Intent と対処を示すエラーを返します。
+- メッセージの raw イベントは、サーバーでは `GUILD_MESSAGES`、DM の編集・単独削除では `DIRECT_MESSAGES` を指定します。一括削除を登録する場合は `GUILD_MESSAGES` が必要です。編集後の本文などを受け取れるかは Discord の `MESSAGE_CONTENT` Intent とその適用条件に従います。
 - `MESSAGE_CONTENT` は特権 Intent です。Developer Portal の Bot ページでも有効にします。許可されていないと、Gateway がコード `4014` で接続を閉じます。このときの理由は、`on_error` に報告します。
 - スラッシュコマンド、ボタンや選択メニューの操作、フォーム、`on_ready` だけを使う場合は、Intent は不要です。
 
@@ -62,8 +70,8 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | 処理 | 同時実行枠 | 受信キュー | 混雑時 |
 | --- | --- | --- | --- |
 | `Bot::run_commands` のテキストコマンド | 8 件 | 64 件 | `on_error` に報告します。`Messages::text_command_busy` を設定した場合だけ、元の投稿に返信します。 |
-| スラッシュコマンドと登録済みのボタン、選択メニュー、フォーム送信 | 合計 8 件 | 合計 64 件 | `on_error` に報告し、`Messages::interaction_busy`（既定あり）を本人にだけ返します。 |
-| `on_ready`、`on_message` と `Bot::run` の自前ハンドラー | 1 件 | 64 件 | 新しく届いたイベントを破棄し、`on_error` に報告します。 |
+| スラッシュコマンド、引数補完、登録済みのボタン、選択メニュー、フォーム送信 | 合計 8 件 | 合計 64 件 | `on_error` に報告します。補完は空の候補を返します。その他の操作には `Messages::interaction_busy`（既定あり）を本人にだけ返します。 |
+| `on_ready`、`on_message`、メッセージの raw イベントと `Bot::run` の自前ハンドラー | 1 件 | 64 件 | 新しく届いたイベントを破棄し、`on_error` に報告します。 |
 
 テキストコマンド用のキューには、登録名に一致したメッセージだけが入ります。`on_ready` と `on_message` は受信順に処理し、一件のイベントに対する関数は登録順に呼びます。フォーム送信を含むコンポーネント操作は、スラッシュコマンドと同じ枠で並行して処理します。`Bot::run` の自前ハンドラーは、そのメッセージに対する `Events::on_message` より先に実行します。`Bot::run_commands` のコマンドと `on_message` は独立して進むため、どちらが先に完了するかは処理時間によって変わります。
 
@@ -76,9 +84,18 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | メソッド | 動作 |
 | --- | --- |
 | `Commands::new(prefix) -> Result<Commands>` | `!` などのプレフィックスを指定します。空文字列と空白を含む値はエラーです。 |
+| `Commands::with_prefix_resolver(resolver) -> Commands` | 投稿を受け取る非同期関数が返す `CommandPrefixes` で判定します。候補の検証は `CommandPrefixes::new(&[&str])`、判定の無効化は `CommandPrefixes::default()` を使います。 |
+| `commands.add_check(check)` | 登録済みテキストコマンドに適用する共通の `CommandCheck` を追加します。 |
+| `Commands::with_prefixes(prefixes) -> Result<Commands>` | 複数のプレフィックスで同じコマンド一覧を使います。一致する候補が複数ある場合は最も長いものを選びます。 |
 | `commands.register(name, handler) -> Result<()>` | プレフィックスを省いた名前で非同期関数を登録します。空の名前、空白がある名前、重複した名前はエラーです。 |
+| `commands.register_with_aliases(name, aliases, handler) -> Result<()>` | 正式名と別名を一括で登録します。どの名前からも同じ関数を呼び、1 件でも名前が無効なら登録全体が失敗します。 |
+| `commands.group(name)` / `commands.group_with_aliases(name, aliases)` | テキストコマンドを階層にまとめます。`TextCommandGroup` へサブコマンド、子グループ、グループ名だけで呼んだ場合の `fallback` を登録できます。 |
 | `commands.dispatch(ctx).await -> Result<()>` | 該当するコマンドを実行し、ハンドラーが返したエラーを呼び出し元に返します。`Bot::run` の独自処理にも組み込めます。 |
+| `ctx.command_name() -> &str` / `ctx.invoked_with() -> &str` | 登録した正式名と、ユーザーが入力した名前をそれぞれ取得します。 |
+| `ctx.prefix() -> &str` | 実際に使われたプレフィックスを取得します。 |
+| `ctx.qualified_name() -> &str` | グループ名を含む正式なコマンド経路を、空白で区切った文字列で返します。 |
 | `ctx.args() -> &str` | コマンド名に続く本文を借ります。前後の空白を除去し、引数なしの場合は空文字列を返します。 |
+| `ctx.arguments() -> Arguments<'_>` | 空白区切りで引数を順に読みます。引用符やかぎ括弧の中に空白を含められます。閉じ忘れなどは `ArgumentError` で返します。 |
 | `ctx.context() -> &Context<'_>` | 元のメッセージを扱うコンテキストを借ります。 |
 | `ctx.timing() -> Timing` | このテキストコマンド呼び出しの測定値を取得します。 |
 | `ctx.reply(content).await -> Result<()>` | コマンドのメッセージに返信し、返信先の投稿者や本文中のメンションへの通知を抑止します。 |
@@ -93,11 +110,15 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 
 ## `SlashCommands` と `SlashContext<'_>`
 
+`slash.register_user_menu(name, handler)` と `slash.register_message_menu(name, handler)` はユーザー・メッセージのコンテキストメニューにコマンドを登録します。ハンドラーへの第 2 引数は `UserMenuTarget<'_>` または `&model::channel::Message` です。どちらも `SlashContext` で実行者を確認し、応答できます。対象情報が Discord の通知にない場合は `Error::CommandTargetUnavailable` を報告します。
+
+`slash.set_command_settings(kind, name, settings)` で登録済みのコマンドに `CommandSettings` を付けます。グローバルの利用場所とインストール先、翻訳名・翻訳説明、年齢制限を設定できます。`SlashContext::locale` と `guild_locale` で Discord が通知したロケールを取得できます。
+
 | メソッド | 動作 |
 | --- | --- |
 | `SlashCommands::for_guild(guild_id) -> SlashCommands` | Discord のサーバー ID を指定して空のコマンド一覧を作ります。ID の型は `Id<GuildMarker>` です。 |
 | `Registry::new(&mut commands, slash, &mut events).add(&module)?` | `Module` を実装した型の `register(&self, &mut Registry)` を呼び、テキストコマンド、スラッシュコマンド、イベントをまとめて登録します。 |
-| `commands.autocomplete(path, option, handler) -> Result<()>` | 引数に、入力中の候補を返す関数を付けます。`path` はコマンド名（サブコマンドなら経路）、関数は `AutocompleteContext`（`focused()`、`respond(choices)`）を受け取ります。候補は `SlashCommands::{string_choice, integer_choice, number_choice}` で作ります。 |
+| `commands.autocomplete(path, option, handler) -> Result<()>` | 引数に、入力中の候補を返す関数を付けます。`path` はコマンド名（サブコマンドなら経路）、関数は `AutocompleteContext`（入力中の文字列は `focused()`、その引数の名前は `focused_name()`、候補を返すのは `respond(choices)`）を受け取ります。候補は `SlashCommands::{string_choice, integer_choice, number_choice}` で作ります。 |
 | `commands.group(name, description) -> Result<CommandGroup>` | サブコマンドをまとめるコマンドを作ります。`group.subcommand(name, description, options, handler)` と、`group.group(name, description)`（さらに 1 段）で登録します。 |
 | `SlashCommands::global() -> SlashCommands` | アプリ全体（すべてのサーバーと DM）向けに空のコマンド一覧を作ります。Discord 側の反映に時間がかかることがあります。 |
 | `commands.replace_commands() -> SlashCommands` | 起動時に、このアプリの同じ範囲（サーバー、またはグローバル）の全コマンドを、登録した一覧に一括で置き換えます。 |
@@ -119,6 +140,11 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.reply_ephemeral(content).await -> Result<()>` | 呼び出したユーザーだけに初回応答を送ります。`defer_ephemeral` の後は、その処理中の表示を本文に置き換えます。 |
 | `ctx.followup(content).await -> Result<()>` | 最初の本文を送った後に、チャンネルに追加のメッセージを送ります。 |
 | `ctx.followup_ephemeral(content).await -> Result<()>` | 最初の本文を送った後に、呼び出したユーザーだけに追加のメッセージを送ります。 |
+| `ctx.followup_files(content, files, limits).await -> Result<()>` | 元の応答を完成させた後、添付付きの追加メッセージをチャンネルへ送ります。 |
+| `ctx.followup_files_ephemeral(content, files, limits).await -> Result<()>` | 元の応答を完成させた後、添付付きの追加メッセージを呼び出したユーザーだけに送ります。 |
+| `ctx.original_response().await -> Result<Message>` | 元の応答メッセージを取得します。非公開の応答も取得できます。 |
+| `ctx.edit_original_response(content)` / `ctx.edit_original_ui(&message)` / `ctx.edit_original_v2(&message)` | 元の応答を編集します。遅延応答を完成させることもでき、いずれも公開範囲と添付を維持します。 |
+| `ctx.delete_original_response().await -> Result<()>` | 元の応答メッセージを削除します。遅延応答だけを削除した場合は、追加応答を送れません。 |
 
 ### 特定の権限を持つ人にコマンドを表示する
 
@@ -143,6 +169,10 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 権限チェックに失敗した場合の `Messages::check_failed` は、公開の `defer()` を済ませていても本人にだけ送ります。この場合、公開の待機表示は固定文言「処理を終了しました。」に変わります。待機表示も非公開にするには `defer_ephemeral()` を使います。
 
 ## `register_hybrid` と `HybridContext<'_>`
+
+`register_typed_hybrid` は、定義した `CommandOption` を使ってテキストとスラッシュの両方を検証し、ハンドラーの第 2 引数に `HybridArguments<'_>` を渡します。`string`、`integer`、`number`、`boolean`、`user_id`、`role_id`、`channel_id` で値を取得できます。テキストでは定義順に入力し、省略可能な引数は末尾に置きます。必須引数の不足や型・範囲の違反は `Error::HybridArgument` になります。
+
+`register_hybrid_group` は `HybridCommandGroup` に登録した経路をテキストとスラッシュの両方に追加します。いずれかの定義でエラーがあれば、グループの追加全体を中止します。`fallback(slash_name, description, handler)` は、テキストではグループ名だけ、スラッシュでは指定したサブコマンド名で呼び出せます。
 
 `register_hybrid(&mut commands, slash, name, description, options, handler)` は、テキストコマンドとスラッシュコマンドに同じ関数を登録します。二つ目の引数に `Some(&mut slash_commands)` を渡すと両方に登録し、`None` を渡すとテキストコマンドだけに登録します。`options` はスラッシュ側の入力欄の定義です。登録先に同名コマンドがある場合や、定義が登録先の形式に合わない場合は、追加前にエラーを返します。
 
@@ -172,6 +202,12 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 
 状態は Bot プロセス内に保存されます。別のコマンドや呼び出し方に個別の制限を設けるには、別の `Cooldown` を作ります。テキストとスラッシュで同じ `Cooldown` を使うと、待ち時間も共有できます。[Playground の適用例](tutorial.md)
 
+`Cooldown::<K>::per_key(rate, interval)` は、同じキー `K` で最初に通過してから `interval` の間に `rate` 回まで通します。`rate` には `NonZeroU32` を指定します。`check(key)` で判定し、チャンネル ID や複数の ID のタプルをキーにできます。すべての呼び出しで制限を共有する場合は `Cooldown::<()>` に `()` を渡します。
+
+### 同時に実行できる件数を制限する
+
+`ConcurrencyLimit::<K>::new(maximum)` で同じキーあたりの実行枠を作ります。上限は `NonZeroU16` です。`try_acquire(key)` は待たずに枠を取り、満杯時は `None` を返します。`acquire(key).await` は同じキーの待機列に入ります。取得した `ConcurrencyPermit` は処理が終わるまで変数で保持し、スコープを抜けると枠が戻ります。
+
 ## `Timing`
 
 | メソッド | 測定範囲 |
@@ -189,17 +225,39 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `Events::new() -> Events` | 空のイベントハンドラー一覧を作ります。 |
 | `events.on_ready(handler)` | Gateway が新規セッションを確立したときに受け取る `&Ready` を渡します。 |
 | `events.on_message(handler)` | 人が送った新着メッセージの `&Message` を渡します。通常の投稿とテキストコマンドの両方を受け取ります。 |
+| `events.on_member_update(handler)` / `on_member_remove(handler)` | 保存済みのメンバーの更新前後・退出前を `CachedMemberUpdate` / `CachedMemberRemove` として受け取ります。 |
+| `events.on_message_edit(handler)` | 保存済みのメッセージの更新前後を `&CachedMessageEdit` で渡します。 |
+| `events.on_message_delete(handler)` / `events.on_bulk_message_delete(handler)` | 保存済みの単独削除を `&Message`、保存済みの一括削除を `&[Arc<Message>]` で渡します。 |
+| `events.on_raw_message_edit(handler)` | 編集や Embed の更新など、Discord が送った部分更新を `&MessageUpdate` で渡します。 |
+| `events.on_raw_message_delete(handler)` | 単独削除のチャンネル・メッセージ ID を `&MessageDelete` で渡します。 |
+| `events.on_raw_bulk_message_delete(handler)` | サーバーでの一括削除を `&MessageDeleteBulk` で渡します。`ids` で削除された ID 一覧を取得できます。 |
+| `events.on_raw_reaction_add(handler)` / `events.on_raw_reaction_remove(handler)` | リアクションの追加と単独削除を `&ReactionAdd` / `&ReactionRemove` で渡します。 |
+| `events.on_raw_reaction_clear(handler)` / `events.on_raw_reaction_clear_emoji(handler)` | すべてのリアクションの削除、または指定した絵文字のリアクションの削除を `&ReactionRemoveAll` / `&ReactionRemoveEmoji` で渡します。 |
+| `events.on_raw_poll_vote_add(handler)` / `events.on_raw_poll_vote_remove(handler)` | 投票の追加・取り消しを `&MessagePollVoteAdd` / `&MessagePollVoteRemove` で渡します。 |
+| `events.on_raw_typing(handler)` | 入力開始を `&TypingStart` で渡します。 |
+| `events.on_gateway(handler)` | ハンドラーが受け取る `GatewayPayload` 型に応じて、サーバー、チャンネル、ロール、メンバー、スレッド、ピン、プレゼンス、音声状態の通知を受け取ります。必要な Intent は型と受信範囲によって異なります。 |
 | `events.on_button(custom_id, handler) -> Result<()>` | 指定した識別子に完全一致するボタンが押されたときに `&mut ButtonContext<'_>` を渡します。識別子は 1～100 文字で、Bot の登録一覧全体で、同じ識別子に関数を一つ登録できます。 |
 | `events.on_select(custom_id, handler) -> Result<()>` | 指定した識別子の文字列選択メニューが操作されたときに `&mut SelectContext<'_>` を渡します。 |
 | `events.on_user_select(custom_id, handler) -> Result<()>` | ユーザー選択時に `&mut UserSelectContext<'_>` を渡します。 |
 | `events.on_role_select(custom_id, handler) -> Result<()>` | ロール選択時に `&mut RoleSelectContext<'_>` を渡します。 |
 | `events.on_channel_select(custom_id, handler) -> Result<()>` | チャンネル選択時に `&mut ChannelSelectContext<'_>` を渡します。 |
 | `events.on_mentionable_select(custom_id, handler) -> Result<()>` | ユーザーとロールを候補に持つメニューの選択時に `&mut MentionableSelectContext<'_>` を渡します。 |
+| `events.on_dynamic_button(namespace, handler)` / `on_dynamic_select` / `on_dynamic_modal` | 機能名で操作を登録し、`ctx.dynamic_id()` で対象の識別子を取得します。ユーザー・ロール・チャンネル・メンション選択にも対応します。 |
 | `events.on_modal(custom_id, handler) -> Result<()>` | 指定した識別子のフォームが送信されたときに `&mut ModalContext<'_>` を渡します。 |
 
-`on_ready` と `on_message` には複数の関数を登録できます。各関数が返したエラーは `on_error` に報告され、次のハンドラーへ進みます。コマンドとイベントの順序は [ハンドラーの実行順](#ハンドラーの実行順) を参照してください。
+`on_ready`、`on_message`、メッセージの raw イベントには複数の関数を登録できます。各関数が返したエラーは `on_error` に報告され、次のハンドラーへ進みます。コマンドとイベントの順序は [ハンドラーの実行順](#ハンドラーの実行順) を参照してください。
+
+メッセージの raw イベントは受信順に処理し、新着メッセージと同じキューを使います。以前のメッセージを受信していなくても届き、Bot や Webhook の投稿にも発生します。編集前や削除時の内容を使いたい場合は `cache_messages` とキャッシュ付きイベントを使います。部分更新の `content` が `None` の場合、本文が変更されたかどうかはその通知だけでは判断できません。
+
+キャッシュ付きのメッセージイベントを登録した場合、`cache_messages` に正の上限と、対象に合うメッセージ Intent を設定します。一括削除には `GUILD_MESSAGES` が必要です。
+
+リアクションは `GUILD_MESSAGE_REACTIONS` / `DIRECT_MESSAGE_REACTIONS`、投票は `GUILD_MESSAGE_POLLS` / `DIRECT_MESSAGE_POLLS`、入力開始は `GUILD_MESSAGE_TYPING` / `DIRECT_MESSAGE_TYPING` を、受信する範囲に応じて指定します。
+
+管理、予定、Webhook、招待、Entitlement、Subscription などの型付き通知も `Events::on_gateway` で登録できます。ペイロードの型は `model::gateway::payload::incoming` にあります。
 
 ## `UiMessage` と `ButtonContext<'_>`
+
+`ui::DynamicId::new(namespace, value)` で動的ルート用の `custom_id` を組み立て、ボタン・セレクト・モーダルの既存ビルダーに渡します。通常の `on_*` に完全一致する ID が登録済みなら、そのハンドラーを呼びます。`on_dynamic_*` のハンドラーは `ctx.dynamic_id()` で機能名と値を確認できます。以前のメッセージを処理するために、起動時に同じ機能名を登録してください。
 
 `disnana_akari::ui::{UiMessage, Embed, Button}` を使って、本文・埋め込み・ボタンを組み立てます。完成した値を `ctx.reply_ui(&message).await` に渡します。
 
@@ -242,6 +300,8 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.acknowledge().await -> Result<()>` | `defer_update` と同じ確認応答を送ります。 |
 | `ctx.followup(content).await -> Result<()>` | 初回応答の後、チャンネルに追加のメッセージを送ります。 |
 | `ctx.followup_ephemeral(content).await -> Result<()>` | 初回応答の後、ボタンを押した本人にだけ追加のメッセージを送ります。 |
+| `ctx.followup_files(content, files, limits).await -> Result<()>` | 初回応答や `defer_update` の後、添付付きの追加メッセージをチャンネルへ送ります。 |
+| `ctx.followup_files_ephemeral(content, files, limits).await -> Result<()>` | 初回応答や `defer_update` の後、添付付きの追加メッセージをボタンを押した本人だけに送ります。 |
 
 `update_message` は本文、埋め込み、ボタンの行をまとめて置き換えます。次の表示にも残したい埋め込みやボタンは、新しい `UiMessage` に含めます。更新は一回のクリックにつき一度です。時間のかかる処理では、先に `defer_update` を呼んで 3 秒以内に初回応答を送り、処理の完了後に `update_message` で表示を変更します。
 
@@ -274,14 +334,23 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 
 | ビルダー | 動作 |
 | --- | --- |
+| `v2.section_with_button(texts, button)` / `v2.section_with_thumbnail(texts, media)` | 1～3 個のテキスト部品と、その横に表示するボタンまたはサムネイルを追加します。 |
+| `v2.media_gallery(items)` / `Media::new(url)` | 1～10 件のメディアを並べます。`description` で代替テキスト、`spoiler` で初期表示を設定します。 |
 | `SelectOption::new(label, value)` | メニューに表示するラベルと、選択時に返す値を設定します。`description` で選択肢の説明を設定できます。 |
 | `StringSelect::new(custom_id, options)` | 選択メニューを作ります。`placeholder` で選択する前の表示、`min_values` と `max_values` で選べる個数、`disabled` で無効状態を指定できます。 |
 | `Modal::new(custom_id, title)` | 入力フォームを作ります。 |
 | `form.text_input(TextInput::new(custom_id, label))` | フォームに入力欄を追加します。`paragraph` で複数行入力、`required` で必須かどうか、`min_length` と `max_length` で文字数、`value` で初期値を設定できます。 |
+| `form.file_upload(FileUpload::new(custom_id, label))` | フォームにファイル添付欄を追加します。`description`、`min_values`、`max_values`、`required` を指定できます。 |
+| `form.checkbox(Checkbox::new(custom_id, label))` | 単一のチェックボックスを追加します。`description`、`selected_by_default` を指定できます。 |
+| `form.select(label, menu, required)` | 文字列セレクトを追加します。対象の型に応じて `user_select`、`role_select`、`channel_select`、`mentionable_select` も選べます。 |
+| `form.checkbox_group(CheckboxGroup::new(custom_id, label, options))` | 複数選択できるチェックボックスを追加します。選択結果は `ctx.checkbox_group(custom_id)` で借ります。 |
+| `form.radio_group(RadioGroup::new(custom_id, label, options))` | 2〜10 個から 1 個選ぶ入力欄を追加します。`ctx.radio_group(custom_id)` は値、未選択、欄なしを区別します。 |
 
 選択メニューの既定値は一項目です。最小選択数は 0～25、最大選択数は 1～25 で、最小値は最大値以下、最大値は用意した選択肢の数以下にします。入力文字数の最小値は 0～4,000、最大値は 1～4,000 です。空でない初期値は設定した文字数の範囲に収めます。入力欄を空で始めたい場合は、初期値を省略するか空文字列にします。
 
-`SelectContext` には、メニューの `custom_id()` と選択結果の `values() -> &[String]` が渡ります。`author_id()`、`guild_id()`、`message()`、`invoker_id()` で操作者や元のメッセージを確認でき、ボタンと同じように `reply_ephemeral`、`defer_update`、`update_message`、`update_v2`、`show_modal` を呼べます。
+文字列の選択肢は `SelectOption::selected_by_default(true)`、ユーザーなどの対象選択は `default_values(ids)` で初期選択を指定できます。`MentionableSelect` の初期選択には `Mentionable::User(id)` または `Mentionable::Role(id)` を使います。
+
+`SelectContext` には、メニューの `custom_id()` と選択結果の `values() -> &[String]` が渡ります。`author_id()`、`guild_id()`、`message()`、`invoker_id()` で操作者や元のメッセージを確認でき、ボタンと同じように `reply_ephemeral`、`defer_update`、`update_message`、`update_v2`、`show_modal`、`followup_files`、`followup_files_ephemeral` を呼べます。
 
 ### ユーザー、ロール、チャンネルを選択する
 
@@ -296,6 +365,8 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 | `ChannelSelectContext<'_>` | `&[Id<ChannelMarker>]` |
 | `MentionableSelectContext<'_>` | `&[Mentionable]` |
 
+`UserSelectContext`、`RoleSelectContext`、`ChannelSelectContext` は、共通の `EntitySelectContext<'_, M>` の別名で、選択対象の種類（`M` は `UserMarker` など）だけが違います。メソッドは共通です。
+
 `values()` で対象ごとに型の付いた ID を取得できます。Discord が選択対象の情報を同梱した場合は、`resolved()` で `&InteractionDataResolved` を取得できます。操作への本人宛ての返信には `reply_ephemeral` を使います。[Playground の選択メニュー実装](../examples/ping/entities.rs)
 
 ユーザーとロールを混ぜたメニューでは、選択された各 ID の種類を Discord の `resolved.users` と `resolved.roles` で判定します。選択があるときに `resolved` が欠けている場合や、ID の種類が一意に決まらない場合は、ハンドラーを呼ばず本人へのエラー応答を試みます。選択数が 0 件なら、`resolved` がなくても空の `values()` を受け取れます。
@@ -303,6 +374,14 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 ### 入力フォームを開く
 
 `show_modal` はスラッシュコマンド、ボタン、選択メニューの初回応答として呼びます。フォームを送信すると、フォームの識別子に対応する `on_modal` の関数が呼ばれます。`ModalContext::text_input(custom_id)` は、入力欄の識別子に対応する値を `Option<&str>` で返します。`custom_id()` はフォームの識別子を返し、`author_id()` と `guild_id()` は送信者とサーバーの情報を返します。
+
+初回返信か defer の後に、`original_response` でフォーム送信への元の応答を取得できます。`edit_original_response`、`edit_original_ui`、`edit_original_v2` で元の応答を編集し、`delete_original_response` で削除できます。
+
+添付ファイルは `ctx.file_upload(custom_id)` で型付き ID を受け取り、`ctx.attachment(id)` で Discord が送ったファイル名やサイズなどのメタデータを取得します。ファイル本体のダウンロードはアプリから明示的に行います。
+
+`ctx.checkbox(custom_id)` はチェックされた欄を `Some(true)`、チェックされていない欄を `Some(false)` で返します。欄がない場合は `None` です。
+
+セレクトの選択結果は `ctx.string_select(custom_id)` や、対象の型に対応するメソッドで取得できます。`None` は欄がないか型が違うことを示します。選択がなかった欄は空の選択結果を返します。`mentionable_select` は選択をユーザーまたはロールに解決できない場合にエラーを返します。
 
 ### フォーム送信に応答する
 
@@ -314,6 +393,8 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 | `ctx.defer_ephemeral().await -> Result<()>` | 最初に本人にだけ見える処理中の応答を送ります。 |
 | `ctx.followup(content).await -> Result<()>` | 最初の本文を送った後、チャンネルに追加のメッセージを送ります。 |
 | `ctx.followup_ephemeral(content).await -> Result<()>` | 最初の本文を送った後、本人にだけ追加のメッセージを送ります。 |
+| `ctx.followup_files(content, files, limits).await -> Result<()>` | フォーム送信への元の応答を完成させた後、添付付きの追加メッセージをチャンネルへ送ります。 |
+| `ctx.followup_files_ephemeral(content, files, limits).await -> Result<()>` | フォーム送信への元の応答を完成させた後、添付付きの追加メッセージを本人だけに送ります。 |
 
 時間がかかる処理では、3 秒の初回応答期限までに `defer` または `defer_ephemeral` を明示的に呼び、完了時に `reply` を呼びます。公開の `defer` の後に `reply_ephemeral` を呼ぶとエラーになります。ハンドラーが本文を送らずに成功した場合は、Akari が `Messages::modal_accepted`（既定は「入力を受け付けました。」）を送ります。初回応答前なら本人にだけ表示し、遅延応答済みならその表示を置き換えます。本文を送る前にハンドラーが失敗した場合は、`Messages::modal_failed` を同じ経路で送ります。どちらの文言も `None` にすると、Akari は何も送りません。その場合、応答が済んでいない操作は、Discord 上で失敗と表示されます。[Components V2 のチュートリアル](tutorial.md) · [Discord の Interaction 応答仕様](https://docs.discord.com/developers/interactions/receiving-and-responding)
 
@@ -375,6 +456,8 @@ fn build() -> Result<Bot> {
 | `report.source` | `ErrorSource`。`TextCommand`、`SlashCommand`、`Button`、`Select`、`Modal`、`Message`、`Event`、`Gateway`、`Response`（自動応答の失敗）、`QueueFull`（処理枠が満杯）など。今後増える可能性があります（`#[non_exhaustive]`）。 |
 | `report.name` | コマンド名、`custom_id`、イベント名など、原因を絞り込む手がかり。分からないときは `None`。 |
 | `report.error` | `&Error`。ハンドラーが返した型付きエラーをそのまま渡します。 |
+
+ログへ出力する場合は `report` を整形すると、Gateway のデコードエラーから受信ペイロードが除かれます。
 
 - Akari は、標準出力にも標準エラー出力にも書きません。エラーは `tracing` のイベント（`error` と `warn`、`target` は `disnana_akari`）として発行します。出力先は、アプリが `tracing` の購読先で決めます。この関数は、ログとは別に、コードで反応するためのもので、設定してもログは変わりません。
 - `{report}` で表示すると、`場所 `名前`: エラー: 原因: 原因…` の形で、**原因の連鎖も**続けて表示します（たとえば `Http` では、本当の理由は原因の側にあります）。
@@ -443,6 +526,67 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 - 標準のエラーなどは、Akari が `Error::Handler` で包んで `on_error` に報告します。`Error::Handler` が持つ `HandlerError` から、`downcast_ref::<T>()`、`inner()`、`into_inner()` で元のエラーを取り出せます。表示と原因の連鎖は、元のエラーと同じです（メッセージが二重に表示されません）。
 - メッセージだけのエラーは `Error::msg("使い方: !echo 文章")` で作れます。`Error::handler(e)` は、任意のエラーを `Error::Handler` に包みます。
 - **クロージャ**は、末尾が関数呼び出しなら、そのまま渡せます。`Ok(())` で終わるときは、戻り値の型を書きます: `async move |ctx: CommandContext<'_>| -> Result<()> { ...; Ok(()) }`。書かないと、エラー型を決められずに `type annotations needed` になります。
+
+## ハイブリッドの添付とメンション
+
+`SlashCommands::attachment_option` と `mentionable_option` を型付きハイブリッドの登録にも使えます。`HybridArguments::attachment` は Discord が渡した添付メタデータを借り、`mentionable` はユーザーかロールを型付きで返します。テキストの添付は投稿に添付した順に読み、メンションはユーザー用かロール用の書式を指定します。
+
+## サブコマンドと選択肢の翻訳
+
+`CommandOptionLocalizations::apply(option)` で引数に名前と説明の翻訳を付けます。`CommandGroup::set_child_localizations` と `HybridCommandGroup::set_child_localizations` は、元の名前を指定して子サブコマンドに翻訳を付けます。`SlashCommands::localize_choice` では固定の選択肢の表示名を翻訳できます。
+
+## 音声状態を変更する
+
+`voice.set_state(guild_id, VoiceStateChange::join(channel_id)).await` で参加または移動を、`VoiceStateChange::leave()` で退出を担当シャードへ要求します。`self_mute`、`self_deaf` も設定できます。呼び出しの成功は、シャードが送信キューへの追加を受理した時点を示します。
+
+`join(guild_id, channel_id, timeout)` と `leave(guild_id, timeout)` は Discord の確認通知まで待ちます。`VoiceConnection::status()` と `changed().await` は音声サーバーの割り当てと切断を確認するための API です。
+
+音声接続の準備では、Bot 自身の `VoiceStateUpdate` と同じサーバーの `VoiceServerUpdate` を受け取ります。`VoiceServerUpdate` に含まれるトークンは機密情報です。
+
+## 通常の添付返信
+
+`Context`、`CommandContext`、`SlashContext`、`HybridContext` の `reply_files` で本文と添付を送れます。添付だけを送る場合は空の本文を指定します。`SlashContext::reply_files_ephemeral` は本人向けで、`defer_ephemeral` 後の待機表示も完了できます。
+
+## 添付付きの追加メッセージ
+
+`SlashContext`、`ModalContext`、`ButtonContext` と各選択メニューのコンテキストでは、公開の `followup_files(&self, content: &str, files: &[Attachment], limits: AttachmentLimits)` と、本人だけに送る `followup_files_ephemeral` を使えます。`Attachment` は `model::http::attachment::Attachment`、`AttachmentLimits` は `validation::AttachmentLimits` です。添付だけを送るときは本文に空文字を指定します。本文と添付が両方空の場合はエラーになります。
+
+スラッシュコマンドとフォーム送信では、遅延応答の待機表示を `reply` などで完成させた後に送れます。ボタンと選択メニューでは、`defer_update` で操作を受け付けた後にすぐ送れます。公開範囲は追加メッセージごとに選べます。送信前に本文、添付の件数・名前・ID・サイズを検証し、Discord が Interaction に通知した1ファイルのサイズ上限と `AttachmentLimits` が適用されます。[Discord の追加メッセージ API](https://docs.discord.com/developers/interactions/receiving-and-responding#create-followup-message)
+
+### テキストコマンドの実行フック
+
+`Commands::set_before_invoke` と `set_after_invoke` は、チェックと型付き引数の変換が通ったテキスト実行の前後に呼ばれます。実行後フックにはハンドラーのエラーが渡ります。ハイブリッドのテキスト実行にも適用します。
+
+## 送信前の検証
+
+`validation::message_content`、`attachment_count`、`attachment_sizes` で、本文の文字数、保持分を含む添付件数、Discord が通知した1ファイルのバイト上限を確認します。本文は上限超過を検出した時点で走査を打ち切ります。 `AttachmentLimits` では、保持分を含む件数、1 ファイルのサイズ、新規送信分の合計サイズにアプリ独自の上限を設定できます。値を `None` にすると、その項目のアプリ独自の検査を外します。`ComponentsV2::attachment_limits` で返信と編集に適用できます。`UiMessage::validate`、`ComponentsV2::validate`、`Modal::validate` は各ビルダーの構成を検証します。
+
+## テキストコマンドのメタデータとヘルプ
+
+`CommandMetadata` で説明、使い方、標準ヘルプの表示有無を設定できます。`Commands::set_metadata` は正式名または別名から指定し、`command_info(path)` と `command_infos()` で登録情報を参照できます。`Commands::register_help(name)` で一覧と詳細を表示するテキストコマンドを追加します。
+
+## そのほかの公開型
+
+ほかの節で触れていない公開型です。いずれも、対応する機能の戻り値やイベントとして受け取ります。
+
+| 型 | 内容 |
+| --- | --- |
+| `CommandInfo` | 登録済みテキストコマンドの正式名、別名、説明です。`children()`、`is_group()`、`is_hidden()`、`is_invokable()` でグループや非表示の状態を確認できます。 |
+| `CommandCheckSource` | `CommandCheckContext::source()` が返す、チェックの呼び出し元です。 |
+| `HybridArgumentError` | 型付きハイブリッドコマンドが受け取った引数のエラーです。 |
+| `GatewayShardStatus` | 一つのシャードの状態と、ハートビートの計測値です。 |
+| `GatewayStatusUpdates` | Gateway の状態が変化したときに、最新の一覧を受け取ります。 |
+| `VoiceConnectionInfo` | 音声処理ライブラリに渡す一時的な接続情報です。ログや保存先に出さないでください。 |
+| `VoiceConnectionStatus` | 音声サーバーの割り当て状況です。 |
+| `VoiceGatewayError` | 音声操作を完了できなかった理由です。 |
+| `SoundboardSound`、`SoundboardSoundId`、`SoundboardSoundMarker`、`SoundboardSounds`、`VoiceEffectAnimation` | Discord のサウンドボード音とその一覧、再生時の演出です。 |
+| `GuildSoundboardSoundCreate`、`GuildSoundboardSoundUpdate`、`GuildSoundboardSoundDelete`、`GuildSoundboardSoundsUpdate` | サウンドボード音の追加、更新、削除、一括更新の通知です。 |
+
+## コマンドの共通チェック
+
+`CommandCheck::new` には `async fn(CommandCheckContext<'_>) -> Result<()>` または同等のクロージャを渡します。同じチェックを `Commands::add_check` と `SlashCommands::add_check` の両方に渡せます。`command_path()` はグループを含めた正式なコマンド名を親から順に返します。`source()`、`author_id()`、`guild_id()`、`channel_id()` で呼び出し元を確認できます。
+
+`require_guild()`、`require_permissions(...).await` で既存の権限確認と同じエラーが返ります。独自の条件での拒否には `CheckFailure::Rejected` を使います。いずれかのチェックが失敗した場合、以降のチェックとハンドラーを実行しません。
 
 ## Twilight の型と REST クライアントを使う
 

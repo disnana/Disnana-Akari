@@ -2,10 +2,14 @@
 
 use std::{fmt, sync::Arc, time::Duration};
 
+use twilight_gateway::error::ReceiveMessageErrorType;
 use twilight_model::{
     application::interaction::InteractionType,
     http::interaction::InteractionResponseType,
-    id::{Id, marker::GuildMarker},
+    id::{
+        Id,
+        marker::{CommandMarker, GuildMarker, InteractionMarker},
+    },
 };
 
 use crate::Error;
@@ -36,6 +40,8 @@ pub enum ErrorSource {
     Response,
     /// 同時に処理できる数か、待てる数がいっぱいで、イベントを処理できなかったことです。
     QueueFull,
+    /// 動的なプレフィックス判定の関数が返したエラーです。
+    PrefixResolver,
 }
 
 impl ErrorSource {
@@ -43,6 +49,7 @@ impl ErrorSource {
     pub fn label(self) -> &'static str {
         match self {
             Self::TextCommand => "テキストコマンド",
+            Self::PrefixResolver => "プレフィックスの判定",
             Self::SlashCommand => "スラッシュコマンド",
             Self::Button => "ボタン",
             Self::Select => "選択メニュー",
@@ -73,11 +80,26 @@ pub struct ErrorReport<'a> {
     pub error: &'a Error,
 }
 
+impl ErrorReport<'_> {
+    fn redacted_payload_error(&self) -> Option<&'static str> {
+        if let Error::GatewayReceive(error) = self.error
+            && matches!(error.kind(), ReceiveMessageErrorType::Deserializing { .. })
+        {
+            // Twilight のエラー本文には受信ペイロード全体が含まれます。
+            return Some("Gateway のイベントを読み取れませんでした");
+        }
+        None
+    }
+}
+
 impl fmt::Display for ErrorReport<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.source)?;
         if let Some(name) = self.name {
             write!(f, " `{name}`")?;
+        }
+        if let Some(message) = self.redacted_payload_error() {
+            return write!(f, ": {message}");
         }
         write!(f, ": {}", self.error)?;
         // 原因の連鎖も、「: 原因」の形で続ける（`Http` などは、原因に本当の理由がある）。
@@ -92,11 +114,16 @@ impl fmt::Display for ErrorReport<'_> {
 
 impl fmt::Debug for ErrorReport<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ErrorReport")
+        let mut report = f.debug_struct("ErrorReport");
+        report
             .field("source", &self.source)
-            .field("name", &self.name)
-            .field("error", &format_args!("{}", self.error))
-            .finish()
+            .field("name", &self.name);
+        if let Some(message) = self.redacted_payload_error() {
+            report.field("error", &format_args!("{message}"));
+        } else {
+            report.field("error", &format_args!("{}", self.error));
+        }
+        report.finish()
     }
 }
 
@@ -120,8 +147,8 @@ pub struct Messages {
     pub slash_command_failed: Option<String>,
     /// Akari に登録していないスラッシュコマンドが実行されたときに、本人にだけ送る文言です。
     pub slash_command_unavailable: Option<String>,
-    /// 実行前の確認（権限など）に通らなかったときに、本人にだけ送る文言です。
-    /// ハンドラーが `require_*` で返した [`CheckFailure`](crate::CheckFailure) に使います。
+    /// 登録したチェックやハンドラーが [`CheckFailure`](crate::CheckFailure) を返したときの文言です。
+    /// アプリコマンドでは本人にだけ、テキストコマンドでは元の投稿への返信で送ります。
     /// 公開の遅延応答がある場合は、固定文言で待機表示を終了してから、本人への追加応答で送ります。
     /// テキストコマンドでは、元の投稿への返信になります（送らない場合は `None` にします）。
     pub check_failed: Option<String>,
@@ -210,6 +237,28 @@ pub enum InfoEvent {
         elapsed: Duration,
         /// 初回応答の REST リクエストにかかった時間です。レート制限の待ち時間を含みます。
         rest_elapsed: Duration,
+    },
+    /// Discord への初回応答リクエストが失敗しました。トークンと HTTP 本文は通知しません。
+    #[non_exhaustive]
+    InteractionResponseFailed {
+        /// 試行を照合するための Interaction ID です。
+        interaction_id: Id<InteractionMarker>,
+        /// アプリコマンドの ID です。ボタンやフォームなどでは None です。
+        command_id: Option<Id<CommandMarker>>,
+        /// スラッシュコマンド、コンポーネント、フォームなどの種類です。
+        interaction_type: InteractionType,
+        /// 送信しようとした初回応答の種類です。
+        response_type: InteractionResponseType,
+        /// 受信から応答試行が終了するまでにかかった時間です。
+        elapsed: Duration,
+        /// イベントを受け取ってから処理を開始するまでの時間です。
+        queue_wait: Duration,
+        /// REST リクエストの待ち時間です。
+        rest_elapsed: Duration,
+        /// HTTP 応答のステータスです。通信中の失敗では None です。
+        http_status: Option<u16>,
+        /// Discord が返した数値エラーコードです。
+        discord_code: Option<u64>,
     },
 }
 
@@ -301,6 +350,31 @@ fn emit_info(event: &InfoEvent) {
                 "Interaction に初回応答しました"
             );
         }
+        InfoEvent::InteractionResponseFailed {
+            interaction_id,
+            command_id,
+            interaction_type,
+            response_type,
+            elapsed,
+            queue_wait,
+            rest_elapsed,
+            http_status,
+            discord_code,
+        } => {
+            tracing::debug!(
+                target: LOG_TARGET,
+                interaction_id = interaction_id.get(),
+                command_id = command_id.map(|id| id.get()),
+                interaction_type = ?interaction_type,
+                response_type = ?response_type,
+                elapsed_ms = millis(*elapsed),
+                queue_wait_ms = millis(*queue_wait),
+                rest_elapsed_ms = millis(*rest_elapsed),
+                http_status,
+                discord_code,
+                "Interaction の初回応答に失敗しました"
+            );
+        }
     }
 }
 
@@ -311,6 +385,33 @@ mod tests {
     use crate::Error;
 
     use super::{ErrorSource, Hooks, Messages, Reporter};
+
+    #[test]
+    fn gateway_payload_credentials_are_omitted_from_formatted_reports() -> crate::Result<()> {
+        use twilight_gateway::EventTypeFlags;
+
+        let invalid = r#"{"op":0,"s":1,"t":"VOICE_SERVER_UPDATE","d":{"token":"credential-fixture","endpoint":"test"}}"#;
+        let Some(Err(error)) = crate::message_events::decode_text(
+            invalid.to_owned(),
+            EventTypeFlags::VOICE_SERVER_UPDATE,
+            false,
+        ) else {
+            return Err(Error::msg("壊れた音声イベントがエラーになっていません"));
+        };
+        let report = super::ErrorReport {
+            source: ErrorSource::Gateway,
+            name: None,
+            error: &error,
+        };
+        assert!(
+            report
+                .to_string()
+                .contains("Gateway のイベントを読み取れませんでした")
+        );
+        assert!(!report.to_string().contains("credential-fixture"));
+        assert!(!format!("{report:?}").contains("credential-fixture"));
+        Ok(())
+    }
 
     #[test]
     fn report_text_continues_with_the_cause_chain() {
@@ -460,6 +561,49 @@ mod tests {
         );
         assert!(seen[0].2.contains("source=\"ボタン\""), "{}", seen[0].2);
         assert!(seen[3].2.contains("count=3"), "{}", seen[3].2);
+    }
+
+    #[test]
+    fn interaction_diagnostics_clamp_all_duration_fields() {
+        use super::{
+            Duration, Id, InfoEvent, InfoReporter, InteractionResponseType, InteractionType,
+        };
+
+        let seen = capture::collect(|| {
+            let info = InfoReporter::default();
+            let interaction_type = InteractionType::ApplicationCommand;
+            let response_type = InteractionResponseType::ChannelMessageWithSource;
+            info.report(InfoEvent::InteractionResponded {
+                interaction_type,
+                response_type,
+                elapsed: Duration::MAX,
+                rest_elapsed: Duration::MAX,
+            });
+            info.report(InfoEvent::InteractionResponseFailed {
+                interaction_id: Id::new(1),
+                command_id: Some(Id::new(2)),
+                interaction_type,
+                response_type,
+                elapsed: Duration::MAX,
+                queue_wait: Duration::MAX,
+                rest_elapsed: Duration::MAX,
+                http_status: Some(404),
+                discord_code: Some(10062),
+            });
+        });
+        assert_eq!(seen.len(), 2);
+        let has_clamped_field = |event: &str, field| {
+            let expected = format!("{field}={}", u64::MAX);
+            event
+                .split(['[', ',', ']'])
+                .any(|part| part.trim() == expected)
+        };
+        for (_, _, event) in &seen {
+            for field in ["elapsed_ms", "rest_elapsed_ms"] {
+                assert!(has_clamped_field(event, field), "{event}");
+            }
+        }
+        assert!(has_clamped_field(&seen[1].2, "queue_wait_ms"));
     }
 
     #[test]

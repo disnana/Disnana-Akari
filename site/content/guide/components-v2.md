@@ -43,6 +43,48 @@ fn card() -> ComponentsV2 {
 }
 ```
 
+## テキストの横にボタンや画像を置く
+
+```rust
+use disnana_akari::ui::{Button, ComponentsV2, Media};
+
+fn help_panel() -> ComponentsV2 {
+    ComponentsV2::new()
+        .section_with_button(["# サポート", "操作方法を開きます。"], Button::primary("help", "開く"))
+        .section_with_thumbnail(
+            ["# プレビュー"],
+            Media::new("https://example.com/preview.webp").description("プレビュー画像"),
+        )
+        .media_gallery([Media::new("https://example.com/gallery.webp").spoiler(true)])
+}
+```
+
+セクションにはテキストを 1～3 個、ギャラリーにはメディアを 1～10 件置けます。`Media::description` は代替テキストです。`attachment://ファイル名` を参照する場合は、参照先のファイルを送信時にアップロードします。
+
+## 罫線とコンテナーの見た目を調整する
+
+`separator_with_spacing(SeparatorSpacingSize::Large, false)` は広い余白だけを挿入します。罫線も表示する場合は第2引数を `true` にします。`container_with_options(None, true, contents)` は、強調色を指定せず、クリックすると中身を表示するコンテナーを作ります。
+
+## 添付ファイルを部品として表示する
+
+`FileDisplay` の名前と、同じメッセージに添付するファイル名を一致させます。ファイル名は拡張子まで指定します。
+
+```rust
+use disnana_akari::{Result, SlashContext, model::http::attachment::Attachment};
+use disnana_akari::ui::{ComponentsV2, FileDisplay};
+
+async fn send_report(ctx: &mut SlashContext<'_>) -> Result<()> {
+    let name = "report.txt";
+    let panel = ComponentsV2::new()
+        .text("出力ファイル")
+        .file(FileDisplay::new(name))
+        .attachment(Attachment::from_bytes(name.into(), b"total: 42\n".to_vec(), 0));
+    ctx.reply_v2(&panel).await
+}
+```
+
+複数のファイルをアップロードする場合は、ファイルごとに異なる添付 ID とファイル名を指定します。`FileDisplay` は添付を参照する部品です。外部サイトの URL は渡せません。[Discord の File 仕様](https://docs.discord.com/developers/components/reference#file)
+
 ## 送り方
 
 | 場所 | メソッド |
@@ -54,6 +96,10 @@ fn card() -> ComponentsV2 {
 
 ## 制限
 
+Twilight の型で部品の数値 `id` を指定する場合、0 以外の値はメッセージ内で一意にします。コンテナーやセクションに入った子部品も同じ範囲です。0 や省略は Discord が ID を割り当てます。ボタンのルーティングに使う `custom_id` は別に検証します。[Discord の部品 ID 仕様](https://docs.discord.com/developers/components/reference#anatomy-of-a-component)
+
+`ComponentsV2::validate()` を呼ぶと、送信前に部品配置、本文、アップロードするファイル数などを確認できます。アップロードは1メッセージに最大10件で、更新で添付を追加するときは残すファイルも含めて数えます。Interaction への返信では、その呼び出しで Discord が通知した上限と、各ファイルのサイズも照合します。[Discord のメッセージ添付の制限](https://docs.discord.com/developers/topics/opcodes-and-status-codes#json-json-error-codes)
+
 - **本文と Embed は併用できません。** 文章は `.text()` で入れます。従来の本文や Embed が必要なら、[`UiMessage`](buttons.md) を使います。
 - テキストは、メッセージ全体で 4,000 文字までです。
 - 部品は、入れ子を含めて 40 個までです。
@@ -61,3 +107,24 @@ fn card() -> ComponentsV2 {
 - 既に Components V2 になっているメッセージは、`update_v2` で更新します。
 
 送信前に、これらの制限が検証されます。違反しているときは、Discord へ送らず `Err` を返します。
+
+
+## 添付のサイズや件数をアプリで制限する
+
+同じ設定を複数の送信経路で使うときは、`AttachmentLimits` を共有します。件数には編集時に残すファイルも含み、バイト数は新規アップロード分に適用します。
+
+```rust
+use disnana_akari::{ui::ComponentsV2, validation::AttachmentLimits};
+
+fn document() -> disnana_akari::Result<ComponentsV2> {
+    let limits = AttachmentLimits::default()
+        .max_files(Some(4))
+        .max_file_bytes(Some(4 * 1024 * 1024))
+        .max_total_bytes(Some(8 * 1024 * 1024));
+    let message = ComponentsV2::new().attachment_limits(limits).text("資料");
+    message.validate()?;
+    Ok(message)
+}
+```
+
+各設定の `None` はその項目のアプリ独自の検査を解除します。スラッシュ応答などでは Discord が通知したファイル上限も確認します。通常メッセージでは、添付データだけで HTTP リクエスト全体の上限 25 MiB に達する場合も送信前に拒否します。multipart のヘッダーや JSON もリクエストのサイズに含まれます。[Discord のファイルアップロード仕様](https://docs.discord.com/developers/reference#uploading-files) · [Create Message の制限](https://docs.discord.com/developers/resources/message#create-message)

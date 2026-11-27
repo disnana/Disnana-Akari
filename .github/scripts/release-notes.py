@@ -33,7 +33,12 @@ def main():
     compare = f"{quote(base, safe='')}...{quote(tag, safe='')}"
     changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
     summary = changelog.split(f"\n## {version}\n", 1)[1].split("\n## ", 1)[0].strip()
-    print(f"{summary}\n")
+    intro, heading, details = summary.partition("\n### ")
+    if heading and intro.strip() and summary.count("\n") > 30:
+        print(f"{intro.rstrip()}\n")
+        print(f"<details>\n<summary>変更履歴の詳細</summary>\n\n### {details}\n\n</details>\n")
+    else:
+        print(f"{summary}\n")
     print(f"[crates.io](https://crates.io/crates/disnana-akari/{quote(version, safe='')})"
           f" · [最新リリース]({root}/releases/latest) · [変更全体]({root}/compare/{compare})\n")
 
@@ -41,7 +46,7 @@ def main():
                for commit in page["commits"]]
     authors = {}
     pull_requests = {}
-    print("## 変更コミット\n")
+    print(f"<details>\n<summary>変更コミット（{len(commits)}件）</summary>\n")
     for commit in commits:
         sha = commit["sha"]
         subject = commit["commit"]["message"].splitlines()[0]
@@ -58,7 +63,8 @@ def main():
                 if pr["merged_at"] and pr["base"]["repo"]["full_name"].casefold() == repo.casefold():
                     pull_requests[pr["number"]] = pr
 
-    print("\n## マージされた PR\n")
+    print("\n</details>\n")
+    print(f"<details>\n<summary>マージされた PR（{len(pull_requests)}件）</summary>\n")
     if pull_requests:
         for number, pr in sorted(pull_requests.items()):
             print(f"- [#{number}]({root}/pull/{number}) {pr['title']}")
@@ -68,7 +74,8 @@ def main():
     else:
         print("対象期間にマージされた PR はありません。")
 
-    print("\n## コントリビューター\n")
+    print("\n</details>\n")
+    print("## コントリビューター\n")
     for name in sorted(authors, key=str.casefold):
         print(f"- {authors[name]}")
 

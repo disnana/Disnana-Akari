@@ -41,13 +41,17 @@ features:
 `!ping` に `Pong!` と返す Bot です。
 
 ```rust
+use disnana_akari::model::gateway::Intents;
 use disnana_akari::{Bot, CommandContext, Commands, Result};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let mut commands = Commands::new("!")?;
     commands.register("ping", ping)?;
-    Bot::from_env()?.run_commands(commands).await
+    Bot::from_env()?
+        .add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
+        .run_commands(commands)
+        .await
 }
 
 async fn ping(ctx: CommandContext<'_>) -> Result<()> {
@@ -56,9 +60,11 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 ```
 
 ```sh
-cargo add disnana-akari
+cargo add disnana-akari@0.3
 cargo add tokio --features macros,rt
 ```
+
+テキストコマンドを試すには、Discord の Developer Portal でも **Message Content Intent** を有効にします。[Discord で Bot を用意する](/getting-started/discord-setup)
 
 ## 読み進め方
 

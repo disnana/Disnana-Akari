@@ -13,7 +13,7 @@ use twilight_model::{
             CommandOptionType, CommandType,
         },
         interaction::{
-            Interaction, InteractionData, InteractionType,
+            Interaction, InteractionData, InteractionDataResolved, InteractionType,
             application_command::{CommandData, CommandDataOption, CommandOptionValue},
         },
     },
@@ -28,19 +28,47 @@ use twilight_model::{
 use twilight_validate::command;
 
 use crate::{
-    CheckFailure, CommandSyncError, Error, ErrorSource, HandlerKind, InfoEvent, RegistrationError,
-    ResponseStateError, Result, Timing,
+    CheckFailure, CommandCheck, CommandCheckContext, CommandCheckSource, CommandSyncError, Error,
+    ErrorSource, HandlerKind, InfoEvent, RegistrationError, ResponseStateError, Result, Timing,
     autocomplete::{AutocompleteContext, AutocompleteHandler, choice},
+    command_check::run_checks,
     error::adapt_handler,
     hooks::{Hooks, InfoReporter},
     permissions::check_permissions,
     ui::{ComponentsV2, Modal, UiMessage},
 };
 
-/// 一つのサーバー、またはアプリ全体に登録するスラッシュコマンド一覧です。
+mod context_menu;
+mod file_response;
+mod invoke;
+mod localizations;
+mod original_response;
+mod settings;
+mod v2_attachments;
+mod validation;
+pub use context_menu::UserMenuTarget;
+use context_menu::{MenuCommands, MenuKind, replace_application_commands};
+pub(crate) use file_response::send_followup_files;
+pub(crate) use invoke::InvocationHooks;
+use invoke::{PreparedSlashHandler, slash_handler};
+pub use localizations::CommandOptionLocalizations;
+use localizations::validate_distinct_names;
+pub(crate) use localizations::validate_options;
+pub use settings::CommandSettings;
+use settings::{SettingsByKind, create_configured_command};
+pub(crate) use v2_attachments::edit_v2_response;
+use validation::validate_command_size;
+
+/// 一つのサーバー、またはアプリ全体に登録するアプリコマンド一覧です。
+///
+/// スラッシュコマンドと、ユーザー・メッセージのコンテキストメニューを登録できます。
 pub struct SlashCommands {
     scope: Scope,
     entries: BTreeMap<String, Definition>,
+    menus: MenuCommands,
+    settings: SettingsByKind,
+    checks: Vec<CommandCheck>,
+    invocation_hooks: InvocationHooks,
     replace: bool,
 }
 
@@ -65,6 +93,7 @@ impl std::fmt::Debug for SlashCommands {
         f.debug_struct("SlashCommands")
             .field("scope", &self.scope)
             .field("registered", &self.entries.keys().collect::<Vec<_>>())
+            .field("menus", &self.menus.names().collect::<Vec<_>>())
             .field("replace", &self.replace)
             .finish()
     }
@@ -89,8 +118,38 @@ impl SlashCommands {
         Self {
             scope,
             entries: BTreeMap::new(),
+            menus: MenuCommands::default(),
+            settings: SettingsByKind::default(),
+            checks: Vec::new(),
+            invocation_hooks: InvocationHooks::default(),
             replace: false,
         }
+    }
+
+    /// この一覧で実行するアプリコマンドと補完にチェックを追加します。
+    /// 登録順に実行し、最初のエラーで処理を止めます。補完で失敗した場合は空の候補を返します。
+    pub fn add_check(&mut self, check: CommandCheck) {
+        self.checks.push(check);
+    }
+
+    /// アプリコマンドの関数の直前に呼ぶ非同期フックを設定します。以前の設定は置き換えます。
+    /// 実行前のチェック、型付き引数の変換、メニューの選択対象の解決を通過した場合に呼びます。
+    /// フックの失敗時はコマンド関数と実行後フックを呼びません。補完には適用しません。
+    pub fn set_before_invoke(
+        &mut self,
+        hook: impl AsyncFn(&SlashContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) {
+        self.invocation_hooks.set_before(hook);
+    }
+
+    /// アプリコマンドの関数の直後に呼ぶ非同期フックを設定します。以前の設定は置き換えます。
+    /// 関数がエラーや panic で終わった場合も呼び、そのエラーを渡します。両方が失敗した場合は関数のエラーを優先します。
+    /// 補完には適用しません。Future が破棄される場合の後始末には `Drop` を使ってください。
+    pub fn set_after_invoke(
+        &mut self,
+        hook: impl AsyncFn(&SlashContext<'_>, Option<&Error>) -> Result<()> + Send + Sync + 'static,
+    ) {
+        self.invocation_hooks.set_after(hook);
     }
 
     /// 起動時に、このアプリの同じ範囲（サーバー、またはグローバル）のコマンド一覧を、
@@ -125,9 +184,27 @@ impl SlashCommands {
             name,
             description,
             options,
-            Some(Box::new(
-                adapt_handler!(handler, ctx: &mut SlashContext<'_>),
-            )),
+            Some(slash_handler(handler)),
+            PermissionPolicy::Unrestricted,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn register_prepared(
+        &mut self,
+        name: &str,
+        description: &str,
+        options: Vec<CommandOption>,
+        handler: impl AsyncFn(&mut SlashContext<'_>, &InvocationHooks) -> Result<()>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()> {
+        self.insert(
+            name,
+            description,
+            options,
+            Some(Box::new(PreparedSlashHandler(handler))),
             PermissionPolicy::Unrestricted,
         )?;
         Ok(())
@@ -143,7 +220,8 @@ impl SlashCommands {
     ) -> Result<&mut Definition> {
         command::chat_input_name(name)?;
         command::description(description)?;
-        command::options(&options)?;
+        validate_options(&options)?;
+        validate_command_size(name, None, description, None, &options)?;
         match self.entries.entry(name.into()) {
             Entry::Vacant(entry) => Ok(entry.insert(Definition {
                 description: description.into(),
@@ -275,6 +353,41 @@ impl SlashCommands {
         Ok(CommandGroup { root, group: None })
     }
 
+    pub(crate) fn ensure_hybrid_group_available(&self, name: &str) -> Result<()> {
+        if self.entries.contains_key(name) {
+            return Err(duplicate_sub(name));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stage_hybrid_group(&self) -> Self {
+        Self::new(self.scope)
+    }
+
+    pub(crate) fn validate_staged_hybrid_group(&self, name: &str) -> Result<()> {
+        let root = self
+            .entries
+            .get(name)
+            .ok_or_else(|| RegistrationError::UnknownCommand { name: name.into() })?;
+        if root.children.is_empty() {
+            return Err(RegistrationError::EmptyHybridGroup { name: name.into() }.into());
+        }
+        for (child_name, child) in &root.children {
+            if matches!(child, Child::Group { subs, .. } if subs.is_empty()) {
+                return Err(RegistrationError::EmptyHybridGroup {
+                    name: format!("{name} {child_name}"),
+                }
+                .into());
+            }
+        }
+        self.chat_model(name, root)?;
+        Ok(())
+    }
+
+    pub(crate) fn append_staged_hybrid_group(&mut self, staged: Self) {
+        self.entries.extend(staged.entries);
+    }
+
     /// Discord 上の既定の表示と、実行時の両方で権限を確認するギルドコマンドを登録します。
     /// `Permissions::ADMINISTRATOR` または空の権限集合を渡すと管理者専用になります。
     /// 実行時にはサーバー内であることも確認するため、DM からは使えません。
@@ -301,9 +414,7 @@ impl SlashCommands {
             name,
             description,
             options,
-            Some(Box::new(
-                adapt_handler!(handler, ctx: &mut SlashContext<'_>),
-            )),
+            Some(slash_handler(handler)),
             permissions,
         )?;
         Ok(())
@@ -388,6 +499,31 @@ impl SlashCommands {
         Self::typed_option(CommandOptionType::Boolean, name, description, required)
     }
 
+    /// ユーザーの選択肢を、ユーザー ID として受け取るための引数を作ります。
+    pub fn user_option(name: &str, description: &str, required: bool) -> CommandOption {
+        Self::typed_option(CommandOptionType::User, name, description, required)
+    }
+
+    /// ロールの選択肢を、ロール ID として受け取るための引数を作ります。
+    pub fn role_option(name: &str, description: &str, required: bool) -> CommandOption {
+        Self::typed_option(CommandOptionType::Role, name, description, required)
+    }
+
+    /// チャンネルの選択肢を、チャンネル ID として受け取るための引数を作ります。
+    pub fn channel_option(name: &str, description: &str, required: bool) -> CommandOption {
+        Self::typed_option(CommandOptionType::Channel, name, description, required)
+    }
+
+    /// ユーザーまたはロールを一つ選ぶ引数を作ります。
+    pub fn mentionable_option(name: &str, description: &str, required: bool) -> CommandOption {
+        Self::typed_option(CommandOptionType::Mentionable, name, description, required)
+    }
+
+    /// 添付ファイルを受け取る引数を作ります。
+    pub fn attachment_option(name: &str, description: &str, required: bool) -> CommandOption {
+        Self::typed_option(CommandOptionType::Attachment, name, description, required)
+    }
+
     fn typed_option(
         kind: CommandOptionType,
         name: &str,
@@ -418,45 +554,65 @@ impl SlashCommands {
         http: &Client,
         info: &InfoReporter,
     ) -> Result<ActiveSlashCommands> {
-        if self.entries.is_empty() && !self.replace {
+        if self.entries.is_empty() && self.menus.is_empty() && !self.replace {
             return self.bind(Vec::new());
         }
 
+        let commands = self.replacement_commands()?;
         let application = http.current_user_application().await?.model().await?;
         let client = http.interaction(application.id);
         let registered = if self.replace {
-            let commands = self.replacement_commands()?;
-            match self.scope {
-                Scope::Guild(guild_id) => {
-                    client
-                        .set_guild_commands(guild_id, &commands)
-                        .await?
-                        .models()
-                        .await?
+            if self.menus.is_empty() {
+                match self.scope {
+                    Scope::Guild(guild_id) => {
+                        client
+                            .set_guild_commands(guild_id, &commands)
+                            .await?
+                            .models()
+                            .await?
+                    }
+                    Scope::Global => {
+                        client
+                            .set_global_commands(&commands)
+                            .await?
+                            .models()
+                            .await?
+                    }
                 }
-                Scope::Global => {
-                    client
-                        .set_global_commands(&commands)
-                        .await?
-                        .models()
-                        .await?
-                }
+            } else {
+                replace_application_commands(http, application.id, self.scope, &commands).await?
             }
         } else {
-            let mut registered = Vec::with_capacity(self.entries.len());
-            for (name, definition) in &self.entries {
+            let mut registered = Vec::with_capacity(commands.len());
+            for model in &commands {
+                let name = &model.name;
+                if model.kind != CommandType::ChatInput
+                    || self
+                        .settings
+                        .get(&model.kind)
+                        .is_some_and(|settings| settings.contains_key(name))
+                {
+                    let command =
+                        create_configured_command(http, application.id, self.scope, model).await?;
+                    if model.kind != CommandType::ChatInput
+                        && (command.kind != model.kind || command.name != *name)
+                    {
+                        return Err(CommandSyncError::UnexpectedName { name: command.name }.into());
+                    }
+                    registered.push(command);
+                    continue;
+                }
                 let registration = |source| Error::CommandRegistration {
                     name: name.clone(),
                     source,
                 };
-                let options = definition.option_tree();
                 let command = match self.scope {
                     Scope::Guild(guild_id) => {
                         let mut request = client
                             .create_guild_command(guild_id)
-                            .chat_input(name, &definition.description)
-                            .command_options(&options);
-                        if let Some(permissions) = definition.permissions.discord_default() {
+                            .chat_input(name, &model.description)
+                            .command_options(&model.options);
+                        if let Some(permissions) = model.default_member_permissions {
                             request = request.default_member_permissions(permissions);
                         }
                         request.await
@@ -464,9 +620,9 @@ impl SlashCommands {
                     Scope::Global => {
                         let mut request = client
                             .create_global_command()
-                            .chat_input(name, &definition.description)
-                            .command_options(&options);
-                        if let Some(permissions) = definition.permissions.discord_default() {
+                            .chat_input(name, &model.description)
+                            .command_options(&model.options);
+                        if let Some(permissions) = model.default_member_permissions {
                             request = request.default_member_permissions(permissions);
                         }
                         request.await
@@ -489,61 +645,77 @@ impl SlashCommands {
         Ok(active)
     }
 
-    #[allow(
-        deprecated,
-        reason = "Twilight の Command モデルに含まれる dm_permission は送信しない。"
-    )]
     fn replacement_commands(&self) -> Result<Vec<Command>> {
         self.entries
             .iter()
-            .map(|(name, definition)| {
-                let command = Command {
-                    application_id: None,
-                    contexts: None,
-                    default_member_permissions: definition.permissions.discord_default(),
-                    description: definition.description.clone(),
-                    description_localizations: None,
-                    dm_permission: None,
-                    guild_id: None,
-                    id: None,
-                    integration_types: None,
-                    kind: CommandType::ChatInput,
-                    name: name.clone(),
-                    name_localizations: None,
-                    nsfw: None,
-                    options: definition.option_tree(),
-                    version: Id::new(1),
-                };
-                command::command(&command)?;
-                Ok(command)
-            })
+            .map(|(name, definition)| self.chat_model(name, definition))
+            .chain(
+                self.menus
+                    .names()
+                    .map(|(kind, name)| self.menu_model(kind, name)),
+            )
             .collect()
     }
 
+    fn chat_model(&self, name: &str, definition: &Definition) -> Result<Command> {
+        let mut command = command_model(
+            CommandType::ChatInput,
+            name,
+            &definition.description,
+            definition.option_tree(),
+            definition.permissions.discord_default(),
+        );
+        self.configure_command(&mut command);
+        validate_options(&command.options)?;
+        validate_command_size(
+            &command.name,
+            command.name_localizations.as_ref(),
+            &command.description,
+            command.description_localizations.as_ref(),
+            &command.options,
+        )?;
+        Ok(command)
+    }
+
+    fn menu_model(&self, kind: MenuKind, name: &str) -> Result<Command> {
+        let mut command = command_model(kind.into(), name, "", Vec::new(), None);
+        self.configure_command(&mut command);
+        command::command(&command)?;
+        Ok(command)
+    }
+
     fn bind(mut self, registered: Vec<Command>) -> Result<ActiveSlashCommands> {
-        if registered.len() != self.entries.len() {
+        let expected = self.entries.len() + self.menus.len();
+        if registered.len() != expected {
             return Err(CommandSyncError::CountMismatch {
-                expected: self.entries.len(),
+                expected,
                 returned: registered.len(),
             }
             .into());
         }
 
+        let only_chat_input = self.menus.is_empty();
         let mut handlers = HashMap::with_capacity(registered.len());
         for command in registered {
             let name = command.name;
-            if command.kind != CommandType::ChatInput {
+            if only_chat_input && command.kind != CommandType::ChatInput {
                 return Err(CommandSyncError::NotChatInput { name }.into());
             }
             let id = command
                 .id
                 .ok_or_else(|| CommandSyncError::MissingId { name: name.clone() })?;
-            let definition = self
-                .entries
-                .remove(&name)
-                .ok_or_else(|| CommandSyncError::UnexpectedName { name: name.clone() })?;
+            let route = if command.kind == CommandType::ChatInput {
+                self.entries
+                    .remove(&name)
+                    .map(|definition| definition.into_route(name.clone()))
+            } else {
+                MenuKind::from_command_type(command.kind)
+                    .and_then(|kind| self.menus.remove(kind, &name))
+                    .map(|handler| Route::menu(name.clone(), command.kind, handler))
+            }
+            .ok_or_else(|| CommandSyncError::UnexpectedName { name: name.clone() })?;
             if let std::collections::hash_map::Entry::Vacant(entry) = handlers.entry(id) {
-                entry.insert(definition.into_route());
+                entry.insert(route);
             } else {
                 return Err(CommandSyncError::DuplicateId { name }.into());
             }
@@ -552,7 +724,39 @@ impl SlashCommands {
         Ok(ActiveSlashCommands {
             scope: self.scope,
             handlers,
+            checks: self.checks,
+            invocation_hooks: self.invocation_hooks,
         })
+    }
+}
+
+#[allow(
+    deprecated,
+    reason = "Twilight の Command モデルに含まれる dm_permission は送信しない。"
+)]
+fn command_model(
+    kind: CommandType,
+    name: &str,
+    description: &str,
+    options: Vec<CommandOption>,
+    default_member_permissions: Option<Permissions>,
+) -> Command {
+    Command {
+        application_id: None,
+        contexts: None,
+        default_member_permissions,
+        description: description.into(),
+        description_localizations: None,
+        dm_permission: None,
+        guild_id: None,
+        id: None,
+        integration_types: None,
+        kind,
+        name: name.into(),
+        name_localizations: None,
+        nsfw: None,
+        options,
+        version: Id::new(1),
     }
 }
 
@@ -590,6 +794,51 @@ impl std::fmt::Debug for Definition {
 }
 
 impl CommandGroup<'_> {
+    /// この階層にある登録済みのサブコマンドまたは中間グループの翻訳を置き換えます。
+    /// `name` には翻訳前の名前を指定します。空の設定で翻訳を消せます。
+    ///
+    /// # エラー
+    /// 指定した子がない、翻訳が無効、または同じ階層の名前と衝突した場合に失敗します。
+    /// 失敗した場合は以前の翻訳を維持します。
+    pub fn set_child_localizations(
+        &mut self,
+        name: &str,
+        localizations: CommandOptionLocalizations,
+    ) -> Result<()> {
+        localizations.validate()?;
+        let unknown = || RegistrationError::UnknownCommand {
+            name: name.to_owned(),
+        };
+        if let Some(group) = &self.group {
+            let Some(Child::Group { subs, .. }) = self.root.children.get_mut(group) else {
+                return Err(unknown().into());
+            };
+            validate_distinct_names(
+                name,
+                localizations.names(),
+                subs.iter()
+                    .map(|(sibling, sub)| (sibling.as_str(), sub.localizations.names())),
+            )?;
+            subs.get_mut(name).ok_or_else(unknown)?.localizations = localizations;
+        } else {
+            validate_distinct_names(
+                name,
+                localizations.names(),
+                self.root
+                    .children
+                    .iter()
+                    .map(|(sibling, child)| (sibling.as_str(), child.localizations().names())),
+            )?;
+            *self
+                .root
+                .children
+                .get_mut(name)
+                .ok_or_else(unknown)?
+                .localizations_mut() = localizations;
+        }
+        Ok(())
+    }
+
     /// サブコマンドを登録します。
     ///
     /// # エラー
@@ -608,16 +857,43 @@ impl CommandGroup<'_> {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
+        self.insert_subcommand(name, description, options, slash_handler(handler))
+    }
+
+    pub(crate) fn subcommand_prepared(
+        &mut self,
+        name: &str,
+        description: &str,
+        options: Vec<CommandOption>,
+        handler: impl AsyncFn(&mut SlashContext<'_>, &InvocationHooks) -> Result<()>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()> {
+        self.insert_subcommand(
+            name,
+            description,
+            options,
+            Box::new(PreparedSlashHandler(handler)),
+        )
+    }
+
+    fn insert_subcommand(
+        &mut self,
+        name: &str,
+        description: &str,
+        options: Vec<CommandOption>,
+        handler: Box<dyn SlashHandler>,
+    ) -> Result<()> {
         command::chat_input_name(name)?;
         command::description(description)?;
-        command::options(&options)?;
+        validate_options(&options)?;
         let definition = SubDefinition {
             description: description.into(),
             options,
+            localizations: CommandOptionLocalizations::default(),
             handlers: RouteHandlers {
-                command: Some(Box::new(
-                    adapt_handler!(handler, ctx: &mut SlashContext<'_>),
-                )),
+                command: Some(handler),
                 autocompletes: HashMap::new(),
             },
         };
@@ -634,6 +910,13 @@ impl CommandGroup<'_> {
                 }
             },
         };
+        validate_distinct_names(
+            name,
+            None,
+            siblings
+                .iter()
+                .map(|(sibling, child)| (sibling.as_str(), child.localizations().names())),
+        )?;
         match siblings.entry(name.into()) {
             Entry::Vacant(entry) => {
                 entry.insert(Child::Sub(definition));
@@ -660,10 +943,19 @@ impl CommandGroup<'_> {
         }
         command::chat_input_name(name)?;
         command::description(description)?;
+        validate_distinct_names(
+            name,
+            None,
+            self.root
+                .children
+                .iter()
+                .map(|(sibling, child)| (sibling.as_str(), child.localizations().names())),
+        )?;
         match self.root.children.entry(name.into()) {
             Entry::Vacant(entry) => {
                 entry.insert(Child::Group {
                     description: description.into(),
+                    localizations: CommandOptionLocalizations::default(),
                     subs: BTreeMap::new(),
                 });
             }
@@ -681,6 +973,12 @@ fn insert_sub(
     name: &str,
     definition: SubDefinition,
 ) -> Result<()> {
+    validate_distinct_names(
+        name,
+        None,
+        subs.iter()
+            .map(|(sibling, sub)| (sibling.as_str(), sub.localizations.names())),
+    )?;
     match subs.entry(name.into()) {
         Entry::Vacant(entry) => {
             entry.insert(definition);
@@ -782,11 +1080,23 @@ impl PermissionPolicy {
     }
 }
 
-fn interaction_permissions(interaction: &Interaction) -> Option<Permissions> {
+pub(crate) fn interaction_permissions(interaction: &Interaction) -> Option<Permissions> {
     interaction
         .member
         .as_ref()
         .and_then(|member| member.permissions)
+}
+
+#[allow(
+    deprecated,
+    reason = "古い形式のペイロードでは、channel の代わりに channel_id が送られる。"
+)]
+pub(crate) fn interaction_channel_id(interaction: &Interaction) -> Option<Id<ChannelMarker>> {
+    interaction
+        .channel
+        .as_ref()
+        .map(|channel| channel.id)
+        .or(interaction.channel_id)
 }
 
 struct Definition {
@@ -803,13 +1113,31 @@ enum Child {
     Sub(SubDefinition),
     Group {
         description: String,
+        localizations: CommandOptionLocalizations,
         subs: BTreeMap<String, SubDefinition>,
     },
+}
+
+impl Child {
+    fn localizations(&self) -> &CommandOptionLocalizations {
+        match self {
+            Self::Sub(sub) => &sub.localizations,
+            Self::Group { localizations, .. } => localizations,
+        }
+    }
+
+    fn localizations_mut(&mut self) -> &mut CommandOptionLocalizations {
+        match self {
+            Self::Sub(sub) => &mut sub.localizations,
+            Self::Group { localizations, .. } => localizations,
+        }
+    }
 }
 
 struct SubDefinition {
     description: String,
     options: Vec<CommandOption>,
+    localizations: CommandOptionLocalizations,
     handlers: RouteHandlers,
 }
 
@@ -819,10 +1147,15 @@ impl Definition {
         if self.children.is_empty() {
             return self.options.clone();
         }
-        let nested = |kind, name: &String, description: &str, options: Vec<CommandOption>| {
+        let nested = |kind,
+                      name: &String,
+                      description: &str,
+                      options: Vec<CommandOption>,
+                      localizations: &CommandOptionLocalizations| {
             let mut option = SlashCommands::typed_option(kind, name, description, false);
             option.required = None;
             option.options = Some(options);
+            localizations.apply_borrowed(&mut option);
             option
         };
         self.children
@@ -833,8 +1166,13 @@ impl Definition {
                     name,
                     &sub.description,
                     sub.options.clone(),
+                    &sub.localizations,
                 ),
-                Child::Group { description, subs } => nested(
+                Child::Group {
+                    description,
+                    localizations,
+                    subs,
+                } => nested(
                     CommandOptionType::SubCommandGroup,
                     name,
                     description,
@@ -845,17 +1183,21 @@ impl Definition {
                                 name,
                                 &sub.description,
                                 sub.options.clone(),
+                                &sub.localizations,
                             )
                         })
                         .collect(),
+                    localizations,
                 ),
             })
             .collect()
     }
 
     /// 受信側で、呼ぶ関数を引くための表に変える。
-    fn into_route(self) -> Route {
+    fn into_route(self, name: String) -> Route {
         Route {
+            name,
+            kind: CommandType::ChatInput,
             root: self.handlers,
             children: self
                 .children
@@ -879,6 +1221,8 @@ impl Definition {
 
 /// 一つのコマンドについて、サブコマンドの経路ごとの関数。
 struct Route {
+    name: String,
+    kind: CommandType,
     root: RouteHandlers,
     children: HashMap<String, ChildRoute>,
     permissions: PermissionPolicy,
@@ -895,6 +1239,19 @@ struct RouteHandlers {
 }
 
 impl Route {
+    fn menu(name: String, kind: CommandType, handler: Box<dyn SlashHandler>) -> Self {
+        Self {
+            name,
+            kind,
+            root: RouteHandlers {
+                command: Some(handler),
+                autocompletes: HashMap::new(),
+            },
+            children: HashMap::new(),
+            permissions: PermissionPolicy::Unrestricted,
+        }
+    }
+
     fn find(&self, path: &[&str]) -> Option<&dyn SlashHandler> {
         self.handlers(path)?.command.as_deref()
     }
@@ -925,6 +1282,8 @@ impl Route {
 pub(crate) struct ActiveSlashCommands {
     scope: Scope,
     handlers: HashMap<Id<CommandMarker>, Route>,
+    checks: Vec<CommandCheck>,
+    invocation_hooks: InvocationHooks,
 }
 
 impl ActiveSlashCommands {
@@ -954,7 +1313,16 @@ impl ActiveSlashCommands {
             // サーバー限定のコマンド（`data.guild_id` が `Some`）は対象にしない。
             Scope::Global => data.guild_id.is_none() && self.handlers.contains_key(&data.id),
         };
-        (data.kind == CommandType::ChatInput && in_scope).then_some(data)
+        let supported = data.kind == CommandType::ChatInput
+            || (interaction.kind == InteractionType::ApplicationCommand
+                && MenuKind::from_command_type(data.kind).is_some());
+        (supported && in_scope).then_some(data)
+    }
+
+    fn route(&self, data: &CommandData) -> Option<&Route> {
+        self.handlers
+            .get(&data.id)
+            .filter(|route| route.kind == data.kind)
     }
 
     async fn dispatch_autocomplete(
@@ -967,23 +1335,73 @@ impl ActiveSlashCommands {
         let mut ctx = AutocompleteContext {
             initial,
             data,
-            responded: false,
+            response_finished: false,
         };
         let handler = path.and_then(|path| {
-            self.handlers
-                .get(&data.id)
+            self.route(data)
                 .filter(|route| route.permissions.check(initial.interaction).is_ok())
-                .and_then(|route| route.find_autocomplete(path, ctx.focused_name()))
+                .and_then(|route| {
+                    route
+                        .find_autocomplete(path, ctx.focused_name())
+                        .map(|handler| (route, path, handler))
+                })
         });
-        if let Some(handler) = handler
-            && let Err(error) = handler.call(&mut ctx).await
-        {
-            report_command_error(hooks, ErrorSource::SlashCommand, data, &error);
+        if let Some((route, path, handler)) = handler {
+            let checked = self
+                .check_invocation(
+                    initial.interaction,
+                    route,
+                    path,
+                    CommandCheckSource::Autocomplete,
+                )
+                .await;
+            let result = match checked {
+                Ok(()) => handler.call(&mut ctx).await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                report_command_error(hooks, ErrorSource::SlashCommand, data, &error);
+            }
         }
         // 権限や関数がない場合も、空の候補を返す。
         if let Err(error) = ctx.respond_empty_if_needed().await {
             report_command_error(hooks, ErrorSource::Response, data, &error);
         }
+    }
+
+    async fn check_invocation(
+        &self,
+        interaction: &Interaction,
+        route: &Route,
+        path: &[&str],
+        source: CommandCheckSource,
+    ) -> Result<()> {
+        if !self.checks.is_empty() {
+            run_checks(
+                &self.checks,
+                CommandCheckContext::application(interaction, source, &route.name, path),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn call_command(
+        &self,
+        ctx: &mut SlashContext<'_>,
+        route: &Route,
+        path: &[&str],
+        handler: &dyn SlashHandler,
+    ) -> Result<()> {
+        route.permissions.check(ctx.initial.interaction)?;
+        self.check_invocation(
+            ctx.initial.interaction,
+            route,
+            path,
+            CommandCheckSource::Application(route.kind),
+        )
+        .await?;
+        handler.call(ctx, &self.invocation_hooks).await
     }
 
     pub(crate) async fn dispatch(
@@ -1008,10 +1426,9 @@ impl ActiveSlashCommands {
             self.dispatch_autocomplete(initial, data, path, hooks).await;
             return;
         }
-        let Some((route, handler)) = path.and_then(|path| {
-            self.handlers
-                .get(&data.id)
-                .and_then(|route| route.find(path).map(|handler| (route, handler)))
+        let Some((route, path, handler)) = path.and_then(|path| {
+            self.route(data)
+                .and_then(|route| route.find(path).map(|handler| (route, path, handler)))
         }) else {
             report_command_error(
                 hooks,
@@ -1033,14 +1450,14 @@ impl ActiveSlashCommands {
             data,
             response_state: &mut response_state,
         };
-        let result = match route.permissions.check(interaction) {
-            Ok(()) => handler.call(&mut ctx).await,
-            Err(error) => Err(error),
-        };
+        let result = self.call_command(&mut ctx, route, path, handler).await;
         let check_failed = match result {
             Ok(()) => false,
             Err(error) => {
                 report_command_error(hooks, ErrorSource::SlashCommand, data, &error);
+                if *ctx.response_state == ResponseState::Pending && callback_unavailable(&error) {
+                    return;
+                }
                 matches!(error, Error::Check(_))
             }
         };
@@ -1059,7 +1476,18 @@ impl ActiveSlashCommands {
     }
 }
 
-/// 一回のスラッシュコマンド呼び出しを扱います。
+pub(crate) fn callback_unavailable(error: &Error) -> bool {
+    use twilight_http::{api_error::ApiError, error::ErrorType};
+
+    // Discord が操作を失効済み・応答済みと判定した場合、初回応答を繰り返しても届きません。
+    matches!(error, Error::Http(error) if matches!(
+        error.kind(),
+        ErrorType::Response { error: ApiError::General(response), .. }
+            if matches!(response.code, 10062 | 40060)
+    ))
+}
+
+/// 一回のスラッシュコマンドまたはコンテキストメニューの呼び出しを扱います。
 pub struct SlashContext<'a> {
     initial: InitialResponder<'a>,
     data: &'a CommandData,
@@ -1088,7 +1516,10 @@ impl<'a> SlashContext<'a> {
                 self.followup_ephemeral(text).await
             }
             ResponseState::Deferred { .. } => self.reply(text).await,
-            ResponseState::Replied | ResponseState::ModalOpened => Ok(()),
+            ResponseState::Replied
+            | ResponseState::RepliedV2
+            | ResponseState::OriginalDeleted { .. }
+            | ResponseState::ModalOpened => Ok(()),
         }
     }
 
@@ -1100,6 +1531,16 @@ impl<'a> SlashContext<'a> {
     /// コマンドが呼ばれたサーバーの ID を返します。DM では `None` です。
     pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
         self.initial.interaction.guild_id
+    }
+
+    /// Discord で呼び出したユーザーが選んでいるロケールを返します。
+    pub fn locale(&self) -> Option<&str> {
+        self.initial.interaction.locale.as_deref()
+    }
+
+    /// Discord が通知したサーバーのロケールを返します。
+    pub fn guild_locale(&self) -> Option<&str> {
+        self.initial.interaction.guild_locale.as_deref()
     }
 
     /// 呼び出した人の、このチャンネルでの権限を返します。DM などで届かないときは `None` です。
@@ -1133,17 +1574,8 @@ impl<'a> SlashContext<'a> {
 
     /// コマンドが呼ばれたチャンネルの ID を返します。
     /// 古い形式のペイロードでは、チャンネルオブジェクトに代わって送られる ID を使います。
-    #[allow(
-        deprecated,
-        reason = "古い形式のペイロードでは、channel の代わりに channel_id が送られる。"
-    )]
     pub fn channel_id(&self) -> Option<Id<ChannelMarker>> {
-        self.initial
-            .interaction
-            .channel
-            .as_ref()
-            .map(|channel| channel.id)
-            .or(self.initial.interaction.channel_id)
+        interaction_channel_id(self.initial.interaction)
     }
 
     /// Discord の REST API を直接使うために、Bot の Twilight クライアントを借ります。
@@ -1168,10 +1600,19 @@ impl<'a> SlashContext<'a> {
     ///
     /// サブコマンドで呼ばれたときは、その引数を探します。
     pub fn option(&self, name: &str) -> Option<&'a CommandOptionValue> {
-        leaf_options(&self.data.options)
+        self.leaf_options()
             .iter()
             .find(|option| option.name == name)
             .map(|option| &option.value)
+    }
+
+    pub(crate) fn leaf_options(&self) -> &'a [CommandDataOption] {
+        leaf_options(&self.data.options)
+    }
+
+    /// Discord がこのコマンドと一緒に送った、解決済みの添付ファイルやユーザーなどの情報を借ります。
+    pub fn resolved(&self) -> Option<&'a InteractionDataResolved> {
+        self.data.resolved.as_ref()
     }
 
     /// コマンド名と、サブコマンドの名前を、呼ばれた順に返します。
@@ -1289,8 +1730,7 @@ impl<'a> SlashContext<'a> {
         if *self.response_state != ResponseState::Pending {
             return Err(ResponseStateError::ModalNotFirstResponse.into());
         }
-        let response = modal.response()?;
-        self.initial.send(&response).await?;
+        self.initial.modal(modal).await?;
         *self.response_state = ResponseState::ModalOpened;
         Ok(())
     }
@@ -1371,14 +1811,19 @@ impl<'a> SlashContext<'a> {
         message.validate()?;
         match self.response_state.reply_action(ephemeral)? {
             ReplyAction::Initial => {
-                let response = initial_response(InitialResponse::V2(message), ephemeral);
-                self.initial.send(&response).await?;
+                self.initial.v2_reply(message, ephemeral).await?;
             }
             ReplyAction::EditDeferred => {
-                edit_v2_response(self.initial.http, self.initial.interaction, message).await?
+                edit_v2_response(
+                    self.initial.http,
+                    self.initial.interaction,
+                    message,
+                    Some(&[]),
+                )
+                .await?
             }
         }
-        *self.response_state = ResponseState::Replied;
+        *self.response_state = ResponseState::RepliedV2;
         Ok(())
     }
 }
@@ -1388,6 +1833,8 @@ pub(crate) enum ResponseState {
     Pending,
     Deferred { ephemeral: bool },
     Replied,
+    RepliedV2,
+    OriginalDeleted { completed: bool },
     ModalOpened,
 }
 
@@ -1399,7 +1846,9 @@ impl ResponseState {
                 Err(ResponseStateError::VisibilityLocked.into())
             }
             Self::Deferred { .. } => Ok(ReplyAction::EditDeferred),
-            Self::Replied | Self::ModalOpened => Err(ResponseStateError::AlreadyResponded.into()),
+            Self::Replied | Self::RepliedV2 | Self::OriginalDeleted { .. } | Self::ModalOpened => {
+                Err(ResponseStateError::AlreadyResponded.into())
+            }
         }
     }
 
@@ -1441,10 +1890,19 @@ impl ResponseState {
         content: &str,
         ephemeral: bool,
     ) -> Result<()> {
-        if *self != Self::Replied {
+        self.require_followup()?;
+        send_followup_message(http, interaction, content, ephemeral).await
+    }
+
+    pub(crate) fn require_followup(&self) -> Result<()> {
+        // 遅延応答の直後の followup は、Discord が元の応答の編集として扱うことがある。
+        if !matches!(
+            self,
+            Self::Replied | Self::RepliedV2 | Self::OriginalDeleted { completed: true }
+        ) {
             return Err(ResponseStateError::FollowupBeforeResponse.into());
         }
-        send_followup_message(http, interaction, content, ephemeral).await
+        Ok(())
     }
 }
 
@@ -1511,20 +1969,6 @@ pub(crate) fn v2_update_response(message: &ComponentsV2) -> InteractionResponse 
     response
 }
 
-pub(crate) async fn edit_v2_response(
-    http: &Client,
-    interaction: &Interaction,
-    message: &ComponentsV2,
-) -> Result<()> {
-    http.interaction(interaction.application_id)
-        .update_response(&interaction.token)
-        .flags(MessageFlags::IS_COMPONENTS_V2)
-        .components(Some(&message.components))
-        .allowed_mentions(Some(&AllowedMentions::default()))
-        .await?;
-    Ok(())
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct InitialResponder<'a> {
     pub(crate) http: &'a Client,
@@ -1535,30 +1979,81 @@ pub(crate) struct InitialResponder<'a> {
 
 impl InitialResponder<'_> {
     pub(crate) async fn message(self, content: &str, ephemeral: bool) -> Result<()> {
+        crate::validation::message_content(content)?;
         let response = initial_response(InitialResponse::Message(content), ephemeral);
         self.send(&response).await
     }
 
     pub(crate) async fn send(self, response: &InteractionResponse) -> Result<()> {
         let started_at = self.info.measures_timing().then(Instant::now);
-        self.http
+        let result = self
+            .http
             .interaction(self.interaction.application_id)
             .create_response(self.interaction.id, &self.interaction.token, response)
-            .await?;
+            .await;
+        self.report_response(response.kind, started_at, result)
+    }
+
+    pub(crate) fn report_response<T>(
+        self,
+        response_type: InteractionResponseType,
+        started_at: Option<Instant>,
+        result: std::result::Result<T, twilight_http::Error>,
+    ) -> Result<()> {
         if let Some(started_at) = started_at {
             let completed_at = Instant::now();
-            self.info.report(InfoEvent::InteractionResponded {
-                interaction_type: self.interaction.kind,
-                response_type: response.kind,
-                elapsed: self.timing.elapsed_since_receive(completed_at),
-                rest_elapsed: completed_at.saturating_duration_since(started_at),
-            });
+            let elapsed = self.timing.elapsed_since_receive(completed_at);
+            let rest_elapsed = completed_at.saturating_duration_since(started_at);
+            let interaction_type = self.interaction.kind;
+            let event = match &result {
+                Ok(_) => InfoEvent::InteractionResponded {
+                    interaction_type,
+                    response_type,
+                    elapsed,
+                    rest_elapsed,
+                },
+                Err(error) => {
+                    use twilight_http::{api_error::ApiError, error::ErrorType};
+                    let (http_status, discord_code) = match error.kind() {
+                        ErrorType::Response { status, error, .. } => (
+                            Some(status.get()),
+                            match error {
+                                ApiError::General(error) => Some(error.code),
+                                _ => None,
+                            },
+                        ),
+                        _ => (None, None),
+                    };
+                    let command_id = match &self.interaction.data {
+                        Some(InteractionData::ApplicationCommand(command)) => Some(command.id),
+                        _ => None,
+                    };
+                    InfoEvent::InteractionResponseFailed {
+                        interaction_id: self.interaction.id,
+                        command_id,
+                        interaction_type,
+                        response_type,
+                        elapsed,
+                        queue_wait: self.timing.queue_wait(),
+                        rest_elapsed,
+                        http_status,
+                        discord_code,
+                    }
+                }
+            };
+            self.info.report(event);
         }
+        result?;
         Ok(())
     }
 }
 
+#[cfg(test)]
+#[path = "slash/response_diagnostics_tests.rs"]
+pub(crate) mod response_diagnostics_tests;
+
 async fn edit_text_response(http: &Client, interaction: &Interaction, content: &str) -> Result<()> {
+    crate::validation::message_content(content)?;
     http.interaction(interaction.application_id)
         .update_response(&interaction.token)
         .content(Some(content))
@@ -1588,6 +2083,7 @@ pub(crate) async fn send_followup_message(
     content: &str,
     ephemeral: bool,
 ) -> Result<()> {
+    crate::validation::message_content(content)?;
     let mentions = AllowedMentions::default();
     let client = http.interaction(interaction.application_id);
     let mut followup = client
@@ -1605,6 +2101,7 @@ trait SlashHandler: Send + Sync {
     fn call<'a, 'ctx>(
         &'a self,
         ctx: &'a mut SlashContext<'ctx>,
+        hooks: &'a InvocationHooks,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
 }
 
@@ -1615,13 +2112,14 @@ where
     fn call<'a, 'ctx>(
         &'a self,
         ctx: &'a mut SlashContext<'ctx>,
+        hooks: &'a InvocationHooks,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        Box::pin(self(ctx))
+        Box::pin(hooks.run(ctx, self))
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
 
     use super::{
@@ -1674,7 +2172,7 @@ mod tests {
         deprecated,
         reason = "テスト用の Interaction を組み立てるために、非推奨のフィールドを埋める。"
     )]
-    fn command_interaction(
+    pub(super) fn command_interaction(
         interaction_guild: Option<Id<GuildMarker>>,
         command_guild: Option<Id<GuildMarker>>,
         command_id: u64,
@@ -1719,11 +2217,13 @@ mod tests {
         }
     }
 
-    fn active(scope: Scope) -> ActiveSlashCommands {
+    pub(super) fn active(scope: Scope) -> ActiveSlashCommands {
         let mut handlers = HashMap::new();
         handlers.insert(
             Id::new(5),
             Route {
+                name: "ping".into(),
+                kind: CommandType::ChatInput,
                 root: super::RouteHandlers {
                     command: Some(Box::new(async |_: &mut SlashContext<'_>| -> Result<()> {
                         Ok(())
@@ -1734,7 +2234,12 @@ mod tests {
                 permissions: PermissionPolicy::Unrestricted,
             },
         );
-        ActiveSlashCommands { scope, handlers }
+        ActiveSlashCommands {
+            scope,
+            handlers,
+            checks: Vec::new(),
+            invocation_hooks: super::InvocationHooks::default(),
+        }
     }
 
     #[tokio::test]
@@ -1794,13 +2299,28 @@ mod tests {
         listener: &tokio::net::TcpListener,
         method: &str,
     ) -> std::io::Result<String> {
+        exchange_response(listener, method, None, None).await
+    }
+
+    pub(crate) async fn exchange_response(
+        listener: &tokio::net::TcpListener,
+        method: &str,
+        path_suffix: Option<&str>,
+        response: Option<&str>,
+    ) -> std::io::Result<String> {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
         let (stream, _) = listener.accept().await?;
         let mut stream = BufReader::new(stream);
         let mut line = String::new();
         stream.read_line(&mut line).await?;
-        assert_eq!(line.split_whitespace().next(), Some(method));
+        let mut request = line.split_whitespace();
+        assert_eq!(request.next(), Some(method));
+        if let Some(suffix) = path_suffix {
+            let uri = request.next().unwrap();
+            let path = uri.split_once('?').map_or(uri, |(path, _)| path);
+            assert!(path.ends_with(suffix), "{line}");
+        }
         let mut length = 0;
         loop {
             line.clear();
@@ -1815,11 +2335,130 @@ mod tests {
         }
         let mut body = vec![0; length];
         stream.read_exact(&mut body).await?;
-        stream
-            .get_mut()
-            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
-            .await?;
+        if let Some(response) = response {
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.len()
+            );
+            stream.get_mut().write_all(head.as_bytes()).await?;
+            stream.get_mut().write_all(response.as_bytes()).await?;
+        } else {
+            stream
+                .get_mut()
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await?;
+        }
         Ok(String::from_utf8(body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn manages_a_private_original_response_through_discord_routes() -> Result<()> {
+        use serde_json::{Value, json};
+        use std::time::Duration;
+        use tokio::{net::TcpListener, time::timeout};
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(Error::handler)?;
+        let http = Client::builder()
+            .proxy(
+                listener.local_addr().map_err(Error::handler)?.to_string(),
+                true,
+            )
+            .build();
+        let mut commands = active(Scope::Global);
+        commands.handlers.get_mut(&Id::new(5)).unwrap().root.command =
+            Some(Box::new(async |ctx: &mut SlashContext<'_>| -> Result<()> {
+                assert!(matches!(
+                    ctx.original_response().await,
+                    Err(Error::ResponseState(
+                        ResponseStateError::OriginalResponseUnavailable
+                    ))
+                ));
+                ctx.defer_ephemeral().await?;
+                ctx.edit_original_response("<@123>").await?;
+                assert_eq!(ctx.original_response().await?.id.get(), 7);
+                let v2 = ComponentsV2::new().text("不一致");
+                assert!(matches!(
+                    ctx.edit_original_v2(&v2).await,
+                    Err(Error::ResponseState(
+                        ResponseStateError::OriginalResponseFormatMismatch
+                    ))
+                ));
+                ctx.delete_original_response().await?;
+                assert!(matches!(
+                    ctx.delete_original_response().await,
+                    Err(Error::ResponseState(
+                        ResponseStateError::OriginalResponseUnavailable
+                    ))
+                ));
+                ctx.followup_ephemeral("deleted").await
+            }));
+        let mut interaction = command_interaction(None, None, 5);
+        interaction.token = "test-token".into();
+        let hooks = Hooks::default();
+        let (_, timing) = crate::timing::Pending::new((), None).begin();
+        let server = async {
+            let callback: Value = serde_json::from_str(
+                &exchange_response(
+                    &listener,
+                    "POST",
+                    Some("/interactions/1/test-token/callback"),
+                    None,
+                )
+                .await?,
+            )
+            .unwrap();
+            assert_eq!(callback["data"]["flags"], 64);
+            let original = Some("/webhooks/10/test-token/messages/@original");
+            let patch: Value =
+                serde_json::from_str(&exchange_response(&listener, "PATCH", original, None).await?)
+                    .unwrap();
+            assert_eq!(patch["content"], "<@123>");
+            assert_eq!(patch["allowed_mentions"]["parse"], json!([]));
+            assert!(patch.get("flags").is_none());
+            assert!(patch.get("attachments").is_none());
+            let payload = json!({
+                "id": "7", "channel_id": "2", "type": 0,
+                "author": {"id": "4", "username": "bot", "discriminator": "0"},
+                "content": "<@123>", "timestamp": "2026-01-01T00:00:00.000000+00:00",
+                "attachments": [], "embeds": [], "mention_everyone": false, "mention_roles": [],
+                "mentions": [], "pinned": false, "tts": false, "flags": 64
+            })
+            .to_string();
+            exchange_response(&listener, "GET", original, Some(&payload)).await?;
+            exchange_response(&listener, "DELETE", original, None).await?;
+            let followup: Value = serde_json::from_str(
+                &exchange_response(&listener, "POST", Some("/webhooks/10/test-token"), None)
+                    .await?,
+            )
+            .unwrap();
+            assert_eq!(followup["flags"], 64);
+            assert_eq!(followup["content"], "deleted");
+            Ok::<_, std::io::Error>(())
+        };
+        let (_, server) = timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                commands.dispatch(&http, &interaction, timing, &hooks),
+                server
+            )
+        })
+        .await
+        .map_err(Error::handler)?;
+        server.map_err(Error::handler)
+    }
+
+    #[tokio::test]
+    async fn deleted_defer_does_not_unlock_followup_visibility() {
+        let pending = ResponseState::OriginalDeleted { completed: false };
+        let interaction = command_interaction(None, None, 5);
+        let http = Client::new("test".into());
+        assert!(matches!(
+            pending.followup(&http, &interaction, "private", true).await,
+            Err(Error::ResponseState(
+                ResponseStateError::FollowupBeforeResponse
+            ))
+        ));
     }
 
     #[tokio::test]
@@ -1830,6 +2469,27 @@ mod tests {
         let guild_id = Id::new(1);
         let command_id = Id::new(5);
         let mut slash = SlashCommands::for_guild(guild_id).replace_commands();
+        let invocations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let before = std::sync::Arc::clone(&invocations);
+        slash.set_before_invoke(async move |_: &SlashContext<'_>| {
+            before.lock().unwrap().push("before");
+            Ok(())
+        });
+        let after = std::sync::Arc::clone(&invocations);
+        slash.set_after_invoke(async move |_: &SlashContext<'_>, error: Option<&Error>| {
+            assert!(error.is_none());
+            after.lock().unwrap().push("after");
+            Ok(())
+        });
+        let custom_checks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls = std::sync::Arc::clone(&custom_checks);
+        slash.add_check(crate::CommandCheck::new(
+            async move |ctx: crate::CommandCheckContext<'_>| {
+                assert!(ctx.command_path().eq(["ping", "advanced", "run"]));
+                calls.lock().unwrap().push(ctx.source());
+                ctx.require_permissions(Permissions::MANAGE_GUILD).await
+            },
+        ));
         slash
             .group_with_permissions("ping", "管理", Permissions::MANAGE_GUILD)?
             .group("advanced", "詳細")?
@@ -1960,6 +2620,109 @@ mod tests {
                 assert!(response.contains("\"flags\":64"), "{response}");
             }
         }
+        assert_eq!(
+            *custom_checks.lock().unwrap(),
+            [
+                crate::CommandCheckSource::Application(CommandType::ChatInput),
+                crate::CommandCheckSource::Autocomplete,
+            ]
+        );
+        assert_eq!(*invocations.lock().unwrap(), ["before", "after"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn custom_check_rejects_invocation_before_handler_and_hides_suggestions() -> Result<()> {
+        use crate::{CheckFailure, CommandCheck, CommandCheckContext};
+        use twilight_model::application::interaction::InteractionType;
+
+        let mut slash = SlashCommands::global();
+        slash.register(
+            "ping",
+            "確認",
+            vec![SlashCommands::string_option("key", "対象", true)],
+            async |_: &mut SlashContext<'_>| -> Result<()> { panic!("denied command ran") },
+        )?;
+        slash.autocomplete(
+            &["ping"],
+            "key",
+            async |_: &mut AutocompleteContext<'_>| -> Result<()> {
+                panic!("denied autocomplete ran");
+            },
+        )?;
+        slash.add_check(CommandCheck::new(async |ctx: CommandCheckContext<'_>| {
+            // Authorization uses the registered root even if the payload name differs.
+            if ctx.command_path().eq(["ping"]) {
+                Err(CheckFailure::Rejected.into())
+            } else {
+                Ok(())
+            }
+        }));
+        let mut registered = slash.replacement_commands()?;
+        registered[0].id = Some(Id::new(5));
+        assert_eq!(registered[0].default_member_permissions, None);
+        let active = slash.bind(registered)?;
+        let mut command = command_interaction(None, None, 5);
+        let Some(InteractionData::ApplicationCommand(data)) = &mut command.data else {
+            return Err(Error::msg(
+                "試験用の Interaction にコマンドデータがありません",
+            ));
+        };
+        data.name = "different".into();
+        let mut autocomplete = command.clone();
+        let Some(InteractionData::ApplicationCommand(data)) = &mut autocomplete.data else {
+            return Err(Error::msg(
+                "試験用の Interaction にコマンドデータがありません",
+            ));
+        };
+        data.options = vec![option(
+            "key",
+            CommandOptionValue::Focused("k".into(), CommandOptionType::String),
+        )];
+        autocomplete.kind = InteractionType::ApplicationCommandAutocomplete;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(Error::handler)?;
+        let http = Client::builder()
+            .proxy(
+                listener.local_addr().map_err(Error::handler)?.to_string(),
+                true,
+            )
+            .build();
+        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = std::sync::Arc::clone(&errors);
+        let hook = crate::hooks::Reporter::new(move |report| {
+            observed
+                .lock()
+                .unwrap()
+                .push(matches!(report.error, Error::Check(CheckFailure::Rejected)));
+        });
+        let mut hooks = Hooks {
+            reporter: hook,
+            ..Hooks::default()
+        };
+        hooks.messages.check_failed = Some("private custom denial".into());
+        let (_, timing) = crate::timing::Pending::new((), None).begin();
+        for (input, expected) in [
+            (&command, "private custom denial"),
+            (&autocomplete, "\"choices\":[]"),
+        ] {
+            let (_, response) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    active.dispatch(&http, input, timing, &hooks),
+                    capture_response(&listener, "POST")
+                )
+            })
+            .await
+            .map_err(Error::handler)?;
+            let response = response.map_err(Error::handler)?;
+            assert!(response.contains(expected), "{response}");
+            if input.kind == InteractionType::ApplicationCommand {
+                assert!(response.contains("\"flags\":64"), "{response}");
+            }
+        }
+        assert_eq!(*errors.lock().unwrap(), [true, true]);
         Ok(())
     }
 
@@ -1972,6 +2735,95 @@ mod tests {
         // 登録していない ID や、サーバー限定のコマンドは受け付けない。
         assert!(!global.accepts(&command_interaction(None, None, 6)));
         assert!(!global.accepts(&command_interaction(Some(guild), Some(guild), 5)));
+    }
+
+    #[tokio::test]
+    async fn initial_reply_checks_message_length_before_sending() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(Error::handler)?;
+        let http = Client::builder()
+            .proxy(
+                listener.local_addr().map_err(Error::handler)?.to_string(),
+                true,
+            )
+            .build();
+        let interaction = command_interaction(None, None, 5);
+        let hooks = Hooks::default();
+        let (_, timing) = crate::timing::Pending::new((), None).begin();
+        let initial = crate::slash::InitialResponder {
+            http: &http,
+            interaction: &interaction,
+            timing,
+            info: &hooks.info,
+        };
+        let invalid = "あ".repeat(2001);
+        let rejected = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            initial.message(&invalid, true),
+        )
+        .await
+        .map_err(Error::handler)?;
+        assert!(matches!(rejected, Err(Error::MessageValidation(_))));
+
+        let valid = "あ".repeat(2000);
+        let (result, payload) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(
+                initial.message(&valid, true),
+                capture_response(&listener, "POST")
+            )
+        })
+        .await
+        .map_err(Error::handler)?;
+        result?;
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload.map_err(Error::handler)?).map_err(Error::handler)?;
+        assert_eq!(payload["data"]["content"].as_str(), Some(valid.as_str()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn busy_autocomplete_sends_empty_choices_instead_of_a_message() -> Result<()> {
+        use twilight_model::application::interaction::InteractionType;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(Error::handler)?;
+        let http = Client::builder()
+            .proxy(
+                listener.local_addr().map_err(Error::handler)?.to_string(),
+                true,
+            )
+            .build();
+        let mut interaction = command_interaction(None, None, 5);
+        interaction.kind = InteractionType::ApplicationCommandAutocomplete;
+        let mut hooks = Hooks::default();
+        for message in [Some("busy".into()), None] {
+            hooks.messages.interaction_busy = message;
+            let pending = crate::timing::Pending::new(
+                crate::InteractionEvent {
+                    interaction: interaction.clone(),
+                    radio: Vec::new(),
+                },
+                None,
+            );
+            let (_, response) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    crate::respond_interaction_busy(pending, &http, &hooks),
+                    capture_response(&listener, "POST")
+                )
+            })
+            .await
+            .map_err(Error::handler)?;
+            let response: serde_json::Value =
+                serde_json::from_str(&response.map_err(Error::handler)?).map_err(Error::handler)?;
+            assert_eq!(
+                response,
+                serde_json::json!({ "type": 8, "data": { "choices": [] } })
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -2155,7 +3007,10 @@ mod tests {
         let mut routes: HashMap<_, _> = slash
             .entries
             .into_iter()
-            .map(|(name, definition)| (name, definition.into_route()))
+            .map(|(name, definition)| {
+                let route = definition.into_route(name.clone());
+                (name, route)
+            })
             .collect();
         let config = routes.remove("config").unwrap();
         assert!(config.find(&[]).is_none());
@@ -2222,7 +3077,11 @@ mod tests {
         assert!(slash.autocomplete(&["config"], "key", complete).is_err());
         slash.autocomplete(&["config", "set"], "key", complete)?;
         slash.autocomplete(&["config", "advanced", "set"], "key", complete)?;
-        let route = slash.entries.remove("config").unwrap().into_route();
+        let route = slash
+            .entries
+            .remove("config")
+            .unwrap()
+            .into_route("config".into());
         assert!(route.find_autocomplete(&["set"], "key").is_some());
         assert!(
             route
@@ -2253,7 +3112,7 @@ mod tests {
                 info: &info,
             },
             data,
-            responded: false,
+            response_finished: false,
         };
         let many = (0..26)
             .map(|index| SlashCommands::integer_choice("n", index))
@@ -2267,7 +3126,7 @@ mod tests {
             ctx.respond(vec![long]).await,
             Err(Error::CommandValidation(_))
         ));
-        ctx.responded = true;
+        ctx.response_finished = true;
         assert!(matches!(
             ctx.respond(vec![]).await,
             Err(Error::ResponseState(ResponseStateError::AlreadyResponded))
@@ -2340,6 +3199,452 @@ mod tests {
         assert_eq!(active.handlers.len(), 2);
         assert!(active.handlers.contains_key(&Id::new(12)));
         assert!(active.handlers.contains_key(&Id::new(34)));
+        Ok(())
+    }
+
+    pub(super) fn test_command_message(content: &str) -> Result<twilight_model::channel::Message> {
+        let mut message: twilight_model::channel::Message = serde_json::from_str(
+            r#"{
+            "id": "1", "channel_id": "2", "type": 0,
+            "author": {"id": "3", "username": "member", "discriminator": "0"},
+            "content": "", "timestamp": "2026-01-01T00:00:00.000000+00:00",
+            "attachments": [], "embeds": [], "mention_everyone": false, "mention_roles": [],
+            "mentions": [], "pinned": false, "tts": false
+        }"#,
+        )
+        .map_err(Error::handler)?;
+        message.content = content.into();
+        Ok(message)
+    }
+
+    #[tokio::test]
+    async fn registered_typed_hybrid_dispatches_both_sources_and_rejects_invalid_input()
+    -> Result<()> {
+        use crate::{
+            CommandCheck, CommandCheckContext, CommandCheckSource, CommandSource, Commands,
+            Context, HybridArgumentError, HybridArguments, HybridContext, hooks::Reporter,
+            permissions::PermissionResolver, register_typed_hybrid, timing::Pending,
+        };
+        use std::sync::{Arc, Mutex};
+
+        let mut text = Commands::new("!")?;
+        let mut slash = SlashCommands::global();
+        let checked = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&checked);
+        let check = CommandCheck::new(async move |ctx: CommandCheckContext<'_>| {
+            assert!(ctx.command_path().eq(["inspect"]));
+            observed.lock().unwrap().push(ctx.source());
+            Ok(())
+        });
+        text.add_check(check.clone());
+        slash.add_check(check);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&calls);
+        register_typed_hybrid(
+            &mut text,
+            Some(&mut slash),
+            "inspect",
+            "対象を確認",
+            vec![
+                SlashCommands::user_option("user", "利用者", true),
+                SlashCommands::integer_option("count", "個数", false),
+            ],
+            async move |ctx: &mut HybridContext<'_>, args: HybridArguments<'_>| -> Result<()> {
+                recorded.lock().unwrap().push((
+                    ctx.source(),
+                    args.user_id("user"),
+                    args.integer("count"),
+                ));
+                Ok(())
+            },
+        )?;
+
+        let http = Client::new("test".into());
+        let permissions = PermissionResolver::new(None);
+        let message = test_command_message("!inspect <@55> 2")?;
+        let (_, timing) = Pending::new((), None).begin();
+        let make_context = |message| Context {
+            http: &http,
+            message,
+            timing,
+            permissions: &permissions,
+        };
+        text.dispatch(make_context(&message)).await?;
+        let mut bad_text = message.clone();
+        bad_text.content = "!inspect <#55> 2".into();
+        assert!(matches!(
+            text.dispatch(make_context(&bad_text)).await,
+            Err(Error::HybridArgument(
+                HybridArgumentError::InvalidValue { .. }
+            ))
+        ));
+
+        let mut registered = slash.replacement_commands()?;
+        registered.first_mut().unwrap().id = Some(Id::new(5));
+        let active = slash.bind(registered)?;
+        let mut interaction = command_interaction(None, None, 5);
+        let Some(InteractionData::ApplicationCommand(data)) = &mut interaction.data else {
+            panic!("test interaction contains command data");
+        };
+        data.name = "inspect".into();
+        data.options = vec![
+            option("count", CommandOptionValue::Integer(2)),
+            option("user", CommandOptionValue::User(Id::new(55))),
+        ];
+        let mut bad_slash = interaction.clone();
+        let Some(InteractionData::ApplicationCommand(data)) = &mut bad_slash.data else {
+            panic!("test interaction contains command data");
+        };
+        data.options.pop();
+        let invalid = Arc::new(Mutex::new(0));
+        let notices = Arc::clone(&invalid);
+        let mut hooks = Hooks {
+            reporter: Reporter::new(move |report| {
+                assert!(matches!(
+                    report.error,
+                    Error::HybridArgument(HybridArgumentError::Missing { .. })
+                ));
+                *notices.lock().unwrap() += 1;
+            }),
+            ..Hooks::default()
+        };
+        hooks.messages.slash_command_failed = None;
+        active.dispatch(&http, &interaction, timing, &hooks).await;
+        active.dispatch(&http, &bad_slash, timing, &hooks).await;
+        assert_eq!(*invalid.lock().unwrap(), 1);
+        assert_eq!(
+            *checked.lock().unwrap(),
+            [
+                CommandCheckSource::Text,
+                CommandCheckSource::Text,
+                CommandCheckSource::Application(CommandType::ChatInput),
+                CommandCheckSource::Application(CommandType::ChatInput),
+            ]
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                (CommandSource::Text, Some(Id::new(55)), Some(2)),
+                (CommandSource::Slash, Some(Id::new(55)), Some(2)),
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn registered_hybrid_group_dispatches_aliased_nested_and_fallback_routes() -> Result<()> {
+        use crate::{
+            CommandSource, Commands, Context, HybridArguments, HybridContext, Mentionable,
+            permissions::PermissionResolver, register_hybrid_group_with_aliases, timing::Pending,
+        };
+        use std::sync::{Arc, Mutex};
+        use twilight_model::application::interaction::InteractionDataResolved;
+
+        let mut text = Commands::new("!")?;
+        let mut slash = SlashCommands::global();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        register_hybrid_group_with_aliases(
+            &mut text,
+            Some(&mut slash),
+            "config",
+            "設定",
+            &["c"],
+            |group| {
+                let seen = Arc::clone(&calls);
+                group.fallback(
+                    "show",
+                    "確認",
+                    async move |ctx: &mut HybridContext<'_>,
+                                _: HybridArguments<'_>|
+                                -> Result<()> {
+                        seen.lock().unwrap().push((ctx.source(), None, None, None));
+                        Ok(())
+                    },
+                )?;
+                let mut advanced = group.group_with_aliases("advanced", "詳細", &["a"])?;
+                let seen = Arc::clone(&calls);
+                advanced.subcommand_with_aliases(
+                    "set",
+                    "変更",
+                    &["s"],
+                    vec![
+                        SlashCommands::attachment_option("file", "添付", true),
+                        SlashCommands::integer_option("count", "個数", true),
+                        SlashCommands::mentionable_option("actor", "対象", true),
+                    ],
+                    async move |ctx: &mut HybridContext<'_>,
+                                args: HybridArguments<'_>|
+                                -> Result<()> {
+                        seen.lock().unwrap().push((
+                            ctx.source(),
+                            args.integer("count"),
+                            args.attachment("file").map(|attachment| attachment.id),
+                            args.mentionable("actor"),
+                        ));
+                        Ok(())
+                    },
+                )
+            },
+        )?;
+
+        let http = Client::new("test".into());
+        let permissions = PermissionResolver::new(None);
+        let (_, timing) = Pending::new((), None).begin();
+        let resolved: InteractionDataResolved = serde_json::from_value(serde_json::json!({
+            "attachments": {"17": {"id":"17", "filename":"test.txt", "size":2,
+                "url":"https://example.test/file", "proxy_url":"https://example.test/file"}},
+            "users": {"19": {"id":"19", "username":"member", "discriminator":"0"}}
+        }))
+        .map_err(Error::handler)?;
+        for content in [
+            "!c a s 2 <@19>",
+            "!c unknown",
+            "!c a missing 2",
+            "!c show",
+            "!c",
+        ] {
+            let mut message = test_command_message(content)?;
+            message
+                .attachments
+                .extend(resolved.attachments.values().cloned());
+            text.dispatch(Context {
+                http: &http,
+                message: &message,
+                timing,
+                permissions: &permissions,
+            })
+            .await?;
+        }
+
+        let mut registered = slash.replacement_commands()?;
+        let command = registered.first_mut().unwrap();
+        assert_eq!(command.name, "config");
+        assert_eq!(
+            command
+                .options
+                .iter()
+                .map(|option| option.name.as_str())
+                .collect::<Vec<_>>(),
+            ["advanced", "show"]
+        );
+        command.id = Some(Id::new(5));
+        let active = slash.bind(registered)?;
+        let mut hooks = Hooks::default();
+        hooks.messages.slash_command_failed = None;
+        hooks.messages.slash_command_unavailable = None;
+        for options in [
+            vec![option(
+                "advanced",
+                CommandOptionValue::SubCommandGroup(vec![option(
+                    "set",
+                    CommandOptionValue::SubCommand(vec![
+                        option("count", CommandOptionValue::Integer(2)),
+                        option("actor", CommandOptionValue::Mentionable(Id::new(19))),
+                        option("file", CommandOptionValue::Attachment(Id::new(17))),
+                    ]),
+                )]),
+            )],
+            vec![option("show", CommandOptionValue::SubCommand(Vec::new()))],
+            Vec::new(),
+        ] {
+            let mut interaction = command_interaction(None, None, 5);
+            let Some(InteractionData::ApplicationCommand(data)) = &mut interaction.data else {
+                panic!("test interaction contains command data");
+            };
+            data.name = "config".into();
+            data.options = options;
+            data.resolved = Some(resolved.clone());
+            active.dispatch(&http, &interaction, timing, &hooks).await;
+        }
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                (
+                    CommandSource::Text,
+                    Some(2),
+                    Some(Id::new(17)),
+                    Some(Mentionable::User(Id::new(19)))
+                ),
+                (CommandSource::Text, None, None, None),
+                (
+                    CommandSource::Slash,
+                    Some(2),
+                    Some(Id::new(17)),
+                    Some(Mentionable::User(Id::new(19)))
+                ),
+                (CommandSource::Slash, None, None, None),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_menus_sync_by_kind_and_name() -> Result<()> {
+        use super::UserMenuTarget;
+        use crate::HandlerKind;
+        use twilight_model::channel::Message;
+
+        let registry = || -> Result<SlashCommands> {
+            let mut commands = SlashCommands::global().replace_commands();
+            commands.register("inspect", "対象を確認", vec![], handler)?;
+            let inspect_user =
+                async |_: &mut SlashContext<'_>, _: UserMenuTarget<'_>| -> Result<()> { Ok(()) };
+            let inspect_message =
+                async |_: &mut SlashContext<'_>, _: &Message| -> Result<()> { Ok(()) };
+            commands.register_user_menu("inspect", inspect_user)?;
+            commands.register_message_menu("inspect", inspect_message)?;
+            commands.register_user_menu("Show User Info", inspect_user)?;
+            assert!(matches!(
+                commands.register_user_menu("inspect", inspect_user),
+                Err(Error::Registration(RegistrationError::Duplicate {
+                    kind: HandlerKind::UserCommand,
+                    ..
+                }))
+            ));
+            assert!(commands.register_message_menu("", inspect_message).is_err());
+            assert!(
+                commands
+                    .register_message_menu(&"あ".repeat(33), inspect_message)
+                    .is_err()
+            );
+            Ok(commands)
+        };
+        let commands = registry()?;
+        let mut returned = commands.replacement_commands()?;
+        assert_eq!(returned.len(), 4);
+        let ids = [11, 12, 13, 14];
+        let expected: Vec<_> = returned
+            .iter_mut()
+            .zip(ids)
+            .map(|(command, id)| {
+                assert_eq!(
+                    command.description.is_empty(),
+                    command.kind != CommandType::ChatInput
+                );
+                assert!(command.options.is_empty());
+                command.id = Some(Id::new(id));
+                (Id::new(id), command.kind)
+            })
+            .collect();
+        let mut malformed = returned.clone();
+        malformed
+            .iter_mut()
+            .find(|command| command.kind == CommandType::Message)
+            .unwrap()
+            .kind = CommandType::User;
+        assert!(matches!(
+            registry()?.bind(malformed),
+            Err(Error::CommandSync(
+                crate::CommandSyncError::UnexpectedName { .. }
+            ))
+        ));
+        returned.reverse();
+        let active = commands.bind(returned)?;
+        for (id, kind) in expected {
+            assert_eq!(active.handlers.get(&id).map(|route| route.kind), Some(kind));
+        }
+        Ok(())
+    }
+
+    fn menu_interaction(
+        id: u64,
+        kind: CommandType,
+        target_id: u64,
+        resolved: serde_json::Value,
+    ) -> Interaction {
+        let mut interaction = command_interaction(None, None, id);
+        let Some(InteractionData::ApplicationCommand(data)) = &mut interaction.data else {
+            panic!("test interaction contains command data");
+        };
+        data.name = "Inspect".into();
+        data.kind = kind;
+        data.target_id = Some(Id::new(target_id));
+        data.resolved = serde_json::from_value(resolved).unwrap();
+        interaction
+    }
+
+    #[tokio::test]
+    async fn context_menus_deliver_typed_targets_and_use_standard_failure_hooks() -> Result<()> {
+        use std::sync::{Arc, Mutex};
+
+        use super::UserMenuTarget;
+        use crate::{CheckFailure, ErrorSource, hooks::Reporter, timing::Pending};
+        use serde_json::json;
+        use twilight_model::channel::Message;
+
+        let mut commands = SlashCommands::global();
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let seen_users = Arc::clone(&held);
+        commands.register_user_menu(
+            "Inspect",
+            async move |_: &mut SlashContext<'_>, target: UserMenuTarget<'_>| -> Result<()> {
+                assert!(target.member.is_none());
+                seen_users.lock().unwrap().push(target.user.id.get());
+                Ok(())
+            },
+        )?;
+        let seen_messages = Arc::clone(&held);
+        commands.register_message_menu(
+            "Inspect",
+            async move |ctx: &mut SlashContext<'_>, target: &Message| -> Result<()> {
+                assert_eq!(target.content, "probe");
+                seen_messages.lock().unwrap().push(target.id.get());
+                ctx.require_guild()?;
+                Ok(())
+            },
+        )?;
+        let mut registered = commands.replacement_commands()?;
+        for (command, id) in registered.iter_mut().zip([11, 12]) {
+            command.id = Some(Id::new(id));
+        }
+        let active = commands.bind(registered)?;
+
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let collected_errors = Arc::clone(&errors);
+        let mut hooks = Hooks {
+            reporter: Reporter::new(move |report| {
+                assert_eq!(report.source, ErrorSource::SlashCommand);
+                assert_eq!(report.name, Some("Inspect"));
+                let label = match report.error {
+                    Error::Check(CheckFailure::GuildOnly) => "check",
+                    Error::CommandTargetUnavailable => "target",
+                    Error::CommandUnavailable => "route",
+                    _ => panic!("unexpected command error"),
+                };
+                collected_errors.lock().unwrap().push(label);
+            }),
+            ..Hooks::default()
+        };
+        hooks.messages.slash_command_failed = None;
+        hooks.messages.slash_command_unavailable = None;
+        hooks.messages.check_failed = None;
+        let (_, timing) = Pending::new((), None).begin();
+        let http = Client::new("test".into());
+
+        let user =
+            json!({"users": {"5": {"id": "5", "username": "selected", "discriminator": "0"}}});
+        let message = json!({"messages": {"7": {
+            "id": "7", "channel_id": "2", "type": 0,
+            "author": {"id": "4", "username": "member", "discriminator": "0"},
+            "content": "probe", "timestamp": "2026-01-01T00:00:00.000000+00:00",
+            "attachments": [], "embeds": [], "mention_everyone": false, "mention_roles": [],
+            "mentions": [], "pinned": false, "tts": false
+        }}});
+        for interaction in [
+            menu_interaction(11, CommandType::User, 5, user.clone()),
+            menu_interaction(12, CommandType::Message, 7, message),
+            menu_interaction(11, CommandType::User, 9, user.clone()),
+            menu_interaction(12, CommandType::User, 5, user.clone()),
+        ] {
+            assert!(active.accepts(&interaction));
+            active.dispatch(&http, &interaction, timing, &hooks).await;
+        }
+        // Autocomplete は、ユーザー・メッセージコマンドに対して処理しません。
+        let mut autocomplete = menu_interaction(11, CommandType::User, 5, user);
+        autocomplete.kind = twilight_model::application::interaction::InteractionType::ApplicationCommandAutocomplete;
+        assert!(!active.accepts(&autocomplete));
+        assert_eq!(*held.lock().unwrap(), [5, 7]);
+        assert_eq!(*errors.lock().unwrap(), ["check", "target", "route"]);
         Ok(())
     }
 

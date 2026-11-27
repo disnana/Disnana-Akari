@@ -51,6 +51,18 @@ cargo package --offline --list
 
 `--include-bots` で別の Bot と Webhook の投稿から `!ping` が起動するかは未確認です。
 
+## 公開 API の互換性を確認する
+
+Rust CI の `Public API compatibility` は、公開済みのタグ `v0.2.1` と現在の公開 API を比較します。新しい API の追加を許し、既存の公開関数や型の削除などの互換性を壊す変更は検出します。
+
+同じ検査を手元で実行する場合は、Rust 1.90.0 と cargo-semver-checks 0.46.0 を使います。Akari の最小対応 Rust は、別のパッケージ検証ジョブで確認します。
+
+```sh
+cargo +1.90.0 semver-checks check-release --baseline-rev v0.2.1 --release-type minor
+```
+
+互換性の基準を次の公開版へ移す場合は、CI のタグとこの手順を一緒に変更します。[cargo-semver-checks の公式ドキュメント](https://github.com/obi1kenobi/cargo-semver-checks)
+
 ## 初回公開の認証
 
 公開に使う GitHub アカウントで crates.io にログインし、アカウントのメールアドレスを確認済みにします。[crates.io のアカウント設定](https://crates.io/settings/profile)

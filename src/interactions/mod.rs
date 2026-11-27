@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    future::Future,
-    pin::Pin,
-};
+use std::{future::Future, pin::Pin};
 
 use twilight_http::Client;
 use twilight_model::{
@@ -12,38 +8,47 @@ use twilight_model::{
         modal::{ModalInteractionComponent, ModalInteractionData},
     },
     channel::{
-        Message,
+        Attachment, Message,
         message::{AllowedMentions, MessageFlags, component::ComponentType},
     },
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
         Id,
-        marker::{ChannelMarker, GenericMarker, GuildMarker, RoleMarker, UserMarker},
+        marker::{
+            AttachmentMarker, ChannelMarker, GenericMarker, GuildMarker, RoleMarker, UserMarker,
+        },
     },
 };
 
+mod followup;
+mod modal;
+mod original;
+#[cfg(test)]
+mod original_tests;
 mod owner;
+mod routes;
+pub(crate) use modal::{RadioSubmission, capture_modal_radios};
+use routes::Routes;
 
 use crate::{
-    Error, ErrorSource, HandlerKind, Messages, RegistrationError, ResponseStateError, Result,
-    SelectionError, Timing,
+    Error, ErrorSource, HandlerKind, Messages, ResponseStateError, Result, SelectionError, Timing,
     hooks::Hooks,
     slash::{
-        InitialResponder, ResponseState, edit_ui_response, edit_v2_response, send_followup_message,
-        v2_update_response,
+        InitialResponder, ResponseState, callback_unavailable, edit_ui_response, edit_v2_response,
+        send_followup_message,
     },
-    ui::{ComponentsV2, Modal, UiMessage},
+    ui::{ComponentsV2, DynamicIdRef, Modal, UiMessage},
 };
 
 #[derive(Default)]
 pub(crate) struct InteractionHandlers {
-    buttons: HashMap<String, Box<dyn ButtonHandler>>,
-    selects: HashMap<String, Box<dyn SelectHandler>>,
-    user_selects: HashMap<String, Box<dyn EntitySelectHandler<UserMarker>>>,
-    role_selects: HashMap<String, Box<dyn EntitySelectHandler<RoleMarker>>>,
-    channel_selects: HashMap<String, Box<dyn EntitySelectHandler<ChannelMarker>>>,
-    mentionable_selects: HashMap<String, Box<dyn MentionableSelectHandler>>,
-    modals: HashMap<String, Box<dyn ModalHandler>>,
+    buttons: Routes<dyn ButtonHandler>,
+    selects: Routes<dyn SelectHandler>,
+    user_selects: Routes<dyn EntitySelectHandler<UserMarker>>,
+    role_selects: Routes<dyn EntitySelectHandler<RoleMarker>>,
+    channel_selects: Routes<dyn EntitySelectHandler<ChannelMarker>>,
+    mentionable_selects: Routes<dyn MentionableSelectHandler>,
+    modals: Routes<dyn ModalHandler>,
 }
 
 impl std::fmt::Debug for InteractionHandlers {
@@ -61,17 +66,17 @@ impl std::fmt::Debug for InteractionHandlers {
 }
 
 impl InteractionHandlers {
+    pub(crate) fn has_modals(&self) -> bool {
+        !self.modals.is_empty()
+    }
+
     pub(crate) fn register_button(
         &mut self,
         custom_id: &str,
         handler: impl AsyncFn(&mut ButtonContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        register_handler(
-            &mut self.buttons,
-            HandlerKind::Button,
-            custom_id,
-            Box::new(handler),
-        )
+        self.buttons
+            .register_exact(HandlerKind::Button, custom_id, Box::new(handler))
     }
 
     pub(crate) fn register_select(
@@ -79,12 +84,8 @@ impl InteractionHandlers {
         custom_id: &str,
         handler: impl AsyncFn(&mut SelectContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        register_handler(
-            &mut self.selects,
-            HandlerKind::Select,
-            custom_id,
-            Box::new(handler),
-        )
+        self.selects
+            .register_exact(HandlerKind::Select, custom_id, Box::new(handler))
     }
 
     pub(crate) fn register_user_select(
@@ -92,12 +93,8 @@ impl InteractionHandlers {
         custom_id: &str,
         handler: impl AsyncFn(&mut UserSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        register_handler(
-            &mut self.user_selects,
-            HandlerKind::UserSelect,
-            custom_id,
-            Box::new(handler),
-        )
+        self.user_selects
+            .register_exact(HandlerKind::UserSelect, custom_id, Box::new(handler))
     }
 
     pub(crate) fn register_role_select(
@@ -105,12 +102,8 @@ impl InteractionHandlers {
         custom_id: &str,
         handler: impl AsyncFn(&mut RoleSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        register_handler(
-            &mut self.role_selects,
-            HandlerKind::RoleSelect,
-            custom_id,
-            Box::new(handler),
-        )
+        self.role_selects
+            .register_exact(HandlerKind::RoleSelect, custom_id, Box::new(handler))
     }
 
     pub(crate) fn register_channel_select(
@@ -118,8 +111,7 @@ impl InteractionHandlers {
         custom_id: &str,
         handler: impl AsyncFn(&mut ChannelSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        register_handler(
-            &mut self.channel_selects,
+        self.channel_selects.register_exact(
             HandlerKind::ChannelSelect,
             custom_id,
             Box::new(handler),
@@ -131,8 +123,7 @@ impl InteractionHandlers {
         custom_id: &str,
         handler: impl AsyncFn(&mut MentionableSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        register_handler(
-            &mut self.mentionable_selects,
+        self.mentionable_selects.register_exact(
             HandlerKind::MentionableSelect,
             custom_id,
             Box::new(handler),
@@ -144,12 +135,8 @@ impl InteractionHandlers {
         custom_id: &str,
         handler: impl AsyncFn(&mut ModalContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        register_handler(
-            &mut self.modals,
-            HandlerKind::Modal,
-            custom_id,
-            Box::new(handler),
-        )
+        self.modals
+            .register_exact(HandlerKind::Modal, custom_id, Box::new(handler))
     }
 
     pub(crate) fn has_handlers(&self) -> bool {
@@ -164,17 +151,17 @@ impl InteractionHandlers {
 
     pub(crate) fn accepts(&self, interaction: &Interaction) -> bool {
         match ui_input(interaction) {
-            Some(UiInput::Button(id)) => self.buttons.contains_key(id),
-            Some(UiInput::Select(data)) => self.selects.contains_key(&data.custom_id),
-            Some(UiInput::UserSelect(data)) => self.user_selects.contains_key(&data.custom_id),
-            Some(UiInput::RoleSelect(data)) => self.role_selects.contains_key(&data.custom_id),
+            Some(UiInput::Button(id)) => self.buttons.resolve(id).is_some(),
+            Some(UiInput::Select(data)) => self.selects.resolve(&data.custom_id).is_some(),
+            Some(UiInput::UserSelect(data)) => self.user_selects.resolve(&data.custom_id).is_some(),
+            Some(UiInput::RoleSelect(data)) => self.role_selects.resolve(&data.custom_id).is_some(),
             Some(UiInput::ChannelSelect(data)) => {
-                self.channel_selects.contains_key(&data.custom_id)
+                self.channel_selects.resolve(&data.custom_id).is_some()
             }
             Some(UiInput::MentionableSelect(data)) => {
-                self.mentionable_selects.contains_key(&data.custom_id)
+                self.mentionable_selects.resolve(&data.custom_id).is_some()
             }
-            Some(UiInput::Modal(data)) => self.modals.contains_key(&data.custom_id),
+            Some(UiInput::Modal(data)) => self.modals.resolve(&data.custom_id).is_some(),
             None => false,
         }
     }
@@ -185,6 +172,7 @@ impl InteractionHandlers {
         interaction: &Interaction,
         timing: Timing,
         hooks: &Hooks,
+        radio: &[RadioSubmission],
     ) {
         let initial = InitialResponder {
             http,
@@ -194,10 +182,10 @@ impl InteractionHandlers {
         };
         match ui_input(interaction) {
             Some(UiInput::Button(id)) => {
-                let Some(handler) = self.buttons.get(id) else {
+                let Some((handler, dynamic_id)) = self.buttons.resolve(id) else {
                     return;
                 };
-                let mut ctx = ButtonContext::new(initial, id);
+                let mut ctx = ButtonContext::new(initial, id, dynamic_id);
                 let result = handler.call(&mut ctx).await;
                 finish_component(
                     &mut ctx,
@@ -209,11 +197,11 @@ impl InteractionHandlers {
                 .await;
             }
             Some(UiInput::Select(data)) => {
-                let Some(handler) = self.selects.get(&data.custom_id) else {
+                let Some((handler, dynamic_id)) = self.selects.resolve(&data.custom_id) else {
                     return;
                 };
                 let mut ctx = SelectContext {
-                    inner: ButtonContext::new(initial, &data.custom_id),
+                    inner: ButtonContext::new(initial, &data.custom_id, dynamic_id),
                     values: &data.values,
                 };
                 let result = handler.call(&mut ctx).await;
@@ -236,10 +224,11 @@ impl InteractionHandlers {
                 dispatch_entity(&self.channel_selects, initial, data, hooks).await;
             }
             Some(UiInput::MentionableSelect(data)) => {
-                let Some(handler) = self.mentionable_selects.get(&data.custom_id) else {
+                let Some((handler, dynamic_id)) = self.mentionable_selects.resolve(&data.custom_id)
+                else {
                     return;
                 };
-                let mut inner = ButtonContext::new(initial, &data.custom_id);
+                let mut inner = ButtonContext::new(initial, &data.custom_id, dynamic_id);
                 let resolved = data.resolved.as_ref();
                 let Ok(values) = parse_mentionables(&data.values, resolved) else {
                     reject_selection(&mut inner, hooks).await;
@@ -261,25 +250,18 @@ impl InteractionHandlers {
                 .await;
             }
             Some(UiInput::Modal(data)) => {
-                let Some(handler) = self.modals.get(&data.custom_id) else {
+                let Some((handler, dynamic_id)) = self.modals.resolve(&data.custom_id) else {
                     return;
                 };
                 let mut ctx = ModalContext {
                     initial,
                     data,
+                    dynamic_id,
                     response: ResponseState::Pending,
+                    radio,
                 };
                 let result = handler.call(&mut ctx).await;
-                let name = Some(data.custom_id.as_str());
-                if let Err(error) = &result {
-                    hooks.reporter.report(ErrorSource::Modal, name, error);
-                }
-                if let Some((content, ephemeral)) =
-                    modal_fallback(ctx.response, result.is_ok(), &hooks.messages)
-                    && let Err(error) = ctx.response.reply(initial, content, ephemeral).await
-                {
-                    hooks.reporter.report(ErrorSource::Response, name, &error);
-                }
+                finish_modal(&mut ctx, result, hooks).await;
             }
             None => {}
         }
@@ -287,15 +269,15 @@ impl InteractionHandlers {
 }
 
 async fn dispatch_entity<M>(
-    handlers: &HashMap<String, Box<dyn EntitySelectHandler<M>>>,
+    handlers: &Routes<dyn EntitySelectHandler<M>>,
     initial: InitialResponder<'_>,
     data: &MessageComponentInteractionData,
     hooks: &Hooks,
 ) {
-    let Some(handler) = handlers.get(&data.custom_id) else {
+    let Some((handler, dynamic_id)) = handlers.resolve(&data.custom_id) else {
         return;
     };
-    let mut inner = ButtonContext::new(initial, &data.custom_id);
+    let mut inner = ButtonContext::new(initial, &data.custom_id, dynamic_id);
     let Ok(values) = parse_entity_ids(&data.values) else {
         reject_selection(&mut inner, hooks).await;
         return;
@@ -339,16 +321,21 @@ fn parse_select_values<T: Eq>(
     values: &[String],
     resolve: impl Fn(Id<GenericMarker>) -> Result<T>,
 ) -> Result<Vec<T>> {
+    collect_selection(values, |value| {
+        if value.starts_with('0') || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(SelectionError::NotAnId.into());
+        }
+        resolve(value.parse().map_err(|_| SelectionError::NotAnId)?)
+    })
+}
+
+fn collect_selection<T: Eq, V>(values: &[V], resolve: impl Fn(&V) -> Result<T>) -> Result<Vec<T>> {
     if values.len() > 25 {
         return Err(SelectionError::TooMany.into());
     }
     let mut selections = Vec::with_capacity(values.len());
     for value in values {
-        if value.starts_with('0') || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(SelectionError::NotAnId.into());
-        }
-        let id = value.parse().map_err(|_| SelectionError::NotAnId)?;
-        let selection = resolve(id)?;
+        let selection = resolve(value)?;
         if selections.contains(&selection) {
             return Err(SelectionError::Duplicate.into());
         }
@@ -361,16 +348,21 @@ fn parse_mentionables(
     values: &[String],
     resolved: Option<&InteractionDataResolved>,
 ) -> Result<Vec<Mentionable>> {
-    parse_select_values(values, |id| {
-        let resolved = resolved.ok_or(SelectionError::MissingResolved)?;
-        let user_id = id.cast();
-        let role_id = id.cast();
-        match (resolved.users.get(&user_id), resolved.roles.get(&role_id)) {
-            (Some(user), None) if user.id == user_id => Ok(Mentionable::User(user_id)),
-            (None, Some(role)) if role.id == role_id => Ok(Mentionable::Role(role_id)),
-            _ => Err(SelectionError::AmbiguousMention.into()),
-        }
-    })
+    parse_select_values(values, |id| resolve_mentionable(id, resolved))
+}
+
+pub(crate) fn resolve_mentionable(
+    id: Id<GenericMarker>,
+    resolved: Option<&InteractionDataResolved>,
+) -> Result<Mentionable> {
+    let resolved = resolved.ok_or(SelectionError::MissingResolved)?;
+    let user_id = id.cast();
+    let role_id = id.cast();
+    match (resolved.users.get(&user_id), resolved.roles.get(&role_id)) {
+        (Some(user), None) if user.id == user_id => Ok(Mentionable::User(user_id)),
+        (None, Some(role)) if role.id == role_id => Ok(Mentionable::Role(role_id)),
+        _ => Err(SelectionError::AmbiguousMention.into()),
+    }
 }
 
 /// 入力フォームの関数が応答しなかったときに、自動で送る文言と、本人にだけ見せるかどうか。
@@ -387,29 +379,26 @@ fn modal_fallback(
     match state {
         ResponseState::Pending => Some((content, true)),
         ResponseState::Deferred { .. } => Some((content, false)),
-        ResponseState::Replied | ResponseState::ModalOpened => None,
+        ResponseState::Replied
+        | ResponseState::RepliedV2
+        | ResponseState::OriginalDeleted { .. }
+        | ResponseState::ModalOpened => None,
     }
 }
 
-fn register_handler<T: ?Sized>(
-    handlers: &mut HashMap<String, Box<T>>,
-    kind: HandlerKind,
-    custom_id: &str,
-    handler: Box<T>,
-) -> Result<()> {
-    if !(1..=100).contains(&custom_id.chars().count()) {
-        return Err(RegistrationError::InvalidCustomId { kind }.into());
+async fn finish_modal(ctx: &mut ModalContext<'_>, result: Result<()>, hooks: &Hooks) {
+    let name = Some(ctx.custom_id());
+    if let Err(error) = &result {
+        hooks.reporter.report(ErrorSource::Modal, name, error);
+        if ctx.response == ResponseState::Pending && callback_unavailable(error) {
+            return;
+        }
     }
-    match handlers.entry(custom_id.into()) {
-        Entry::Vacant(entry) => {
-            entry.insert(handler);
-            Ok(())
-        }
-        Entry::Occupied(_) => Err(RegistrationError::Duplicate {
-            kind,
-            name: custom_id.to_owned(),
-        }
-        .into()),
+    if let Some((content, ephemeral)) =
+        modal_fallback(ctx.response, result.is_ok(), &hooks.messages)
+        && let Err(error) = ctx.response.reply(ctx.initial, content, ephemeral).await
+    {
+        hooks.reporter.report(ErrorSource::Response, name, &error);
     }
 }
 
@@ -428,13 +417,16 @@ async fn finish_component(
     match result {
         Err(error) => {
             hooks.reporter.report(source, name, &error);
+            if ctx.response == ButtonResponse::Pending && callback_unavailable(&error) {
+                return;
+            }
             let Some(text) = failure else {
                 return;
             };
             let fallback = match ctx.response {
                 ButtonResponse::Pending => ctx.reply_ephemeral(text).await,
                 ButtonResponse::DeferredUpdate => ctx.followup_ephemeral(text).await,
-                ButtonResponse::Sent => Ok(()),
+                ButtonResponse::Sent | ButtonResponse::OwnResponse(_) => Ok(()),
             };
             if let Err(error) = fallback {
                 hooks.reporter.report(ErrorSource::Response, name, &error);
@@ -483,6 +475,7 @@ fn ui_input(interaction: &Interaction) -> Option<UiInput<'_>> {
 pub struct ButtonContext<'a> {
     initial: InitialResponder<'a>,
     custom_id: &'a str,
+    dynamic_id: Option<DynamicIdRef<'a>>,
     response: ButtonResponse,
 }
 
@@ -498,10 +491,15 @@ impl std::fmt::Debug for ButtonContext<'_> {
 }
 
 impl<'a> ButtonContext<'a> {
-    fn new(initial: InitialResponder<'a>, custom_id: &'a str) -> Self {
+    fn new(
+        initial: InitialResponder<'a>,
+        custom_id: &'a str,
+        dynamic_id: Option<DynamicIdRef<'a>>,
+    ) -> Self {
         Self {
             initial,
             custom_id,
+            dynamic_id,
             response: ButtonResponse::Pending,
         }
     }
@@ -514,6 +512,11 @@ impl<'a> ButtonContext<'a> {
     /// ボタン作成時に設定した ID を返します。
     pub fn custom_id(&self) -> &'a str {
         self.custom_id
+    }
+
+    /// 動的な名前空間で登録したハンドラーに、ID の名前空間と値を返します。
+    pub fn dynamic_id(&self) -> Option<DynamicIdRef<'a>> {
+        self.dynamic_id
     }
 
     /// ボタンを押したユーザーの ID を返します。
@@ -564,7 +567,7 @@ impl<'a> ButtonContext<'a> {
     pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
         self.response.require_pending()?;
         self.initial.message(content, true).await?;
-        self.response = ButtonResponse::Sent;
+        self.response = ButtonResponse::OwnResponse(ResponseState::Replied);
         Ok(())
     }
 
@@ -616,8 +619,10 @@ impl<'a> ButtonContext<'a> {
         Ok(())
     }
 
-    /// 元の Components V2 メッセージのコンポーネントを置き換えます。
+    /// 元の Components V2 メッセージのコンポーネントを置き換え、指定した添付を追加します。
+    /// 既存の添付ファイルは保持します。
     /// `defer_update` 後にも一度呼べます。
+    /// 遅延更新で添付を追加する場合は、更新前に Discord から添付一覧を取得します。
     ///
     /// # エラー
     /// 更新できない応答状態、元メッセージが Components V2 以外、無効なコンポーネント、または通信の失敗でエラーになります。
@@ -629,10 +634,26 @@ impl<'a> ButtonContext<'a> {
         message.validate()?;
         match action {
             UpdateAction::Initial => {
-                self.initial.send(&v2_update_response(message)).await?;
+                self.initial.v2_update(message).await?;
             }
             UpdateAction::Edit => {
-                edit_v2_response(self.initial.http, self.initial.interaction, message).await?
+                let current;
+                let retained = if message.needs_existing_attachments() {
+                    message.validate_attachment_sizes(
+                        self.initial.interaction.attachment_size_limit,
+                    )?;
+                    current = self.initial.fetch_original_response().await?;
+                    Some(current.attachments.as_slice())
+                } else {
+                    self.message().map(|source| source.attachments.as_slice())
+                };
+                edit_v2_response(
+                    self.initial.http,
+                    self.initial.interaction,
+                    message,
+                    retained,
+                )
+                .await?
             }
         }
         self.response = ButtonResponse::Sent;
@@ -645,8 +666,7 @@ impl<'a> ButtonContext<'a> {
     /// 初回応答済み、無効なモーダル、または Discord が受け付けなかった場合に失敗します。
     pub async fn show_modal(&mut self, modal: &Modal) -> Result<()> {
         self.response.require_pending()?;
-        let response = modal.response()?;
-        self.initial.send(&response).await?;
+        self.initial.modal(modal).await?;
         self.response = ButtonResponse::Sent;
         Ok(())
     }
@@ -674,9 +694,7 @@ impl<'a> ButtonContext<'a> {
     }
 
     async fn send_followup(&self, content: &str, ephemeral: bool) -> Result<()> {
-        if self.response == ButtonResponse::Pending {
-            return Err(ResponseStateError::FollowupBeforeResponse.into());
-        }
+        self.response.require_followup()?;
         send_followup_message(
             self.initial.http,
             self.initial.interaction,
@@ -698,6 +716,11 @@ impl<'a> SelectContext<'a> {
     /// セレクトメニューの ID を返します。
     pub fn custom_id(&self) -> &'a str {
         self.inner.custom_id()
+    }
+
+    /// 動的な名前空間で登録したハンドラーに、ID の名前空間と値を返します。
+    pub fn dynamic_id(&self) -> Option<DynamicIdRef<'a>> {
+        self.inner.dynamic_id()
     }
 
     /// ユーザーが選択した値を借ります。何も選ばれていなければ空です。
@@ -802,7 +825,7 @@ pub type RoleSelectContext<'a> = EntitySelectContext<'a, RoleMarker>;
 /// チャンネルセレクトが選択されたときの情報です。
 pub type ChannelSelectContext<'a> = EntitySelectContext<'a, ChannelMarker>;
 
-/// メンショナブルセレクトで選択できるユーザーまたはロールです。
+/// セレクトメニューやコマンドの引数で指定できるユーザーまたはロールです。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 #[non_exhaustive]
 pub enum Mentionable {
@@ -825,6 +848,11 @@ macro_rules! typed_select_methods {
         /// セレクトメニューの ID を返します。
         pub fn custom_id(&self) -> &$lifetime str {
             self.inner.custom_id()
+        }
+
+        /// 動的な名前空間で登録したハンドラーに、ID の名前空間と値を返します。
+        pub fn dynamic_id(&self) -> Option<DynamicIdRef<$lifetime>> {
+            self.inner.dynamic_id()
         }
 
         /// Discord が解決済みの情報を送った場合に、その情報を借ります。
@@ -935,7 +963,9 @@ impl<'a> MentionableSelectContext<'a> {
 pub struct ModalContext<'a> {
     initial: InitialResponder<'a>,
     data: &'a ModalInteractionData,
+    dynamic_id: Option<DynamicIdRef<'a>>,
     response: ResponseState,
+    radio: &'a [RadioSubmission],
 }
 
 impl std::fmt::Debug for ModalContext<'_> {
@@ -955,12 +985,59 @@ impl<'a> ModalContext<'a> {
         &self.data.custom_id
     }
 
+    /// 動的な名前空間で登録したハンドラーに、ID の名前空間と値を返します。
+    pub fn dynamic_id(&self) -> Option<DynamicIdRef<'a>> {
+        self.dynamic_id
+    }
+
     /// 指定した入力欄に送信されたテキストを借ります。該当の入力欄がない場合は `None` です。
     pub fn text_input(&self, custom_id: &str) -> Option<&'a str> {
         self.data
             .components
             .iter()
             .find_map(|input| submitted_text(input, custom_id))
+    }
+
+    /// 指定した添付欄のファイル ID を Discord から届いた順に借ります。
+    ///
+    /// 添付欄がない場合は `None`、任意入力の欄に添付がない場合は空のスライスです。
+    pub fn file_upload(&self, custom_id: &str) -> Option<&'a [Id<AttachmentMarker>]> {
+        self.data.components.iter().find_map(|input| {
+            submitted_field(input, |field| match field {
+                ModalInteractionComponent::FileUpload(upload) if upload.custom_id == custom_id => {
+                    Some(upload.values.as_slice())
+                }
+                _ => None,
+            })
+        })
+    }
+
+    /// モーダル送信時に Discord が解決した添付の情報を借ります。
+    ///
+    /// 解決データに ID がなければ `None` です。ファイルのダウンロードは行いません。
+    pub fn attachment(&self, id: Id<AttachmentMarker>) -> Option<&'a Attachment> {
+        self.data
+            .resolved
+            .as_ref()?
+            .attachments
+            .get(&id)
+            .filter(|attachment| attachment.id == id)
+    }
+
+    /// 指定したチェックボックスの状態を返します。オフの場合は `Some(false)` です。
+    ///
+    /// 指定した ID のチェックボックスがない場合は `None` です。
+    pub fn checkbox(&self, custom_id: &str) -> Option<bool> {
+        self.data.components.iter().find_map(|input| {
+            submitted_field(input, |field| match field {
+                ModalInteractionComponent::Checkbox(checkbox)
+                    if checkbox.custom_id == custom_id =>
+                {
+                    Some(checkbox.value)
+                }
+                _ => None,
+            })
+        })
     }
 
     /// モーダルを送信したユーザーの ID を返します。
@@ -1040,16 +1117,25 @@ fn submitted_text<'a>(
     component: &'a ModalInteractionComponent,
     custom_id: &str,
 ) -> Option<&'a str> {
+    submitted_field(component, |field| match field {
+        ModalInteractionComponent::TextInput(input) if input.custom_id == custom_id => {
+            Some(input.value.as_str())
+        }
+        _ => None,
+    })
+}
+
+fn submitted_field<'a, T>(
+    component: &'a ModalInteractionComponent,
+    get: impl Fn(&'a ModalInteractionComponent) -> Option<T> + Copy,
+) -> Option<T> {
     match component {
         ModalInteractionComponent::ActionRow(row) => row
             .components
             .iter()
-            .find_map(|child| submitted_text(child, custom_id)),
-        ModalInteractionComponent::Label(label) => submitted_text(&label.component, custom_id),
-        ModalInteractionComponent::TextInput(input) if input.custom_id == custom_id => {
-            Some(&input.value)
-        }
-        _ => None,
+            .find_map(|child| submitted_field(child, get)),
+        ModalInteractionComponent::Label(label) => submitted_field(&label.component, get),
+        field => get(field),
     }
 }
 
@@ -1058,9 +1144,18 @@ enum ButtonResponse {
     Pending,
     DeferredUpdate,
     Sent,
+    OwnResponse(ResponseState),
 }
 
 impl ButtonResponse {
+    fn require_followup(self) -> Result<()> {
+        match self {
+            Self::Pending => Err(ResponseStateError::FollowupBeforeResponse.into()),
+            Self::DeferredUpdate | Self::Sent => Ok(()),
+            Self::OwnResponse(state) => state.require_followup(),
+        }
+    }
+
     fn require_pending(self) -> Result<()> {
         if self == Self::Pending {
             Ok(())
@@ -1073,7 +1168,7 @@ impl ButtonResponse {
         match self {
             Self::Pending => Ok(UpdateAction::Initial),
             Self::DeferredUpdate => Ok(UpdateAction::Edit),
-            Self::Sent => Err(ResponseStateError::CannotUpdate.into()),
+            Self::Sent | Self::OwnResponse(_) => Err(ResponseStateError::CannotUpdate.into()),
         }
     }
 }

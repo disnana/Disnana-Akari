@@ -36,7 +36,7 @@ async fn about(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 ## ボタンを付ける
 
-ボタンには、押されたときに Akari へ届く目印 `custom_id` を付けます。同じ文字列で `events.on_button` に関数を登録すると、押されたときにその関数が呼ばれます。
+Akari の処理を呼ぶボタンには `custom_id` を付けます。同じ文字列で `events.on_button` に関数を登録すると、押されたときにその関数が呼ばれます。
 
 ```rust
 use disnana_akari::ui::{Button, Embed, UiMessage};
@@ -85,6 +85,7 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 | `Button::success(id, label)` | 緑（確認、完了） |
 | `Button::danger(id, label)` | 赤（削除など） |
 | `Button::link(url, label)` | URL を開く。押してもイベントは届きません。 |
+| `Button::premium(sku_id)` | 指定された SKU の購入画面を開く。Discord が表示と購入操作を扱います。 |
 
 ```rust
 use disnana_akari::model::channel::message::EmojiReactionType;
@@ -103,6 +104,19 @@ fn buttons() -> Vec<Button> {
 - `.emoji(...)` で絵文字を付けられます。
 - `.disabled(true)` で、押せない状態にします。
 - リンクボタンの URL は、512 文字以内の絶対 HTTP(S) です。
+
+### 購入ボタン
+
+購入できるアプリの SKU を、`Id<SkuMarker>` で渡します。購入ボタンは従来形式と Components V2 の両方で使えます。ボタンを押すと Discord が購入画面を開きます。
+
+```rust
+use disnana_akari::model::id::{Id, marker::SkuMarker};
+use disnana_akari::ui::{Button, UiMessage};
+
+fn purchase(sku_id: Id<SkuMarker>) -> UiMessage {
+    UiMessage::new().buttons(vec![Button::premium(sku_id)])
+}
+```
 
 ## ボタンのメッセージを書き換える
 
@@ -135,7 +149,7 @@ async fn on_count(ctx: &mut ButtonContext<'_>) -> Result<()> {
 
 ## 時間のかかる処理
 
-ボタンも 3 秒以内の応答が必要です。長くかかるときは、先に `defer_update` で受け付けて、あとで `update_message` や `followup_ephemeral` を呼びます。
+ボタンも 3 秒以内の応答が必要です。長くかかるときは、先に `defer_update` で受け付けて、あとで `update_message` や `followup_ephemeral` を呼びます。作業結果をファイル付きの追加メッセージとして送る場合は、`followup_files` または `followup_files_ephemeral` を使います。[追加のメッセージにファイルを添付する](responding.md#追加のメッセージにファイルを添付する)
 
 ```rust
 use disnana_akari::ui::UiMessage;
@@ -148,6 +162,21 @@ async fn slow(ctx: &mut ButtonContext<'_>) -> Result<()> {
     ctx.followup_ephemeral("完了しました。").await    // 本人にだけ通知
 }
 ```
+
+## 操作への非公開返信を編集する
+
+ボタンや選択メニューへの `reply_ephemeral` の後は、`original_response` で返信を取得し、`edit_original_response`、`edit_original_ui`、`delete_original_response` で編集や削除ができます。
+
+```rust
+use disnana_akari::{ButtonContext, Result};
+
+async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
+    ctx.reply_ephemeral("この操作を受け付けました。").await?;
+    ctx.edit_original_response("操作が完了しました。").await
+}
+```
+
+Components V2 を非公開で返すときは `reply_v2_ephemeral`、その返信を編集するときは `edit_original_v2` を使います。ボタンが付いた元の投稿を編集する場合は、引き続き `update_message` や `update_v2` を使います。`defer_update` は元の投稿を更新するための応答です。
 
 ## ボタンの操作者を確認する
 
@@ -188,6 +217,33 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 ```
 
 返信先が削除されていれば `Ok(None)` が返ります。履歴を読む権限がないなど、取得に失敗したときは `Err` です。
+
+## 再起動後も同じボタンを使う
+
+同じ操作を複数のメッセージに付ける場合、`DynamicId` で機能名と対象の識別子を組み合わせます。機能名で一度登録すれば、それぞれのボタンを押したときに対象の識別子を受け取れます。
+
+```rust
+use disnana_akari::{ButtonContext, Events, Result, SlashContext};
+use disnana_akari::ui::{Button, DynamicId, UiMessage};
+
+async fn show_project(ctx: &mut SlashContext<'_>, project: u64) -> Result<()> {
+    let id = DynamicId::new("project", &project.to_string())?;
+    let message = UiMessage::new().buttons(vec![Button::primary(id, "番号を表示")]);
+    ctx.reply_ui(&message).await
+}
+
+fn register_project_buttons(events: &mut Events) -> Result<()> {
+    events.on_dynamic_button("project", async |ctx: &mut ButtonContext<'_>| -> Result<()> {
+        let Some(id) = ctx.dynamic_id() else {
+            return Ok(());
+        };
+        let project: u64 = id.value().parse().map_err(disnana_akari::Error::handler)?;
+        ctx.reply_ephemeral(&format!("プロジェクト番号は {project} です。")).await
+    })
+}
+```
+
+再起動時にも同じ機能名で登録すると、Discord に残っているボタンを処理できます。Akari は個々のメッセージを保存しません。対象や権限は操作のたびにアプリ側で確認し、識別子に機密情報を入れないでください。選択メニューとモーダルも同じ方法で登録できます。
 
 ## 受け取れる情報
 

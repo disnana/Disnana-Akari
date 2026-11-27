@@ -110,6 +110,63 @@ pub enum Error {
     /// 利用者が登録したハンドラーから返された、アプリ固有のエラーです。
     #[error(transparent)]
     Handler(#[from] HandlerError),
+    /// キャッシュを使うメッセージイベントには、保存件数の指定が必要です。
+    #[error(
+        "キャッシュ済みメッセージのイベントを使うには、Bot::cache_messages に正の保存件数を指定してください"
+    )]
+    MessageCacheRequired,
+    /// キャッシュを使うメンバーイベントには、保存件数の指定が必要です。
+    #[error(
+        "キャッシュ済みのメンバーイベントには Bot::cache_members に正の保存件数を指定してください"
+    )]
+    MemberCacheRequired,
+    /// ボイスチャンネルへの参加や退出を Gateway に要求できませんでした。
+    #[error(transparent)]
+    VoiceGateway(#[from] crate::VoiceGatewayError),
+    /// 登録した Gateway イベントに必要な Intent が設定されていません。
+    #[error(
+        "イベントハンドラーの起動には Intent {any_of:?} のうち少なくとも 1 つが必要です。\n\
+         `Bot::add_intents` で受信したいイベントの Intent を指定してください。"
+    )]
+    MissingEventIntents {
+        /// 受信する範囲に合わせて選べる Intent。
+        any_of: Intents,
+    },
+    /// 型付きハイブリッドコマンドの引数を読み取れませんでした。
+    #[error(transparent)]
+    HybridArgument(#[from] crate::HybridArgumentError),
+    /// ユーザー・メッセージコマンドの選択対象が Discord の応答に含まれていません。
+    #[error("選択されたユーザーまたはメッセージを取得できませんでした")]
+    CommandTargetUnavailable,
+    /// Discord が返したシャード数またはセッション開始制限が無効です。
+    #[error("Discord Gateway の推奨シャード設定を利用できません")]
+    InvalidGatewayRecommendation,
+    /// 推奨されるすべてのシャードに Identify するための残数が不足しています。
+    #[error("Discord Gateway のセッション開始残数 {remaining} は必要数 {required} に足りません")]
+    InsufficientGatewaySessions {
+        /// 起動するシャードの数です。
+        required: u32,
+        /// Discord が返したセッション開始の残数です。
+        remaining: u32,
+    },
+    /// 同じ組のすべてのシャードが時間内に Ready を受信できませんでした。
+    #[error("Discord Gateway のシャード群で、接続の準備が時間内に完了しませんでした")]
+    GatewayWaveTimedOut,
+    /// Gateway から受信した部分的なメッセージ更新の読み取りに失敗しました。
+    #[error("Gateway のメッセージ更新を読み取れませんでした")]
+    MessageUpdateDecode(#[source] serde_json::Error),
+    /// Gateway から受信した絵文字リアクションの一括除去の読み取りに失敗しました。
+    #[error("Gateway の絵文字リアクション除去を読み取れませんでした")]
+    ReactionRemoveEmojiDecode(#[source] serde_json::Error),
+    /// 購読している Gateway 通知のペイロードを読み取れませんでした。
+    #[error("Gateway の `{event}` 通知を読み取れませんでした")]
+    GatewayNotificationDecode {
+        /// Discord のイベント名。
+        event: &'static str,
+        /// ペイロードのデコードエラー。
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 impl Error {
@@ -196,6 +253,10 @@ pub enum HandlerKind {
     Modal,
     /// 引数のオートコンプリートです。
     Autocomplete,
+    /// ユーザーのコンテキストメニューコマンドです。
+    UserCommand,
+    /// メッセージのコンテキストメニューコマンドです。
+    MessageCommand,
 }
 
 impl HandlerKind {
@@ -204,6 +265,8 @@ impl HandlerKind {
         match self {
             Self::TextCommand => "テキストコマンド",
             Self::SlashCommand => "スラッシュコマンド",
+            Self::UserCommand => "ユーザーコマンド",
+            Self::MessageCommand => "メッセージコマンド",
             Self::Button => "ボタン",
             Self::Select => "セレクト",
             Self::UserSelect => "ユーザーセレクト",
@@ -283,6 +346,30 @@ pub enum RegistrationError {
         /// 重複した名前、または `custom_id` です。
         name: String,
     },
+    /// 型付きハイブリッドコマンドで、この引数の種類や制約を扱えません。
+    #[error("型付きハイブリッドコマンドの引数 `{name}` に未対応の種類や無効な制約があります")]
+    InvalidHybridOption {
+        /// 引数名です。
+        name: String,
+    },
+    /// ハイブリッドグループに実行できるサブコマンドがありません。
+    #[error("ハイブリッドグループ `{name}` にサブコマンドを追加してください")]
+    EmptyHybridGroup {
+        /// 空のグループまでの正式名です。
+        name: String,
+    },
+    /// アプリコマンドの表示設定に矛盾や無効な値があります。
+    #[error("アプリコマンドの設定 `{field}` が無効です")]
+    InvalidApplicationCommandSetting {
+        /// 問題がある設定の名前です。
+        field: &'static str,
+    },
+    /// スラッシュコマンドとその引数を合わせた文字数が Discord の上限を超えました。
+    #[error("スラッシュコマンドの合計は {characters} 文字です。上限は 8000 文字です")]
+    SlashCommandTooLarge {
+        /// 各フィールドの最長翻訳を使って数えた文字数です。
+        characters: usize,
+    },
 }
 
 /// 実行前の確認（権限など）に通らなかった理由です。
@@ -301,6 +388,9 @@ pub enum CheckFailure {
     /// Discord から権限の情報が届かなかったため、確認できません（安全のため、実行させません）。
     #[error("権限を確認できませんでした")]
     PermissionsUnavailable,
+    /// アプリが登録したチェックで、コマンドの実行を拒否しました。
+    #[error("コマンドのチェックに通りませんでした")]
+    Rejected,
 }
 
 /// Discord が返したスラッシュコマンドの登録結果が、要求と合わなかった理由です。
@@ -366,6 +456,12 @@ pub enum ResponseStateError {
     /// `update_v2` には、Components V2 で作られた元メッセージが必要です。
     #[error("Components V2 で作られた元メッセージが必要です")]
     NeedsV2Message,
+    /// この応答に操作できる元メッセージがありません。
+    #[error("操作できる元の応答メッセージがありません")]
+    OriginalResponseUnavailable,
+    /// 指定した編集方法と、元の応答のコンポーネント形式が一致しません。
+    #[error("元の応答の形式に合う編集方法を使ってください")]
+    OriginalResponseFormatMismatch,
 }
 
 /// Discord が送った選択内容を、読み取れなかった理由です。
@@ -404,6 +500,8 @@ pub enum QueueKind {
     Interaction,
     /// 混雑の通知を返すための待ち行列です。
     BusyNotice,
+    /// 動的なプレフィックスを判定する前の待ち行列です。
+    PrefixDiscovery,
 }
 
 impl QueueKind {
@@ -411,6 +509,9 @@ impl QueueKind {
         match self {
             Self::Event => "イベントの待ち行列がいっぱいで、処理できませんでした",
             Self::TextCommand => "処理枠がいっぱいで、コマンドを実行できませんでした",
+            Self::PrefixDiscovery => {
+                "プレフィックス判定の待ち行列がいっぱいで、処理できませんでした"
+            }
             Self::Interaction => "処理枠がいっぱいで、操作を実行できませんでした",
             Self::BusyNotice => "混雑の通知の待ち行列がいっぱいで、通知できませんでした",
         }
@@ -428,6 +529,10 @@ where
     let boxed: Box<dyn std::error::Error + Send + Sync> = error.into();
     let boxed = match boxed.downcast::<Error>() {
         Ok(error) => return *error,
+        Err(boxed) => boxed,
+    };
+    let boxed = match boxed.downcast::<CheckFailure>() {
+        Ok(error) => return Error::Check(*error),
         Err(boxed) => boxed,
     };
     let boxed = match boxed.downcast::<HttpError>() {
@@ -495,7 +600,7 @@ fn describe_gateway_close(code: u16) -> String {
 mod tests {
     use std::{error::Error as _, io};
 
-    use super::{Error, handler_error};
+    use super::{CheckFailure, Error, handler_error};
 
     #[test]
     fn boxed_handler_error_keeps_the_original_error() {
@@ -577,6 +682,10 @@ mod tests {
         assert!(matches!(error, Error::EmptyToken));
         let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(Error::MissingAuthor);
         assert!(matches!(handler_error(boxed), Error::MissingAuthor));
+        assert!(matches!(
+            handler_error(CheckFailure::Rejected),
+            Error::Check(CheckFailure::Rejected)
+        ));
 
         // 標準のエラーや、メッセージだけのエラーは、Handler で包む。
         let error = handler_error(io::Error::new(io::ErrorKind::NotFound, "missing"));

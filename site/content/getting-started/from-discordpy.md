@@ -16,14 +16,19 @@ discord.py を使ったことがある人向けに、よく使う操作の対応
 | やりたいこと | discord.py | Akari |
 | --- | --- | --- |
 | テキストコマンド | `@bot.command()` | [`Commands::register`](../guide/text-commands.md) |
+| 別名を付ける | `@bot.command(aliases=[...])` | [`Commands::register_with_aliases`](../guide/text-commands.md#コマンドに別名を付ける) |
+| 複数のプレフィックス | `Bot(command_prefix=[...])` | [`Commands::with_prefixes`](../guide/text-commands.md#コマンドに別名を付ける) |
 | 引数を読む | 関数の引数 | `ctx.args()`（残りの本文を丸ごと受け取る） |
 | スラッシュコマンド | `@bot.tree.command()` | [`SlashCommands::register`](../guide/slash-commands.md) |
 | 両対応のコマンド | `@bot.hybrid_command()` | [`register_hybrid`](../guide/hybrid-commands.md) |
 | `on_ready` | `async def on_ready()` | [`events.on_ready(関数)`](../guide/events.md) |
 | `on_message` | `async def on_message(m)` | `events.on_message(関数)` |
+| 編集・削除を受け取る | `on_raw_message_edit`、`on_raw_message_delete`、`on_raw_bulk_message_delete` | [`Events` の raw ハンドラー](../guide/events.md#編集・削除を受け取る) |
+| リアクションを受け取る | `on_raw_reaction_add` など | [`Events` の raw リアクション](../guide/events.md#リアクションの追加・削除を受け取る) |
 | クールダウン | `@commands.cooldown(1, 5)` | [`Cooldown`](../guide/cooldowns.md) |
 | ステータスの変更 | `await bot.change_presence(...)` | [`PresenceHandle::set`](../guide/presence.md)（待たずに戻り、最新の値を送ります） |
 | Cog（機能のまとまり） | `class MyCog(commands.Cog)` | [`Module`](../guide/modules.md)（登録のしかたをまとめるだけの trait） |
+| 定期処理 | `discord.ext.tasks.loop` | [Tokio のタイマーと Ready イベント](../guide/tasks.md) |
 | 権限チェック | `@commands.has_permissions(...)` | [`ctx.require_permissions(..)?`](../guide/permissions.md)（呼んだときだけ確認） |
 | サブコマンド | `app_commands.Group` | [`slash.group(..)`](../guide/slash-commands.md) |
 | オートコンプリート | `@cmd.autocomplete(...)` | [`slash.autocomplete(..)`](../guide/slash-commands.md) |
