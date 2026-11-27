@@ -120,6 +120,72 @@ ctx.set_role_permissions(role_id, role.with(Permissions::MANAGE_MESSAGES), "理�
 
 失敗の理由は、`CheckFailure` に新しい種類として追加します。
 
+### 実装の設計
+
+現在のコードを調べて決めた、実装の方針です。
+
+#### 入り口
+
+- 新しい型 `Access<'a>` に、層 2〜4 の操作をまとめます。`Context`、`CommandContext`、`SlashContext`、`HybridContext` に `access()` を足します。
+- よく使う `can`、`bot_can`、`require_bot_permissions`、`snapshot` だけは、各コンテキストにも同名のメソッドを置きます。ほかは `ctx.access().require_can_moderate(..)` のように呼びます。
+- 型は、新しい `src/access.rs` に置きます。`src/permissions.rs` は計算と取得に専念させます。
+- ボタン、セレクト、モーダルのコンテキストは、最初は対象外にします（後から同じ `Access` を足せる作りにします）。
+
+#### 権限の取得元
+
+| 呼び出し元 | 実行者の権限 | Bot の権限 | 他のメンバーの権限 |
+| --- | --- | --- | --- |
+| スラッシュ | Discord が送る `member.permissions`（REST なし） | Discord が送る `app_permissions`（REST なし） | REST（メンバー取得） |
+| テキスト | 既存の計算（サーバーとチャンネルの取得） | REST（Bot のメンバー取得）と既存の計算 | REST（メンバー取得）と既存の計算 |
+
+- 今の `PermissionResolver::resolve` は、メッセージの送り主に固定されています。これを、ユーザー ID、ロール、タイムアウトを受け取る形に一般化し、`resolve` はそれを呼ぶだけにします。
+- Bot のユーザー ID は、最初に `current_user` で 1 回取得し、保存します。
+- サーバーの取得結果に、ロールの `position` を加えます（階層の判定に使います）。チャンネルの取得結果に、NSFW とスローモードを加えます（`snapshot` に使います）。どちらも、既存のキャッシュと無効化に載せるので、新しい状態は増えません。
+- サーバー全体の権限（チャンネルの上書きを含まない）も、同じ計算から取り出せるようにします（ロールの権限変更の確認に使います）。
+
+#### 層 1 の仕組み
+
+- コマンドごとに `Needs` を保存し、全体のチェックの後、ハンドラーの前に確認します。スラッシュの補完にも適用します。
+- 登録は、`Commands::require(name, needs)` と `SlashCommands::require(name, needs)` です。ハイブリッドは、両方に同じ `Needs` を渡す登録関数を用意します。
+- スラッシュでは、実行者の権限を `default_member_permissions` にも反映します。ただし、すでに明示している場合は上書きしません。
+- ヘルプには、`CommandInfo::required_permissions()` で表示できるようにします。
+
+#### 新しい失敗の種類
+
+`CheckFailure` は `#[non_exhaustive]` なので、種類を追加しても既存の `match` は壊れません。
+
+- `BotMissingPermissions(Permissions)`
+- `NotGuildOwner`
+- `MissingRole`
+- `Hierarchy(HierarchyDenied)`（対象が所有者、自分自身、Bot、実行者の階層が低い、Bot の階層が低い）
+
+`Messages::check_failed` は、これらを日本語の権限名つきで、本人にだけ伝えます。`permission_names(Permissions)` を公開して、アプリも同じ名前を使えるようにします。
+
+#### 追加の通信量
+
+| 操作 | スラッシュ | テキスト |
+| --- | --- | --- |
+| 実行者、Bot の権限の確認 | 0 回 | 既存と同じ取得を共有し、Bot のメンバー取得が 1 回増える |
+| 他のメンバーの権限 | 1 回 | 1 回 |
+| `require_can_moderate` | 対象のメンバー取得 1 回 | 同左 |
+| `snapshot` | 0 回（チャンネル情報はキャッシュの範囲） | 層 1 の確認と共有 |
+| `set_overwrite`、`set_role_permissions` | 現在の値の確認と、書き込みの 2 回 | 同左 |
+
+保存の期間を指定したときは、サーバーとチャンネルの取得を、既存のキャッシュと同じ枠で共有します。
+
+#### 書き込みの確認（送る前）
+
+- `set_overwrite`: Bot が `MANAGE_ROLES` を持つこと、許可または拒否する権限を、Bot 自身が持つこと（管理者は除く）。持たなければ、リクエストを送らずに失敗します。
+- `set_role_permissions`: Bot が `MANAGE_ROLES` を持つこと、対象のロールが Bot の最上位ロールより低いこと、付与する権限を Bot がサーバー全体で持つこと。
+- 理由は、書き込みのたびに必須で、512 文字を超えたら送る前に失敗します。
+- 読み取りは、キャッシュを使わずに現在の値を取得します（読んで書き戻す方式の誤りを減らすためです）。
+
+#### 決めておく規則
+
+- 最上位ロールが同じ位置のときは、「高くない」として拒否します（安全側に倒します）。
+- 管理者権限は、ロール階層の確認を免除しません（Discord の規則と同じです）。
+- 取得に失敗した、あるいは情報が足りないときは、必ず失敗します。
+
 ### テスト
 
 階層の関数は、所有者、同位、上位、下位、Bot が下位、自分自身、`@everyone` だけのメンバーを網羅します。権限の計算は、サーバー側の上書きとスレッドを含めて、既存のテストを拡張します。
