@@ -29,6 +29,7 @@ use crate::{
     ResponseStateError, Result, Timing,
     error::adapt_handler,
     hooks::{Hooks, InfoReporter},
+    permissions::check_permissions,
     ui::{ComponentsV2, Modal, UiMessage},
 };
 
@@ -346,24 +347,6 @@ impl SlashCommands {
             scope: self.scope,
             handlers,
         })
-    }
-}
-
-/// 権限の確認。サーバー外、権限が不明、不足の順に失敗する。
-fn check_permissions(
-    guild_id: Option<Id<GuildMarker>>,
-    held: Option<Permissions>,
-    required: Permissions,
-) -> std::result::Result<(), CheckFailure> {
-    if guild_id.is_none() {
-        return Err(CheckFailure::GuildOnly);
-    }
-    let held = held.ok_or(CheckFailure::PermissionsUnavailable)?;
-    let missing = required - held;
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(CheckFailure::MissingPermissions(missing))
     }
 }
 
@@ -1010,10 +993,10 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        ActiveSlashCommands, AllowedMentions, CheckFailure, CommandOptionType, CommandType,
-        GuildMarker, Id, InitialResponse, Interaction, InteractionResponseType, MessageFlags,
-        Permissions, ReplyAction, ResponseState, Result, Scope, SlashCommands, SlashContext,
-        SlashHandler, check_permissions, initial_response, v2_update_response,
+        ActiveSlashCommands, AllowedMentions, CommandOptionType, CommandType, GuildMarker, Id,
+        InitialResponse, Interaction, InteractionResponseType, MessageFlags, Permissions,
+        ReplyAction, ResponseState, Result, Scope, SlashCommands, SlashContext, SlashHandler,
+        initial_response, v2_update_response,
     };
     use crate::ui::{Button, ComponentsV2, Embed, UiMessage};
 
@@ -1122,30 +1105,6 @@ mod tests {
         assert!(!scoped.accepts(&command_interaction(None, None, 5)));
         assert!(!scoped.accepts(&command_interaction(Some(Id::new(2)), None, 5)));
         assert!(!scoped.accepts(&command_interaction(Some(guild), Some(Id::new(2)), 6)));
-    }
-
-    #[test]
-    fn permission_check_fails_closed_and_reports_what_is_missing() {
-        let guild = Some(Id::new(1));
-        let ban = Permissions::BAN_MEMBERS;
-        let both = Permissions::BAN_MEMBERS | Permissions::KICK_MEMBERS;
-        assert_eq!(check_permissions(guild, Some(both), ban), Ok(()));
-        assert_eq!(
-            check_permissions(guild, Some(both), Permissions::empty()),
-            Ok(())
-        );
-        assert_eq!(
-            check_permissions(guild, Some(ban), both),
-            Err(CheckFailure::MissingPermissions(Permissions::KICK_MEMBERS))
-        );
-        assert_eq!(
-            check_permissions(guild, None, ban),
-            Err(CheckFailure::PermissionsUnavailable)
-        );
-        assert_eq!(
-            check_permissions(None, Some(both), ban),
-            Err(CheckFailure::GuildOnly)
-        );
     }
 
     #[test]

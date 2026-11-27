@@ -74,6 +74,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.timing() -> Timing` | このテキストコマンド呼び出しの測定値を取得します。 |
 | `ctx.reply(content).await -> Result<()>` | コマンドのメッセージに返信し、返信先の投稿者や本文中のメンションへの通知を抑止します。 |
 | `ctx.reply_with(content, &mentions).await -> Result<()>` | 通知する相手を `AllowedMentions` で指定して返信します（`reply` は何も通知しません）。メッセージ返信の `Context` と `CommandContext` で使えます。 |
+| `ctx.require_permissions(perms).await -> Result<()>` | 送り主がすべての権限を持つか確認します。足りないと `Error::Check(CheckFailure::MissingPermissions(不足分))` を返します。`ctx.permissions().await`、`ctx.require_guild()` も使えます。テキストコマンドでは Discord から取得して計算します（`Bot::cache_permissions(ttl)` で保存期間を指定できます）。 |
 | `ctx.reply_ui(&message).await -> Result<()>` | `UiMessage` を元のメッセージに返信します。 |
 | `ctx.reply_v2(&message).await -> Result<()>` | `ComponentsV2` を元のメッセージに返信します。 |
 
@@ -382,7 +383,7 @@ fn build() -> Result<Bot> {
 | `interaction_busy` | スラッシュ、ボタン、選択メニュー、フォームの処理枠が満杯のとき（本人にだけ） | 「現在混雑しています。…」 |
 | `slash_command_failed` | スラッシュコマンドの関数がエラーを返したか、応答しなかったとき | 「コマンドを処理できませんでした。」 |
 | `slash_command_unavailable` | Akari に登録していないスラッシュコマンドが実行されたとき（本人にだけ） | 「このコマンドは現在利用できません。」 |
-| `check_failed` | `require_*` の確認に通らず、ハンドラーが `CheckFailure` を返したとき（本人にだけ。スラッシュコマンドのみ） | 「このコマンドを使う権限がありません。」 |
+| `check_failed` | `require_*` の確認に通らず、ハンドラーが `CheckFailure` を返したとき（スラッシュでは本人にだけ、テキストでは元の投稿への返信） | 「このコマンドを使う権限がありません。」 |
 | `button_failed` | ボタンの関数がエラーを返したとき（本人にだけ） | 「ボタンを処理できませんでした。」 |
 | `select_failed` | 選択メニューの関数がエラーを返したとき、または選択内容を読み取れなかったとき（本人にだけ） | 「選択内容を処理できませんでした。」 |
 | `modal_failed` | フォームの関数がエラーを返したとき（本人にだけ） | 「入力内容を処理できませんでした。」 |

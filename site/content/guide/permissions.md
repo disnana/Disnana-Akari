@@ -2,8 +2,7 @@
 
 コマンドを「サーバーの管理者だけ」「BAN の権限を持つ人だけ」に絞るには、ハンドラーの先頭で確認します。Akari が黙って確認することはなく、**呼ぶと確認し、通らなければエラーを返す** だけです（`?` で抜けます）。
 
-> [!NOTE]
-> 現在対応しているのは **スラッシュコマンド** です。テキストコマンドとハイブリッドの権限確認は、今後追加します。
+スラッシュコマンド、テキストコマンド、ハイブリッドコマンドのどれでも、同じ名前のメソッドで確認できます（テキストコマンドとハイブリッドは `.await` が付きます）。
 
 ## ハンドラーで確認する
 
@@ -27,6 +26,25 @@ async fn ban(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 `ctx.permissions()` は、Discord がロールとチャンネルごとの上書きを反映して計算した値です。管理者はすべての権限を持つものとして返ります。
 
+## テキストコマンドで確認する
+
+メッセージには権限が付いていないため、Akari が Discord からサーバーとチャンネルの情報を取得して計算します（Twilight 公式の `twilight-util` の計算を使います）。ロールやチャンネルごとの上書きを反映し、サーバーのオーナーと管理者はすべての権限を持つものとして扱います。
+
+```rust
+use disnana_akari::model::guild::Permissions;
+use disnana_akari::{CommandContext, Result};
+
+async fn purge(ctx: CommandContext<'_>) -> Result<()> {
+    ctx.require_permissions(Permissions::MANAGE_MESSAGES).await?;
+    ctx.reply("確認に通りました。").await
+}
+```
+
+DM では `CheckFailure::GuildOnly` になります。
+
+> [!TIP]
+> 確認のたびに Discord へ問い合わせます。呼び出しが多い Bot は、`Bot::cache_permissions(Duration::from_secs(60))` で取得した情報を一定時間だけ保存できます。保存中にロールやチャンネルの権限を変えると、期間が過ぎるまで反映されません。スラッシュコマンドは Discord が権限を送るため、この設定の影響を受けません。
+
 ## 確認に通らなかったとき
 
 確認が失敗すると、`Error::Check(CheckFailure)` が返ります。
@@ -37,7 +55,7 @@ async fn ban(ctx: &mut SlashContext<'_>) -> Result<()> {
 | `MissingPermissions(perms)` | 足りない権限（`perms`）がある |
 | `PermissionsUnavailable` | 権限の情報が届かなかった（安全のため、実行させません） |
 
-何もしなければ、Akari が本人にだけ `Messages::check_failed`（既定は「このコマンドを使う権限がありません。」）を返し、`Bot::on_error` にも報告します。文言を変える・送らない設定は[エラーと自動で送る文言](errors.md)を見てください。
+何もしなければ、Akari が `Messages::check_failed`（既定は「このコマンドを使う権限がありません。」）を返し、`Bot::on_error` にも報告します。スラッシュコマンドでは本人にだけ、テキストコマンドでは元の投稿への返信になります。文言を変える・送らない設定は[エラーと自動で送る文言](errors.md)を見てください。
 
 足りない権限の名前を使って、自分で返信することもできます。
 

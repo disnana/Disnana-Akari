@@ -1,7 +1,12 @@
 use std::{collections::HashMap, future::Future, pin::Pin};
 
+use twilight_model::{
+    guild::Permissions,
+    id::{Id, marker::GuildMarker},
+};
+
 use crate::{
-    Context, ErrorSource, HandlerKind, RegistrationError, Result, Timing,
+    Context, Error, ErrorSource, HandlerKind, RegistrationError, Result, Timing,
     error::adapt_handler,
     hooks::Hooks,
     ui::{ComponentsV2, UiMessage},
@@ -101,7 +106,12 @@ impl Commands {
         hooks
             .reporter
             .report(ErrorSource::TextCommand, name, &error);
-        if let Some(text) = &hooks.messages.text_command_failed
+        let text = if matches!(error, Error::Check(_)) {
+            &hooks.messages.check_failed
+        } else {
+            &hooks.messages.text_command_failed
+        };
+        if let Some(text) = text
             && let Err(reply_error) = ctx.reply(text).await
         {
             hooks
@@ -153,6 +163,39 @@ impl<'a> CommandContext<'a> {
     /// 元のメッセージコンテキストを借ります。
     pub fn context(&self) -> &Context<'a> {
         &self.ctx
+    }
+
+    /// メッセージが送られたサーバーの ID を返します。DM では `None` です。
+    pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
+        self.ctx.guild_id()
+    }
+
+    /// サーバーの中で送られたことを確認します。詳細は [`Context::require_guild`] を参照してください。
+    ///
+    /// # エラー
+    ///
+    /// DM などでは [`CheckFailure::GuildOnly`](crate::CheckFailure::GuildOnly) を返します。
+    pub fn require_guild(&self) -> Result<Id<GuildMarker>> {
+        self.ctx.require_guild()
+    }
+
+    /// 送り主の、このチャンネルでの権限を返します。詳細は [`Context::permissions`] を参照してください。
+    ///
+    /// # エラー
+    ///
+    /// 権限を計算できなかった場合に失敗します。
+    pub async fn permissions(&self) -> Result<Permissions> {
+        self.ctx.permissions().await
+    }
+
+    /// 送り主が、指定した権限をすべて持っていることを確認します。
+    /// 詳細は [`Context::require_permissions`] を参照してください。
+    ///
+    /// # エラー
+    ///
+    /// 足りない場合は [`CheckFailure::MissingPermissions`](crate::CheckFailure::MissingPermissions) を返します。
+    pub async fn require_permissions(&self, required: Permissions) -> Result<()> {
+        self.ctx.require_permissions(required).await
     }
 
     /// 元のメッセージに返信します。詳細は [`Context::reply`] を参照してください。

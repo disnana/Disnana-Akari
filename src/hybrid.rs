@@ -5,7 +5,11 @@ use twilight_model::{
         command::{CommandOption, CommandOptionType},
         interaction::application_command::CommandOptionValue,
     },
-    id::{Id, marker::UserMarker},
+    guild::Permissions,
+    id::{
+        Id,
+        marker::{GuildMarker, UserMarker},
+    },
 };
 
 use crate::{
@@ -124,6 +128,57 @@ impl<'a> HybridContext<'a> {
         match &self.inner {
             SourceContext::Text { ctx, .. } => Some(ctx.context().message().author.id),
             SourceContext::Slash(ctx) => ctx.author_id(),
+        }
+    }
+
+    /// コマンドが呼ばれたサーバーの ID を返します。DM では `None` です。
+    pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
+        match &self.inner {
+            SourceContext::Text { ctx, .. } => ctx.guild_id(),
+            SourceContext::Slash(ctx) => ctx.guild_id(),
+        }
+    }
+
+    /// サーバーの中で呼ばれたことを確認し、その ID を返します。
+    ///
+    /// # エラー
+    ///
+    /// DM などでは [`CheckFailure::GuildOnly`](crate::CheckFailure::GuildOnly) を返します。
+    pub fn require_guild(&self) -> Result<Id<GuildMarker>> {
+        self.guild_id()
+            .ok_or_else(|| crate::CheckFailure::GuildOnly.into())
+    }
+
+    /// 呼び出した人の、このチャンネルでの権限を返します。
+    ///
+    /// スラッシュでは Discord が送った値を、テキストでは REST で計算した値を使います
+    /// （[`Bot::cache_permissions`](crate::Bot::cache_permissions) で、計算に使う情報を保存できます）。
+    ///
+    /// # エラー
+    ///
+    /// DM では [`CheckFailure::GuildOnly`](crate::CheckFailure::GuildOnly)、権限が分からないときは
+    /// [`CheckFailure::PermissionsUnavailable`](crate::CheckFailure::PermissionsUnavailable) を返します。
+    pub async fn permissions(&self) -> Result<Permissions> {
+        match &self.inner {
+            SourceContext::Text { ctx, .. } => ctx.permissions().await,
+            SourceContext::Slash(ctx) => {
+                ctx.require_guild()?;
+                ctx.permissions()
+                    .ok_or_else(|| crate::CheckFailure::PermissionsUnavailable.into())
+            }
+        }
+    }
+
+    /// 呼び出した人が、指定した権限をすべて持っていることを確認します。
+    ///
+    /// # エラー
+    ///
+    /// 足りない場合は、不足分を入れた
+    /// [`CheckFailure::MissingPermissions`](crate::CheckFailure::MissingPermissions) を返します。
+    pub async fn require_permissions(&self, required: Permissions) -> Result<()> {
+        match &self.inner {
+            SourceContext::Text { ctx, .. } => ctx.require_permissions(required).await,
+            SourceContext::Slash(ctx) => ctx.require_permissions(required),
         }
     }
 
