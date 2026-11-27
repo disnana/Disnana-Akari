@@ -18,6 +18,13 @@ pub enum Error {
         /// 返せる最大の数です。
         max: usize,
     },
+    /// 利用者の関数が panic しました。Akari は、panic を受け止めて、この種類のエラーとして報告します
+    /// （Bot は止まりません）。
+    #[error("ハンドラーが panic しました: {message}")]
+    HandlerPanic {
+        /// panic のメッセージです。文字列以外を渡された場合は、その旨を示す文言です。
+        message: String,
+    },
     /// 実行前の確認（権限など）に通りませんでした。
     #[error(transparent)]
     Check(#[from] CheckFailure),
@@ -440,11 +447,31 @@ where
 macro_rules! adapt_handler {
     ($handler:ident, $arg:ident: $ty:ty) => {
         async move |$arg: $ty| -> $crate::Result<()> {
-            $handler($arg).await.map_err($crate::error::handler_error)
+            // 利用者の関数が panic しても、Bot 全体は止めず、エラーとして報告する。
+            match ::futures_util::FutureExt::catch_unwind(::std::panic::AssertUnwindSafe(
+                $handler($arg),
+            ))
+            .await
+            {
+                Ok(result) => result.map_err($crate::error::handler_error),
+                Err(payload) => Err($crate::error::panic_error(payload)),
+            }
         }
     };
 }
 pub(crate) use adapt_handler;
+
+/// `catch_unwind` が受け止めた panic の中身を、エラーにする。
+pub(crate) fn panic_error(payload: Box<dyn std::any::Any + Send>) -> Error {
+    let message = match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_owned(),
+            Err(_) => "メッセージのない panic".to_owned(),
+        },
+    };
+    Error::HandlerPanic { message }
+}
 
 /// Gateway が接続を閉じたときの理由を、利用者に分かる形にします。
 fn describe_gateway_close(code: u16) -> String {
@@ -520,6 +547,27 @@ mod tests {
         fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
             Some(&self.0)
         }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_handler_becomes_an_error_instead_of_unwinding() {
+        async fn explode(_: i32) -> std::result::Result<(), std::io::Error> {
+            let reason = "壊れました";
+            panic!("{reason}");
+        }
+        async fn quiet(_: i32) -> std::result::Result<(), std::io::Error> {
+            Ok(())
+        }
+        // 他の処理に巻き込まれないよう、panic のメッセージは、テストの出力に残す。
+        let wrapped = adapt_handler!(explode, value: i32);
+        let result = wrapped(1).await;
+        assert!(
+            matches!(&result, Err(Error::HandlerPanic { message }) if message == "壊れました"),
+            "{result:?}"
+        );
+        // 続けて呼べる（Bot が止まらない）。
+        let wrapped = adapt_handler!(quiet, value: i32);
+        assert!(wrapped(1).await.is_ok());
     }
 
     #[test]
