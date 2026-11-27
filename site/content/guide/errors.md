@@ -117,6 +117,22 @@ Gateway が接続を閉じたときも、理由つきで報告されます。
 | `4004` | Bot トークンが正しくありません。 |
 | `4014` | 許可されていない Intent が要求されました。Developer Portal で、特権 Intent を有効にしてください。 |
 
+## 登録のエラー
+
+コマンドやボタンなどの登録に失敗すると、`Error::Registration(RegistrationError)` が返ります。起動の前に起きるので、`?` で伝えて、起動を止めるのが基本です。
+
+| `RegistrationError` | 起きるとき |
+| --- | --- |
+| `Duplicate { kind, name }` | 同じ名前（または `custom_id`）が、すでに登録されている |
+| `InvalidPrefix`、`InvalidCommandName` | プレフィックスやコマンド名が空、または空白を含む |
+| `InvalidCustomId { kind }` | `custom_id` が 1〜100 文字ではない |
+| `NestedGroup { name }` | サブコマンドのグループの中に、さらにグループを作ろうとした |
+| `UnknownCommand { name }`、`UnknownOption { command, option }` | 登録されていないコマンドや引数に、設定しようとした |
+| `AutocompleteUnsupported { option }` | オートコンプリートを付けられない引数（真偽値や、選択肢つきなど）に付けようとした |
+| `RestrictedCommandRequiresGuild`、`CommandPermissionsAlreadyRequired { name }` | 権限付きのコマンドを、グローバルに登録した／表示条件を二重に設定した |
+
+`kind` は `HandlerKind` で、テキストコマンド、スラッシュコマンド、ボタン、選択メニュー、フォーム、オートコンプリートなどのどれかです。`{kind}` を表示すると、日本語の名前になります。Discord の制約に合わない名前や説明は、別に `Error::CommandValidation` などで返ります。
+
 ## 自動で送る文言
 
 Akari は、Discord の決まりを満たすために、いくつかの場面で利用者へメッセージを送ります。`Bot::with_messages` で、文言を変えたり、送らないようにしたりできます。

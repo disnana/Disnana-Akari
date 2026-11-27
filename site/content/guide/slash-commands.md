@@ -3,7 +3,7 @@
 `/ping` のように、Discord の入力欄で `/` を打つと出てくるメニューから呼び出すコマンドです。説明や入力欄が Discord に表示されるので、利用者にとって分かりやすい方法です。
 
 > [!NOTE]
-> 現在の Akari は、スラッシュコマンドを **サーバーを 1 つ指定して** 登録します。指定したサーバーでは、Bot の起動時に登録され、すぐに使えます。
+> このページの例は、**サーバーを 1 つ指定して** 登録します。指定したサーバーでは、Bot の起動時に登録され、すぐに使えます。すべてのサーバーと DM で使うには、このページの「すべてのサーバーで使う」を見てください。
 
 ## 基本
 
@@ -29,12 +29,13 @@ async fn ping(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 `register` の引数は、順に「名前」「説明」「引数の定義」「呼び出す関数」です。名前や説明が Discord の制約に合わないとき、または名前が重複しているときは、起動前にエラーになります。
 
-起動は `start()` です。テキストコマンドも使う場合は、`run_commands(commands)` に切り替えます。
+起動は `start()` です。テキストコマンドも使う場合は、`run_commands(commands)` に切り替え、本文を読むための Intent も指定します。
 
 <!-- no-check -->
 ```rust
 Bot::from_env()?
     .with_slash_commands(slash)
+    .add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
     .run_commands(commands)
     .await
 ```

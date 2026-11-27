@@ -97,7 +97,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | --- | --- |
 | `SlashCommands::for_guild(guild_id) -> SlashCommands` | Discord のサーバー ID を指定して空のコマンド一覧を作ります。ID の型は `Id<GuildMarker>` です。 |
 | `Registry::new(&mut commands, slash, &mut events).add(&module)?` | `Module` を実装した型の `register(&self, &mut Registry)` を呼び、テキストコマンド、スラッシュコマンド、イベントをまとめて登録します。 |
-| `commands.autocomplete(path, option, handler) -> Result<()>` | 引数に、入力中の候補を返す関数を付けます。`path` はコマンド名（サブコマンドなら経路）、関数は `AutocompleteContext`（`focused()`、`respond(choices)`）を受け取ります。候補は `SlashCommands::{string_choice, integer_choice, number_choice}` で作ります。 |
+| `commands.autocomplete(path, option, handler) -> Result<()>` | 引数に、入力中の候補を返す関数を付けます。`path` はコマンド名（サブコマンドなら経路）、関数は `AutocompleteContext`（入力中の文字列は `focused()`、その引数の名前は `focused_name()`、候補を返すのは `respond(choices)`）を受け取ります。候補は `SlashCommands::{string_choice, integer_choice, number_choice}` で作ります。 |
 | `commands.group(name, description) -> Result<CommandGroup>` | サブコマンドをまとめるコマンドを作ります。`group.subcommand(name, description, options, handler)` と、`group.group(name, description)`（さらに 1 段）で登録します。 |
 | `SlashCommands::global() -> SlashCommands` | アプリ全体（すべてのサーバーと DM）向けに空のコマンド一覧を作ります。Discord 側の反映に時間がかかることがあります。 |
 | `commands.replace_commands() -> SlashCommands` | 起動時に、このアプリの同じ範囲（サーバー、またはグローバル）の全コマンドを、登録した一覧に一括で置き換えます。 |
@@ -295,6 +295,8 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 | `RoleSelectContext<'_>` | `&[Id<RoleMarker>]` |
 | `ChannelSelectContext<'_>` | `&[Id<ChannelMarker>]` |
 | `MentionableSelectContext<'_>` | `&[Mentionable]` |
+
+`UserSelectContext`、`RoleSelectContext`、`ChannelSelectContext` は、共通の `EntitySelectContext<'_, M>` の別名で、選択対象の種類（`M` は `UserMarker` など）だけが違います。メソッドは共通です。
 
 `values()` で対象ごとに型の付いた ID を取得できます。Discord が選択対象の情報を同梱した場合は、`resolved()` で `&InteractionDataResolved` を取得できます。操作への本人宛ての返信には `reply_ephemeral` を使います。[Playground の選択メニュー実装](../examples/ping/entities.rs)
 
