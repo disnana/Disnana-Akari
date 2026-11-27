@@ -30,24 +30,26 @@ cargo package --offline --list
 
 - [x] `bd12867` の修正を Discord で確認。`/akari-check deferred-denial` の公開の待機表示は「処理を終了しました。」に変わり、権限拒否の文言は実行者にだけ返った。
 - [x] `--missing-intent` は接続前に `MESSAGE_CONTENT` の不足を報告する。これはローカルで確認済み。
+- [x] 候補 `9094b11` で Gateway の Ready、ギルドコマンド9件の同期、`!ping` と `/ping` の応答を確認した。
+- [x] `/akari-check typed` の補完と型付き引数、`/akari-check advanced ping` の非公開応答を確認した。
+- [x] 管理者は `!akari-perms`、`/akari-perms`、`!akari-bancheck` を実行でき、`/akari-admin` も表示され非公開で応答した。
+- [x] `!akari-notify` の返信だけが投稿者に通知した。`/ui` の即時・遅延更新と、`/components`、`/entities`、`!owner` の非公開応答を確認した。
+- [x] `--one-worker` では `!slow` 中の2件を混雑として拒否し、終了後に `!ping` は通常応答へ戻った。`--include-bots` でも自身の投稿には反応しなかった。
+- [x] グローバル登録後、`/akari-scope` はサーバーと Bot の DM で応答し、DM の `/akari-guild-only` は拒否された。
+- [x] ギルドの一括置換では試験用の1件が消え、通常の9件とグローバルの2件が残った。
+- [x] 特権 Intent を無効にして起動すると `Bot::on_error` に `4014` と対処が報告された。有効に戻すと Gateway に再接続できた。
 
-### 通常の起動で確認する項目
+### 公開前に残っている権限試験
 
-- [ ] Gateway の Ready とギルドコマンドの同期後、`!ping` と `/ping` が返る。ライブラリから標準出力に診断が出ない。
-- [ ] `/akari-check typed` で `color` に `bl` を入れると `blue` が出る。一致しない入力では候補が空になる。`count:3`、`ratio:1.5`、`enabled:True` が本人にだけ返る。`/akari-check advanced ping` ではネストした経路が返る。
-- [ ] `!akari-perms` と `/akari-perms` で、一般ユーザーと `MANAGE_MESSAGES` を付けたユーザーを比較する。スラッシュの拒否は本人にだけ届く。チャンネルの拒否設定、配下のスレッド、オーナーと管理者の判定も確認する。
-- [ ] `!akari-bancheck` で `BAN_MEMBERS` の有無が反映される。`/akari-admin` は `MANAGE_GUILD` を持つ人に表示され、持たない人には表示されないことを確認する。
-- [ ] `!ping` と `!akari-notify` を比較し、後者だけが元の投稿者を通知対象にする。
-- [ ] `/ui` の Ping、即時更新と遅延更新、`/components` のセレクトとモーダル、`/entities` のユーザー・ロール・チャンネルと混在選択、`!owner` の投稿者確認を一通り試す。
+専用テストサーバーで、オーナーでも管理者でもないメンバーを使います。別のチャンネルや既存のロールから権限が付いていない状態で始めます。
 
-### 起動設定を切り替えて確認する項目
+- [ ] `!akari-perms` と `/akari-perms` は初めに拒否され、テスト用ロールに `MANAGE_MESSAGES` を付けると通る。スラッシュの拒否は実行者にだけ返る。
+- [ ] ロールに `MANAGE_MESSAGES` がある状態で、テストチャンネルの上書きで拒否すると、チャンネルと配下のスレッドの両方で拒否される。上書きを解除すると通る。
+- [ ] `!akari-bancheck` は `BAN_MEMBERS` の有無で結果が変わる。チャンネルの `MANAGE_MESSAGES` の上書きは `BAN_MEMBERS` の判定に影響しない。
+- [ ] `MANAGE_GUILD` がない場合に `/akari-admin` が表示されず、権限を付けると表示される。
+- [ ] `--cache-permissions` で `!akari-perms` を1回呼び、ロールまたはチャンネルの上書きを変更する。直後は変更前の結果が返り、最初の判定から20秒以上経つと新しい結果が返る。
 
-- [ ] `--cache-permissions` で権限キャッシュを作った後、ロールの権限やチャンネルの上書きを変更する。直後はキャッシュされた判定が返り、20 秒経過後には変更が反映される。
-- [ ] `--one-worker` で `!slow` の待機中に `!ping` を 2 件以上送る。枠を超えた分に混雑の返信が出る。
-- [ ] `--include-bots` で別の Bot と Webhook の投稿から `!ping` を呼べる。人が `!echo !ping` を送ったとき、Playground 自身の返信からコマンドが起動しない。
-- [ ] `--global` は専用のテスト Bot で試す。反映後に別サーバーと DM から `/akari-scope` を呼ぶ。DM の `/akari-guild-only` では本人にだけ拒否が返り、診断で `GuildOnly` を確認できる。
-- [ ] 使い捨てのテストサーバーで、一覧外のテストコマンドを作り、`DISCORD_REPLACE_GUILD_COMMANDS=true` を指定して起動する。登録対象だけが残る。
-- [ ] 専用のテスト Bot でポータル側の特権 Intent を無効にした状態で要求し、`Bot::on_error` が Gateway のコード 4014 と対処を報告することを確認する。
+試験用の送信元が用意でき次第、`--include-bots` で別の Bot と Webhook の投稿から `!ping` が起動することも確認します。
 
 ## 初回公開の認証
 
