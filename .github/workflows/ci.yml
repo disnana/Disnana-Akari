@@ -131,7 +131,7 @@ jobs:
           tool=$(find "$tools" -type f -name cargo-semver-checks -print -quit)
           test -n "$tool"
           export PATH="$(dirname "$tool"):$PATH"
-          cargo +1.90.0 semver-checks check-release --baseline-rev v0.2.1 --release-type minor
+          cargo +1.90.0 semver-checks check-release --baseline-rev v0.3.0 --release-type minor
 
   deny:
     name: Licenses, bans and sources

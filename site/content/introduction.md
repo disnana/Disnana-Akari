@@ -36,7 +36,7 @@ Bot を起動し、招待したサーバーで `!ping` と送ると `Pong!` が�
 | [入力フォーム](guide/modals.md) | モーダルで文章を入力してもらいます。 |
 | [Components V2](guide/components-v2.md) | テキスト、区切り線、コンテナーを組み合わせたレイアウトを作ります。 |
 | [クールダウン](guide/cooldowns.md) | ユーザーごとに連打を制限します。 |
-| [権限の確認](guide/permissions.md) | 「BAN の権限を持つ人だけ」のように、実行できる人を絞ります。 |
+| [権限の確認](guide/permissions.md) | 「BAN の権限を持つ人だけ」のように、実行できる人を絞ります。Bot の権限とロールの階層の確認、チャンネルやロール、メンバーの管理も扱います。 |
 | [モジュール](guide/modules.md) | 関連するコマンドやイベントを、ひとまとまりにして登録します（discord.py の Cog にあたります）。 |
 | [ステータスとアクティビティ](guide/presence.md) | Bot のオンライン状態と「〇〇をプレイ中」を設定します。 |
 | [ログ](guide/logging.md) | `tracing` で、エラーや接続の様子をレベルつきで記録します。 |

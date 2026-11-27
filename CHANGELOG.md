@@ -1,5 +1,20 @@
 # 変更履歴
 
+## 0.3.1
+
+権限の確認と、チャンネル、ロール、メンバーの管理を、数値やビットを書かずに、安全に行えるようにしました。0.3.0 から更新する場合は、`disnana-akari = "0.3"` のまま `cargo update` で更新できます。公開 API は追加だけです。
+
+### 追加
+
+- `use disnana_akari::prelude::*;` で、権限とフラグを名前で調べられます（`perms.manage_messages()`、`names()`、`labels()`、`unknown_bits()`）。`Permissions::text()`、`voice()`、`moderator()` のプリセットと、チャンネルの種類や認証レベルなどの日本語名（`label()`）もあります。Twilight が新しい権限を足したときは、テストが失敗して気づけます。
+- `ctx.access()` で `Access` を取得できます。実行者、Bot、ほかのメンバーの権限を調べ（`can`、`missing`、`bot_can`、`permissions_of`）、確認し（`require_permissions`、`require_bot_permissions`、`require_guild_owner`、`require_role`、`require_any_role`）、まとめて取得できます（`snapshot`）。スラッシュコマンドでは、Discord が送る値を使うので、通信しません。
+- `Access::require_can_moderate` で、ロールの階層から、対象のメンバーを操作できるかを確認できます。所有者、自分自身、Bot 自身、最上位ロールが同じか上の相手は拒否します。`CheckFailure` に `BotMissingPermissions`、`NotGuildOwner`、`MissingRole`、`Hierarchy` を追加しました。
+- `Needs` と `Commands::require`、`SlashCommands::require` で、必要な権限を登録時に宣言できます。ハンドラーの前に、実行者、Bot の順に確認します。登録されていない名前は、登録の時点で失敗します。独自のチェックからは `CommandCheckContext::access()` を使えます。
+- チャンネルの権限の上書きを、`Overwrite`、`Tri`、`OverwriteTarget` で読み書きできます（`overwrite_of`、`set_overwrite`、`delete_overwrite`）。ロールの権限は `role_permissions`、`set_role_permissions` です。送る前に、Bot の権限とロールの位置を確認します。
+- `ctx.manage()` で、メンバー（キック、BAN、BAN の解除、タイムアウト、ニックネーム、ロールの付け外し）と VC（移動、ミュート、スピーカーミュート）を管理できます。送る前に、Bot の権限とロールの階層を確認し、足りなければ通信せずに失敗します。範囲外の値は `InvalidArgument` で失敗します。
+- チャンネルとロールの作成、編集、削除を、種類ごとの型で行えます（`NewTextChannel`、`NewVoiceChannel`、`NewCategory`、`TextChannelEdit`、`VoiceChannelEdit`、`NewRole`、`RoleEdit`）。名前やトピックなどの範囲は、送る前に検証します。
+- 管理操作は、実行した人が操作してよいかを確認しません。呼ぶ前に `require_permissions` と `require_can_moderate` で確認してください。
+
 ## 0.3.0
 
 テキスト・スラッシュ・ハイブリッドコマンドの型付き引数と実行制御を広げ、Discord の新しい UI、音声接続、複数シャードの運用に対応しました。0.2 系から更新する場合は `disnana-akari = "0.3"` に切り替えてください。既存の Bot は Intent の設定を引き続き使えます。添付サイズやコンポーネント構成の検証で、一部の無効な送信は Discord へ送る前にエラーを返すようになりました。
