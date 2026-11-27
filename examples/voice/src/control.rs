@@ -86,7 +86,7 @@ pub(super) fn commands(guild: Id<GuildMarker>) -> Result<(SlashCommands, mpsc::R
         (CommandMode::Record, "ボイスチャンネルの録音を開始します"),
         (
             CommandMode::PlayTest,
-            "ボイスチャンネルで短いテスト音を再生します",
+            "ボイスチャンネルで再生テストを行います",
         ),
     ] {
         let name = mode.label();

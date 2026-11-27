@@ -1,4 +1,5 @@
 use std::{
+    env,
     future::pending,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -28,7 +29,7 @@ use super::{
     CONNECTION_TIMEOUT, LEAVE_TIMEOUT,
     control::{self, Control, MAX_UPLOAD_BYTES, RecordingOptions},
     multitrack::{Recorder, TrackFile},
-    playback::test_tone,
+    playback::test_audio,
     songbird_info,
     speaker::Speakers,
 };
@@ -125,6 +126,7 @@ struct Session {
     connection: Option<VoiceConnection>,
     recording: Option<Recorder>,
     completed: Option<Vec<TrackFile>>,
+    test_speech: Option<PathBuf>,
 }
 
 fn voice_driver() -> (Driver, Speakers) {
@@ -151,6 +153,7 @@ async fn run_session(
         connection: None,
         recording: None,
         completed: None,
+        test_speech: env::var_os("AKARI_VOICE_TEST_SPEECH_WAV").map(PathBuf::from),
     };
     println!("VC 操作コマンドを登録します");
     let interrupt = tokio::signal::ctrl_c();
@@ -223,10 +226,14 @@ impl Session {
             }
             Control::PlayTest { channel, reply } if !reply.is_closed() => {
                 let message = match self.join(channel).await {
-                    Ok(()) => match test_tone().await {
+                    Ok(()) => match test_audio(self.test_speech.as_deref()).await {
                         Ok(input) => {
                             self.driver.play_only_input(input);
-                            "短いテスト音を再生します。"
+                            if self.test_speech.is_some() {
+                                "テストメッセージを読み上げます。"
+                            } else {
+                                "短いテスト音を再生します。"
+                            }
                         }
                         Err(_) => "テスト音を準備できませんでした。",
                     },

@@ -1,7 +1,7 @@
-use std::f64::consts::TAU;
+use std::{f64::consts::TAU, path::Path};
 
 use disnana_akari::Result;
-use songbird::input::Input;
+use songbird::input::{File, Input};
 
 const SAMPLE_RATE: u32 = 48_000;
 const TONE_SAMPLES: usize = SAMPLE_RATE as usize * 300 / 1000;
@@ -9,8 +9,12 @@ const GAP_SAMPLES: usize = SAMPLE_RATE as usize * 80 / 1000;
 const FADE_SAMPLES: usize = SAMPLE_RATE as usize * 20 / 1000;
 const PEAK: f64 = i16::MAX as f64 * 0.15;
 
-pub(super) async fn test_tone() -> Result<Input> {
-    super::load_audio(Input::from(wav())).await
+pub(super) async fn test_audio(speech: Option<&Path>) -> Result<Input> {
+    let input = speech.map_or_else(
+        || Input::from(wav()),
+        |path| File::new(path.to_owned()).into(),
+    );
+    super::load_audio(input).await
 }
 
 fn wav() -> Vec<u8> {
@@ -92,7 +96,7 @@ mod tests {
 
     #[tokio::test]
     async fn songbird_accepts_the_generated_pcm_wav() -> Result<()> {
-        let input = test_tone().await?;
+        let input = test_audio(None).await?;
         assert!(input.is_playable());
         let params = input
             .parsed()

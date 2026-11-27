@@ -2,7 +2,7 @@
 use std::env;
 
 use disnana_akari::{
-    Bot, Error, Presence, PresenceHandle, Result, SlashCommands, SlashContext,
+    Bot, Error, Messages, Presence, PresenceHandle, Result, SlashCommands, SlashContext,
     model::{
         gateway::presence::{ActivityType, MinimalActivity, Status},
         guild::Permissions,
@@ -68,8 +68,12 @@ async fn main() -> Result<()> {
         },
     )?;
 
+    let mut messages = Messages::default();
+    // このサンプルが扱うのは /akari-status だけです。
+    messages.slash_command_unavailable = None;
     Bot::from_env()?
         .with_presence(presence)
+        .with_messages(messages)
         .with_slash_commands(slash)
         .start()
         .await

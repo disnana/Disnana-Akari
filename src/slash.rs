@@ -1454,6 +1454,9 @@ impl ActiveSlashCommands {
             Ok(()) => false,
             Err(error) => {
                 report_command_error(hooks, ErrorSource::SlashCommand, data, &error);
+                if *ctx.response_state == ResponseState::Pending && callback_unavailable(&error) {
+                    return;
+                }
                 matches!(error, Error::Check(_))
             }
         };
@@ -1470,6 +1473,17 @@ impl ActiveSlashCommands {
             report_command_error(hooks, ErrorSource::Response, data, &error);
         }
     }
+}
+
+fn callback_unavailable(error: &Error) -> bool {
+    use twilight_http::{api_error::ApiError, error::ErrorType};
+
+    // Discord が操作を失効済み・応答済みと判定した場合、初回応答を繰り返しても届きません。
+    matches!(error, Error::Http(error) if matches!(
+        error.kind(),
+        ErrorType::Response { error: ApiError::General(response), .. }
+            if matches!(response.code, 10062 | 40060)
+    ))
 }
 
 /// 一回のスラッシュコマンドまたはコンテキストメニューの呼び出しを扱います。
@@ -2197,7 +2211,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn active(scope: Scope) -> ActiveSlashCommands {
+    pub(super) fn active(scope: Scope) -> ActiveSlashCommands {
         let mut handlers = HashMap::new();
         handlers.insert(
             Id::new(5),

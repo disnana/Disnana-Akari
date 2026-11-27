@@ -13,7 +13,7 @@ use twilight_model::http::attachment::Attachment;
 use super::{file_response::FileCallback, tests::command_interaction, *};
 use crate::timing::Pending;
 
-async fn reject_callback(listener: &TcpListener) -> io::Result<()> {
+async fn reject_callback(listener: &TcpListener, status: &str, code: u64) -> io::Result<()> {
     let (stream, _) = listener.accept().await?;
     let mut stream = BufReader::new(stream);
     let mut line = String::new();
@@ -38,9 +38,9 @@ async fn reject_callback(listener: &TcpListener) -> io::Result<()> {
         return Err(io::Error::other("テストのリクエストが上限を超えています"));
     }
     stream.read_exact(&mut vec![0; bytes]).await?;
-    let body = r#"{"code":10062,"message":"private-response-fixture"}"#;
+    let body = format!(r#"{{"code":{code},"message":"private-response-fixture"}}"#);
     let response = format!(
-        "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream.get_mut().write_all(response.as_bytes()).await
@@ -93,8 +93,8 @@ async fn initial_callback_failures_report_matching_ids_numbers_and_timing() -> R
         assert!(matches!(result, Err(Error::Http(_))));
     };
     let mock = async {
-        reject_callback(&listener).await?;
-        reject_callback(&listener).await
+        reject_callback(&listener, "404 Not Found", 10062).await?;
+        reject_callback(&listener, "404 Not Found", 10062).await
     };
     let ((), result) = tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(default_reply, mock)
@@ -131,6 +131,52 @@ async fn initial_callback_failures_report_matching_ids_numbers_and_timing() -> R
         assert_eq!((*http_status, *discord_code), (Some(404), Some(10062)));
         assert!(*elapsed >= *queue_wait + *rest_elapsed);
         assert!(!format!("{event:?}").contains("private-"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn dispatch_does_not_repeat_an_expired_or_acknowledged_callback() -> Result<()> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::hooks::Reporter;
+
+    let mut commands = tests::active(Scope::Global);
+    commands.handlers.get_mut(&Id::new(5)).unwrap().root.command =
+        Some(Box::new(async |ctx: &mut SlashContext<'_>| -> Result<()> {
+            ctx.defer_ephemeral().await
+        }));
+    let interaction = command_interaction(None, None, 5);
+    for (status, code) in [("404 Not Found", 10062), ("400 Bad Request", 40060)] {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(Error::handler)?;
+        let client = Client::builder()
+            .proxy(
+                listener.local_addr().map_err(Error::handler)?.to_string(),
+                true,
+            )
+            .build();
+        let reports = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&reports);
+        let hooks = Hooks {
+            reporter: Reporter::new(move |report| {
+                assert_eq!(report.source, ErrorSource::SlashCommand);
+                observed.fetch_add(1, Ordering::Relaxed);
+            }),
+            ..Hooks::default()
+        };
+        let (_, timing) = Pending::new((), None).begin();
+        let ((), rejected) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                commands.dispatch(&client, &interaction, timing, &hooks),
+                reject_callback(&listener, status, code),
+            )
+        })
+        .await
+        .map_err(Error::handler)?;
+        rejected.map_err(Error::handler)?;
+        assert_eq!(reports.load(Ordering::Relaxed), 1);
     }
     Ok(())
 }
