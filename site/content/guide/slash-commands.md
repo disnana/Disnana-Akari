@@ -67,28 +67,44 @@ async fn echo(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 ### 整数など、文字列以外の引数
 
-`string_option` が返す値は Twilight の `CommandOption` なので、種類や範囲を書き換えられます。
+`integer_option`、`number_option`、`boolean_option` で、種類ごとの引数を作れます。値は `ctx.integer`、`ctx.number`、`ctx.boolean` で受け取ります。返される値は Twilight の `CommandOption` なので、範囲などは書き換えられます。
 
 ```rust
-use disnana_akari::model::application::command::CommandOptionType;
-use disnana_akari::model::application::interaction::application_command::CommandOptionValue;
 use disnana_akari::{Result, SlashCommands, SlashContext};
 
 fn register(slash: &mut SlashCommands) -> Result<()> {
-    let mut count = SlashCommands::string_option("count", "回数（1〜10）", true);
-    count.kind = CommandOptionType::Integer;
+    let mut count = SlashCommands::integer_option("count", "回数（1〜10）", true);
     count.min_value = Some(1.into());
     count.max_value = Some(10.into());
     slash.register("repeat", "回数ぶん挨拶します", vec![count], repeat)
 }
 
 async fn repeat(ctx: &mut SlashContext<'_>) -> Result<()> {
-    let Some(CommandOptionValue::Integer(count)) = ctx.option("count") else {
+    let Some(count) = ctx.integer("count") else {
         return ctx.reply_ephemeral("回数を指定してください。").await;
     };
-    ctx.reply(&"こんにちは！ ".repeat(*count as usize)).await
+    ctx.reply(&"こんにちは！ ".repeat(count as usize)).await
 }
 ```
+
+### 文字列を好きな型に変える
+
+`ctx.parse::<T>(name)` は、文字列の引数を `FromStr` で変換します。引数がなければ `None`、入力があって変換に失敗したら `Some(Err(..))` です。エラーはそのまま `?` で返せます。
+
+```rust
+use disnana_akari::{Result, SlashContext};
+
+async fn double(ctx: &mut SlashContext<'_>) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(value) = ctx.parse::<i64>("value") else {
+        ctx.reply_ephemeral("数を入力してください。").await?;
+        return Ok(());
+    };
+    ctx.reply(&(value? * 2).to_string()).await?;
+    Ok(())
+}
+```
+
+テキストとスラッシュを兼ねる[ハイブリッドコマンド](hybrid-commands.md)でも、`ctx.parse::<T>(name)` を同じように使えます（文字列の引数が対象です）。
 
 ## 呼び出した人やチャンネルを調べる
 
@@ -98,6 +114,8 @@ async fn repeat(ctx: &mut SlashContext<'_>) -> Result<()> {
 | `ctx.channel_id()` | コマンドが実行されたチャンネルの ID |
 | `ctx.option(name)` | 引数（Twilight の値） |
 | `ctx.string(name)` | 文字列の引数 |
+| `ctx.integer(name)` / `ctx.number(name)` / `ctx.boolean(name)` | 整数、数値、真偽値の引数 |
+| `ctx.parse::<T>(name)` | 文字列の引数を `FromStr` で変換した結果 |
 
 ## 返信のしかた
 

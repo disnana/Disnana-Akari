@@ -7,6 +7,7 @@
 - **エラーの連鎖で、メッセージが二重に表示されなくなりました。** `Error` の `Http`、`GatewayReceive`、`*Validation` は、表示と原因を元のエラーへそのまま渡します。`Error::Handler` は `HandlerError` を持つようになり（`downcast_ref`、`inner`、`into_inner` で元のエラーを取り出せます）、`CommandRegistration` の表示から原因を外しました（原因は `source()` で取得します）。
 - `ErrorReport` を `{report}` で表示すると、原因の連鎖も `: 原因` の形で続けて表示します。標準エラー出力の既定の表示にも、本当の理由が含まれます。
 - ドキュメントに、Twilight の型を公開 API に含める方針（安定性）を明記しました。
+- 引数の型変換を追加しました。`SlashCommands::{integer_option, number_option, boolean_option}` で型付きの引数を作り、`SlashContext::{integer, number, boolean}` で受け取れます。`SlashContext::parse::<T>` と `HybridContext::parse::<T>` は、文字列の引数を `FromStr` で変換します（未入力は `None`、変換の失敗は `Some(Err(..))`）。
 - `Bot::limits` と `Limits` を追加しました。同時に処理する数（テキストコマンド、Interaction、混雑の通知）と、待ち行列の大きさを変えられます。既定は、これまでどおりの 8、8、8、64 です。0 を指定すると、起動時に `Error::InvalidLimits` を返します。
 - `Context::reply_with` と `CommandContext::reply_with` を追加しました。通知する相手（返信元の著者、ユーザー、ロール）を `AllowedMentions` で指定して返信できます。`reply` は、これまでどおり何も通知しません。
 - `Bot::include_bots` を追加しました。他の Bot やウェブフックの投稿も、コマンドとメッセージのハンドラーへ渡せます（既定は、これまでどおり無視します。この Bot 自身の投稿は、常に渡しません）。

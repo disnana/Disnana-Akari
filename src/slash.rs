@@ -107,13 +107,38 @@ impl SlashCommands {
 
     /// 文字列の引数を作ります。必要なら返された Twilight の定義で長さなどを設定できます。
     pub fn string_option(name: &str, description: &str, required: bool) -> CommandOption {
+        Self::typed_option(CommandOptionType::String, name, description, required)
+    }
+
+    /// 整数の引数を作ります。範囲は、返された定義の `min_value` と `max_value` で設定できます。
+    /// 値は [`SlashContext::integer`] で受け取ります。
+    pub fn integer_option(name: &str, description: &str, required: bool) -> CommandOption {
+        Self::typed_option(CommandOptionType::Integer, name, description, required)
+    }
+
+    /// 小数を含む数値の引数を作ります。値は [`SlashContext::number`] で受け取ります。
+    pub fn number_option(name: &str, description: &str, required: bool) -> CommandOption {
+        Self::typed_option(CommandOptionType::Number, name, description, required)
+    }
+
+    /// 真偽値の引数を作ります。値は [`SlashContext::boolean`] で受け取ります。
+    pub fn boolean_option(name: &str, description: &str, required: bool) -> CommandOption {
+        Self::typed_option(CommandOptionType::Boolean, name, description, required)
+    }
+
+    fn typed_option(
+        kind: CommandOptionType,
+        name: &str,
+        description: &str,
+        required: bool,
+    ) -> CommandOption {
         CommandOption {
             autocomplete: None,
             channel_types: None,
             choices: None,
             description: description.into(),
             description_localizations: None,
-            kind: CommandOptionType::String,
+            kind,
             max_length: None,
             max_value: None,
             min_length: None,
@@ -392,6 +417,41 @@ impl<'a> SlashContext<'a> {
             CommandOptionValue::String(value) => Some(value),
             _ => None,
         }
+    }
+
+    /// 整数の引数を返します。未入力または別の型なら `None` を返します。
+    pub fn integer(&self, name: &str) -> Option<i64> {
+        match self.option(name)? {
+            CommandOptionValue::Integer(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// 数値（小数を含む）の引数を返します。未入力または別の型なら `None` を返します。
+    pub fn number(&self, name: &str) -> Option<f64> {
+        match self.option(name)? {
+            CommandOptionValue::Number(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// 真偽値の引数を返します。未入力または別の型なら `None` を返します。
+    pub fn boolean(&self, name: &str) -> Option<bool> {
+        match self.option(name)? {
+            CommandOptionValue::Boolean(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// 文字列の引数を [`FromStr`](std::str::FromStr) で変換します。
+    ///
+    /// 未入力なら `None`、入力があって変換に失敗したら `Some(Err(..))` を返します。
+    /// エラーはそのまま `?` で返せます（ハンドラーは任意のエラー型を返せます）。
+    pub fn parse<T: std::str::FromStr>(
+        &self,
+        name: &str,
+    ) -> Option<std::result::Result<T, T::Err>> {
+        self.string(name).map(|value| value.trim().parse())
     }
 
     /// チャンネルに初回応答を送るか、遅延応答の元メッセージを完成させます。
@@ -828,6 +888,28 @@ mod tests {
             Some(MessageFlags::IS_COMPONENTS_V2)
         );
         assert!(ResponseState::ModalOpened.reply_action(false).is_err());
+    }
+
+    #[test]
+    fn typed_option_helpers_set_the_option_kind() {
+        let kinds = [
+            (
+                SlashCommands::integer_option("count", "個数", true),
+                CommandOptionType::Integer,
+            ),
+            (
+                SlashCommands::number_option("ratio", "割合", false),
+                CommandOptionType::Number,
+            ),
+            (
+                SlashCommands::boolean_option("loud", "大きく", false),
+                CommandOptionType::Boolean,
+            ),
+        ];
+        for (option, kind) in kinds {
+            assert_eq!(option.kind, kind);
+            assert!(option.choices.is_none());
+        }
     }
 
     #[test]

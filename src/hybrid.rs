@@ -186,6 +186,18 @@ impl<'a> HybridContext<'a> {
         }
     }
 
+    /// [`text_arg`](Self::text_arg) の値を [`FromStr`](std::str::FromStr) で変換します。
+    ///
+    /// 引数がない場合は `None`、入力があって変換に失敗したら `Some(Err(..))` を返します。
+    /// 文字列の引数だけを対象にします（スラッシュの整数や真偽値は、
+    /// [`option`](Self::option) で受け取ってください）。
+    pub fn parse<T: std::str::FromStr>(
+        &self,
+        name: &str,
+    ) -> Option<std::result::Result<T, T::Err>> {
+        self.text_arg(name).map(|value| value.trim().parse())
+    }
+
     /// イベントの受信と、処理開始までの時間を調べる情報を返します。
     pub fn timing(&self) -> Timing {
         match &self.inner {
