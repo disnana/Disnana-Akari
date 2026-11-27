@@ -47,6 +47,69 @@ pub enum Error {
          MESSAGE_CONTENT は特権 Intent なので、Developer Portal の Bot ページでも有効にします。"
     )]
     MissingIntents(Intents),
+    /// コマンドやハンドラーの登録内容が無効です。
+    #[error(transparent)]
+    Registration(#[from] RegistrationError),
+    /// Discord が返したスラッシュコマンドの登録結果が要求と一致しません。
+    #[error(transparent)]
+    CommandSync(#[from] CommandSyncError),
+    /// 指定のスラッシュコマンドを Discord に登録できませんでした。
+    #[error("スラッシュコマンド `/{name}` を登録できませんでした")]
+    CommandRegistration {
+        /// 登録しようとしたコマンド名です。
+        name: String,
+        /// Discord へのリクエストで起きたエラーです。
+        #[source]
+        source: HttpError,
+    },
+    /// Akari に登録されていないスラッシュコマンドが実行されました。
+    #[error("Akari に登録されていないスラッシュコマンドが実行されました")]
+    CommandUnavailable,
+    /// メッセージやフォームの構成が無効です。
+    #[error("{0}")]
+    InvalidUi(&'static str),
+    /// 現在の Interaction の応答状態では、指定された操作ができません。
+    #[error(transparent)]
+    ResponseState(#[from] ResponseStateError),
+    /// Discord が送った選択内容を読み取れませんでした。
+    #[error(transparent)]
+    Selection(#[from] SelectionError),
+    /// コマンドを実行したユーザーを取得できませんでした。
+    #[error("実行したユーザーを確認できませんでした。")]
+    MissingAuthor,
+    /// 同時処理枠か待ち行列がいっぱいです。
+    #[error("{}", .0.message())]
+    QueueFull(QueueKind),
+    /// Gateway が終了し、Bot の処理が止まりました。
+    #[error("Discord Gateway の接続が終了しました")]
+    GatewayEnded,
+    /// Gateway から接続終了の通知を受け取りました。
+    #[error("{}", describe_gateway_close(*.0))]
+    GatewayClose(u16),
+    /// Gateway のイベントを受信できませんでした。
+    #[error(transparent)]
+    GatewayReceive(#[from] ReceiveMessageError),
+    /// Discord REST API のリクエストが失敗しました。
+    #[error(transparent)]
+    Http(#[from] HttpError),
+    /// Discord REST API のレスポンス本文を読み取れませんでした。
+    #[error(transparent)]
+    HttpBody(#[from] DeserializeBodyError),
+    /// Twilight がコマンドの設定を無効と判定しました。
+    #[error(transparent)]
+    CommandValidation(#[from] CommandValidationError),
+    /// Twilight がメッセージを無効と判定しました。
+    #[error(transparent)]
+    MessageValidation(#[from] MessageValidationError),
+    /// Twilight が埋め込みを無効と判定しました。
+    #[error(transparent)]
+    EmbedValidation(#[from] EmbedValidationError),
+    /// Twilight が操作部品を無効と判定しました。
+    #[error(transparent)]
+    ComponentValidation(#[from] ComponentValidationError),
+    /// 利用者が登録したハンドラーから返された、アプリ固有のエラーです。
+    #[error(transparent)]
+    Handler(#[from] HandlerError),
     /// キャッシュを使うメッセージイベントには、保存件数の指定が必要です。
     #[error(
         "キャッシュ済みメッセージのイベントを使うには、Bot::cache_messages に正の保存件数を指定してください"
@@ -69,48 +132,12 @@ pub enum Error {
         /// 受信する範囲に合わせて選べる Intent。
         any_of: Intents,
     },
-    /// コマンドやハンドラーの登録内容が無効です。
-    #[error(transparent)]
-    Registration(#[from] RegistrationError),
     /// 型付きハイブリッドコマンドの引数を読み取れませんでした。
     #[error(transparent)]
     HybridArgument(#[from] crate::HybridArgumentError),
-    /// Discord が返したスラッシュコマンドの登録結果が要求と一致しません。
-    #[error(transparent)]
-    CommandSync(#[from] CommandSyncError),
-    /// 指定のスラッシュコマンドを Discord に登録できませんでした。
-    #[error("スラッシュコマンド `/{name}` を登録できませんでした")]
-    CommandRegistration {
-        /// 登録しようとしたコマンド名です。
-        name: String,
-        /// Discord へのリクエストで起きたエラーです。
-        #[source]
-        source: HttpError,
-    },
-    /// Akari に登録されていないスラッシュコマンドが実行されました。
-    #[error("Akari に登録されていないスラッシュコマンドが実行されました")]
-    CommandUnavailable,
     /// ユーザー・メッセージコマンドの選択対象が Discord の応答に含まれていません。
     #[error("選択されたユーザーまたはメッセージを取得できませんでした")]
     CommandTargetUnavailable,
-    /// メッセージやフォームの構成が無効です。
-    #[error("{0}")]
-    InvalidUi(&'static str),
-    /// 現在の Interaction の応答状態では、指定された操作ができません。
-    #[error(transparent)]
-    ResponseState(#[from] ResponseStateError),
-    /// Discord が送った選択内容を読み取れませんでした。
-    #[error(transparent)]
-    Selection(#[from] SelectionError),
-    /// コマンドを実行したユーザーを取得できませんでした。
-    #[error("実行したユーザーを確認できませんでした。")]
-    MissingAuthor,
-    /// 同時処理枠か待ち行列がいっぱいです。
-    #[error("{}", .0.message())]
-    QueueFull(QueueKind),
-    /// Gateway が終了し、Bot の処理が止まりました。
-    #[error("Discord Gateway の接続が終了しました")]
-    GatewayEnded,
     /// Discord が返したシャード数またはセッション開始制限が無効です。
     #[error("Discord Gateway の推奨シャード設定を利用できません")]
     InvalidGatewayRecommendation,
@@ -125,39 +152,12 @@ pub enum Error {
     /// 同じ組のすべてのシャードが時間内に Ready を受信できませんでした。
     #[error("Discord Gateway のシャード群で、接続の準備が時間内に完了しませんでした")]
     GatewayWaveTimedOut,
-    /// Gateway から接続終了の通知を受け取りました。
-    #[error("{}", describe_gateway_close(*.0))]
-    GatewayClose(u16),
-    /// Gateway のイベントを受信できませんでした。
-    #[error(transparent)]
-    GatewayReceive(#[from] ReceiveMessageError),
     /// Gateway から受信した部分的なメッセージ更新の読み取りに失敗しました。
     #[error("Gateway のメッセージ更新を読み取れませんでした")]
     MessageUpdateDecode(#[source] serde_json::Error),
     /// Gateway から受信した絵文字リアクションの一括除去の読み取りに失敗しました。
     #[error("Gateway の絵文字リアクション除去を読み取れませんでした")]
     ReactionRemoveEmojiDecode(#[source] serde_json::Error),
-    /// Discord REST API のリクエストが失敗しました。
-    #[error(transparent)]
-    Http(#[from] HttpError),
-    /// Discord REST API のレスポンス本文を読み取れませんでした。
-    #[error(transparent)]
-    HttpBody(#[from] DeserializeBodyError),
-    /// Twilight がコマンドの設定を無効と判定しました。
-    #[error(transparent)]
-    CommandValidation(#[from] CommandValidationError),
-    /// Twilight がメッセージを無効と判定しました。
-    #[error(transparent)]
-    MessageValidation(#[from] MessageValidationError),
-    /// Twilight が埋め込みを無効と判定しました。
-    #[error(transparent)]
-    EmbedValidation(#[from] EmbedValidationError),
-    /// Twilight が操作部品を無効と判定しました。
-    #[error(transparent)]
-    ComponentValidation(#[from] ComponentValidationError),
-    /// 利用者が登録したハンドラーから返された、アプリ固有のエラーです。
-    #[error(transparent)]
-    Handler(#[from] HandlerError),
 }
 
 impl Error {
@@ -228,10 +228,6 @@ pub enum HandlerKind {
     TextCommand,
     /// スラッシュコマンドです。
     SlashCommand,
-    /// ユーザーのコンテキストメニューコマンドです。
-    UserCommand,
-    /// メッセージのコンテキストメニューコマンドです。
-    MessageCommand,
     /// ボタンです。
     Button,
     /// 文字列の選択メニューです。
@@ -248,6 +244,10 @@ pub enum HandlerKind {
     Modal,
     /// 引数のオートコンプリートです。
     Autocomplete,
+    /// ユーザーのコンテキストメニューコマンドです。
+    UserCommand,
+    /// メッセージのコンテキストメニューコマンドです。
+    MessageCommand,
 }
 
 impl HandlerKind {
@@ -286,24 +286,6 @@ pub enum RegistrationError {
     /// コマンド名が空、または空白を含みます。
     #[error("コマンド名には空白を含まない文字列を指定してください")]
     InvalidCommandName,
-    /// 型付きハイブリッドコマンドで、この引数の種類や制約を扱えません。
-    #[error("型付きハイブリッドコマンドの引数 `{name}` に未対応の種類や無効な制約があります")]
-    InvalidHybridOption {
-        /// 引数名です。
-        name: String,
-    },
-    /// ハイブリッドグループに実行できるサブコマンドがありません。
-    #[error("ハイブリッドグループ `{name}` にサブコマンドを追加してください")]
-    EmptyHybridGroup {
-        /// 空のグループまでの正式名です。
-        name: String,
-    },
-    /// アプリコマンドの表示設定に矛盾や無効な値があります。
-    #[error("アプリコマンドの設定 `{field}` が無効です")]
-    InvalidApplicationCommandSetting {
-        /// 問題がある設定の名前です。
-        field: &'static str,
-    },
     /// `custom_id` が 1 文字以上 100 文字以下ではありません。
     #[error("{kind} ID は 1 文字以上 100 文字以下で指定してください")]
     InvalidCustomId {
@@ -355,6 +337,24 @@ pub enum RegistrationError {
         /// 重複した名前、または `custom_id` です。
         name: String,
     },
+    /// 型付きハイブリッドコマンドで、この引数の種類や制約を扱えません。
+    #[error("型付きハイブリッドコマンドの引数 `{name}` に未対応の種類や無効な制約があります")]
+    InvalidHybridOption {
+        /// 引数名です。
+        name: String,
+    },
+    /// ハイブリッドグループに実行できるサブコマンドがありません。
+    #[error("ハイブリッドグループ `{name}` にサブコマンドを追加してください")]
+    EmptyHybridGroup {
+        /// 空のグループまでの正式名です。
+        name: String,
+    },
+    /// アプリコマンドの表示設定に矛盾や無効な値があります。
+    #[error("アプリコマンドの設定 `{field}` が無効です")]
+    InvalidApplicationCommandSetting {
+        /// 問題がある設定の名前です。
+        field: &'static str,
+    },
 }
 
 /// 実行前の確認（権限など）に通らなかった理由です。
@@ -364,9 +364,6 @@ pub enum RegistrationError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum CheckFailure {
-    /// アプリが登録したチェックで、コマンドの実行を拒否しました。
-    #[error("コマンドのチェックに通りませんでした")]
-    Rejected,
     /// サーバーの中でしか使えないコマンドが、DM などで呼ばれました。
     #[error("このコマンドはサーバーの中でしか使えません")]
     GuildOnly,
@@ -376,6 +373,9 @@ pub enum CheckFailure {
     /// Discord から権限の情報が届かなかったため、確認できません（安全のため、実行させません）。
     #[error("権限を確認できませんでした")]
     PermissionsUnavailable,
+    /// アプリが登録したチェックで、コマンドの実行を拒否しました。
+    #[error("コマンドのチェックに通りませんでした")]
+    Rejected,
 }
 
 /// Discord が返したスラッシュコマンドの登録結果が、要求と合わなかった理由です。
@@ -481,12 +481,12 @@ pub enum QueueKind {
     Event,
     /// テキストコマンドの処理枠です。
     TextCommand,
-    /// 動的なプレフィックスを判定する前の待ち行列です。
-    PrefixDiscovery,
     /// スラッシュコマンド、ボタン、選択メニュー、フォームの処理枠です。
     Interaction,
     /// 混雑の通知を返すための待ち行列です。
     BusyNotice,
+    /// 動的なプレフィックスを判定する前の待ち行列です。
+    PrefixDiscovery,
 }
 
 impl QueueKind {

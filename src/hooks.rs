@@ -19,8 +19,6 @@ type ErrorHook = dyn Fn(&ErrorReport<'_>) + Send + Sync;
 pub enum ErrorSource {
     /// テキストコマンドの関数が返したエラーです。
     TextCommand,
-    /// 動的なプレフィックス判定の関数が返したエラーです。
-    PrefixResolver,
     /// スラッシュコマンドの関数が返したエラーです。
     SlashCommand,
     /// ボタンの関数が返したエラーです。
@@ -39,6 +37,8 @@ pub enum ErrorSource {
     Response,
     /// 同時に処理できる数か、待てる数がいっぱいで、イベントを処理できなかったことです。
     QueueFull,
+    /// 動的なプレフィックス判定の関数が返したエラーです。
+    PrefixResolver,
 }
 
 impl ErrorSource {
