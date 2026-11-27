@@ -43,6 +43,48 @@ fn card() -> ComponentsV2 {
 }
 ```
 
+## テキストの横にボタンや画像を置く
+
+```rust
+use disnana_akari::ui::{Button, ComponentsV2, Media};
+
+fn help_panel() -> ComponentsV2 {
+    ComponentsV2::new()
+        .section_with_button(["# サポート", "操作方法を開きます。"], Button::primary("help", "開く"))
+        .section_with_thumbnail(
+            ["# プレビュー"],
+            Media::new("https://example.com/preview.webp").description("プレビュー画像"),
+        )
+        .media_gallery([Media::new("https://example.com/gallery.webp").spoiler(true)])
+}
+```
+
+セクションにはテキストを 1～3 個、ギャラリーにはメディアを 1～10 件置けます。`Media::description` は代替テキストです。`attachment://ファイル名` を参照する場合は、参照先のファイルを送信時にアップロードします。
+
+## 罫線とコンテナーの見た目を調整する
+
+`separator_with_spacing(SeparatorSpacingSize::Large, false)` は広い余白だけを挿入します。罫線も表示する場合は第2引数を `true` にします。`container_with_options(None, true, contents)` は、強調色を指定せず、クリックすると中身を表示するコンテナーを作ります。
+
+## 添付ファイルを部品として表示する
+
+`FileDisplay` の名前と、同じメッセージに添付するファイル名を一致させます。ファイル名は拡張子まで指定します。
+
+```rust
+use disnana_akari::{Result, SlashContext, model::http::attachment::Attachment};
+use disnana_akari::ui::{ComponentsV2, FileDisplay};
+
+async fn send_report(ctx: &mut SlashContext<'_>) -> Result<()> {
+    let name = "report.txt";
+    let panel = ComponentsV2::new()
+        .text("出力ファイル")
+        .file(FileDisplay::new(name))
+        .attachment(Attachment::from_bytes(name.into(), b"total: 42\n".to_vec(), 0));
+    ctx.reply_v2(&panel).await
+}
+```
+
+複数のファイルをアップロードする場合は、ファイルごとに異なる添付 ID とファイル名を指定します。`FileDisplay` は添付を参照する部品です。外部サイトの URL は渡せません。[Discord の File 仕様](https://docs.discord.com/developers/components/reference#file)
+
 ## 送り方
 
 | 場所 | メソッド |

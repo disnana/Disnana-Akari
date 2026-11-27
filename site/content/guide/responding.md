@@ -62,6 +62,23 @@ async fn report(ctx: &mut SlashContext<'_>) -> Result<()> {
 | 追加のメッセージ | `followup` / `followup_ephemeral` | `followup` / `followup_ephemeral` | `followup` / `followup_ephemeral` |
 | フォームを開く | `show_modal` | `show_modal` | – |
 
+## 元の応答を取得・更新・削除する
+
+スラッシュコマンドやコンテキストメニューの `SlashContext` では、`original_response().await` で初回の応答メッセージを取得できます。非公開で送った応答も対象です。`edit_original_response` は本文だけ、`edit_original_ui` は本文・Embed・従来の部品、`edit_original_v2` は Components V2 の部品を更新します。公開範囲は元のままです。
+
+```rust
+use disnana_akari::{Result, SlashContext};
+
+async fn report(ctx: &mut SlashContext<'_>) -> Result<()> {
+    ctx.reply_ephemeral("集計しています。").await?;
+    ctx.edit_original_response("集計が終わりました。").await?;
+    let original = ctx.original_response().await?;
+    ctx.followup_ephemeral(&format!("応答 ID: {}", original.id)).await
+}
+```
+
+応答を取り除く場合は `delete_original_response().await` を使います。フォームを開く操作は元の応答メッセージを作りません。応答がない状態や削除済みの状態では、取得・編集・削除がエラーになります。遅延応答だけを削除した場合は追加応答もできません。追加応答を送る場合は、先に遅延応答を完成させてください。[Discord の応答メッセージ API](https://docs.discord.com/developers/interactions/receiving-and-responding#get-original-interaction-response)
+
 ## 何も応答しなかったら
 
 Akari が、種類ごとに補います。文言は [`Messages`](errors.md) で変えたり、送らないようにしたりできます。どの場合も、エラーは `Bot::on_error` に報告されます。

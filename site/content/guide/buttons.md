@@ -189,6 +189,33 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 
 返信先が削除されていれば `Ok(None)` が返ります。履歴を読む権限がないなど、取得に失敗したときは `Err` です。
 
+## 再起動後も同じボタンを使う
+
+同じ操作を複数のメッセージに付ける場合、`DynamicId` で機能名と対象の識別子を組み合わせます。機能名で一度登録すれば、それぞれのボタンを押したときに対象の識別子を受け取れます。
+
+```rust
+use disnana_akari::{ButtonContext, Events, Result, SlashContext};
+use disnana_akari::ui::{Button, DynamicId, UiMessage};
+
+async fn show_project(ctx: &mut SlashContext<'_>, project: u64) -> Result<()> {
+    let id = DynamicId::new("project", &project.to_string())?;
+    let message = UiMessage::new().buttons(vec![Button::primary(id, "番号を表示")]);
+    ctx.reply_ui(&message).await
+}
+
+fn register_project_buttons(events: &mut Events) -> Result<()> {
+    events.on_dynamic_button("project", async |ctx: &mut ButtonContext<'_>| -> Result<()> {
+        let Some(id) = ctx.dynamic_id() else {
+            return Ok(());
+        };
+        let project: u64 = id.value().parse().map_err(disnana_akari::Error::handler)?;
+        ctx.reply_ephemeral(&format!("プロジェクト番号は {project} です。")).await
+    })
+}
+```
+
+再起動時にも同じ機能名で登録すると、Discord に残っているボタンを処理できます。Akari は個々のメッセージを保存しません。対象や権限は操作のたびにアプリ側で確認し、識別子に機密情報を入れないでください。選択メニューとモーダルも同じ方法で登録できます。
+
 ## 受け取れる情報
 
 | メソッド | 返す値 |

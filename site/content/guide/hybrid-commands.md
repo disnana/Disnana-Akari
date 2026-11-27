@@ -57,6 +57,67 @@ async fn echo(ctx: &mut HybridContext<'_>) -> Result<()> {
 > [!NOTE]
 > テキスト側は、コマンド名のあとの本文 **全体** が最初の文字列引数になります。`count`（整数）と `text`（文字列）を定義して `!cmd 3 hello` と送ると、`text_arg("text")` は `3 hello` です。整数などの引数をテキストでも使いたいときは、`ctx.args()` を自分で分割してください。
 
+## 型付きの引数を共有する
+
+`register_typed_hybrid` に渡したオプションの定義を使い、テキストとスラッシュの両方を検証します。例えば `!repeat 3 「Rust の本」` と `/repeat count:3 text:Rust の本` は同じ値を受け取ります。
+
+```rust
+use disnana_akari::{
+    Commands, HybridArguments, HybridContext, Result, SlashCommands, register_typed_hybrid,
+};
+
+fn register(commands: &mut Commands, slash: &mut SlashCommands) -> Result<()> {
+    register_typed_hybrid(
+        commands, Some(slash), "repeat", "回数と文章を受け取る",
+        vec![
+            SlashCommands::integer_option("count", "回数", true),
+            SlashCommands::string_option("text", "文章", true),
+        ],
+        repeat,
+    )
+}
+
+async fn repeat(ctx: &mut HybridContext<'_>, args: HybridArguments<'_>) -> Result<()> {
+    let count = args.integer("count").unwrap_or_default();
+    let text = args.string("text").unwrap_or_default();
+    ctx.reply(&format!("{count} 回: {text}")).await
+}
+```
+
+テキストでは定義の順に値を入力します。空白を含む値は引用符で囲み、省略可能な引数は末尾から省略します。文字列、整数、小数、真偽値、ユーザー・ロール・チャンネル ID に対応します。ID は数字または種類の合うメンションで指定できます。引数を読み取れない場合は、ハンドラーを実行する前に `Error::HybridArgument` を既存のエラー処理へ渡します。
+
+## グループを両方に登録する
+
+```rust
+use disnana_akari::{
+    Commands, HybridArguments, HybridContext, Result, SlashCommands, register_hybrid_group,
+};
+
+fn register(commands: &mut Commands, slash: &mut SlashCommands) -> Result<()> {
+    register_hybrid_group(commands, Some(slash), "config", "設定", |group| {
+        group.fallback("show", "設定一覧を表示する", show)?;
+        group.group("advanced", "詳細設定")?.subcommand(
+            "set", "値を設定する",
+            vec![SlashCommands::integer_option("value", "設定値", true)],
+            set,
+        )
+    })
+}
+
+async fn show(ctx: &mut HybridContext<'_>, _: HybridArguments<'_>) -> Result<()> {
+    ctx.reply("設定一覧").await
+}
+
+async fn set(ctx: &mut HybridContext<'_>, args: HybridArguments<'_>) -> Result<()> {
+    let value = args.integer("value").unwrap_or_default();
+    ctx.reply(&format!("{value} を設定しました。")).await
+}
+```
+
+`!config advanced set 3` と `/config advanced set value:3` は同じ関数を呼びます。`fallback` は `!config` または `/config show` で呼べます。未知のサブコマンドには一致しません。`register_hybrid_group_with_aliases`、`group_with_aliases`、`subcommand_with_aliases` の別名はテキストだけで使えます。
+
+グループの深さと件数には Discord の制約が適用されます。クロージャや定義の検証がエラーになった場合は、両方の一覧への登録を中止します。実行者の権限が必要なら、共通のハンドラーで `ctx.require_permissions(...).await?` を呼びます。[discord.py の HybridGroup](https://discordpy.readthedocs.io/en/v2.7.1/ext/commands/api.html#discord.ext.commands.HybridGroup)
+
 ## 呼び出し方で分岐する
 
 ```rust

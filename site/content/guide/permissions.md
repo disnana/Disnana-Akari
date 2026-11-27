@@ -47,6 +47,30 @@ DM では `CheckFailure::GuildOnly` になります。
 > [!TIP]
 > 確認のたびに Discord へ問い合わせます。呼び出しが多い Bot は、`Bot::cache_permissions(Duration::from_secs(60))` で取得した情報を一定時間だけ保存できます。`Intents::GUILDS` が有効なら、ロールやチャンネルの変更イベントを受けた時点で該当する保存を破棄し、次の権限確認で情報を取得し直します。イベントが届かない場合は保存期間が反映の目安です。スラッシュコマンドの権限は Discord が送るため、この設定の影響を受けません。
 
+## 複数のコマンドで同じ確認を使う
+
+`CommandCheck` はテキストとアプリコマンドの両方に登録できます。次の例では、`maintenance` グループだけでサーバーと権限を確認します。正式な名前で判定するため、テキストの別名から実行しても同じ確認がかかります。
+
+```rust
+use disnana_akari::{CommandCheck, CommandCheckContext, Commands, Result, SlashCommands};
+use disnana_akari::model::guild::Permissions;
+
+fn install_checks(text: &mut Commands, slash: &mut SlashCommands) {
+    let maintenance = CommandCheck::new(async |ctx: CommandCheckContext<'_>| -> Result<()> {
+        if ctx.command_path().next() == Some("maintenance") {
+            ctx.require_guild()?;
+            ctx.require_permissions(Permissions::MANAGE_MESSAGES).await?;
+        }
+        Ok(())
+    });
+
+    text.add_check(maintenance.clone());
+    slash.add_check(maintenance);
+}
+```
+
+複数のチェックは登録順に実行し、最初のエラーで止めます。Bot 独自の条件で拒否する場合は `Err(CheckFailure::Rejected.into())` を返します。コマンドでは既存の拒否応答を使い、補完を拒否した場合は候補を空で返します。チェックは応答用のメソッドを持たないため、処理の結果を返すのはコマンドハンドラーに任せます。 チェックの時間もアプリコマンドの初回応答期限（約3秒）に含まれます。長い処理は、ハンドラーが応答を defer した後に実行できる構成にします。
+
 ## 確認に通らなかったとき
 
 確認が失敗すると、`Error::Check(CheckFailure)` が返ります。

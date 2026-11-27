@@ -36,6 +36,64 @@ async fn hello(ctx: CommandContext<'_>) -> Result<()> {
 - `register("名前", 関数)` でコマンドを登録します。名前にプレフィックスは含めません。
 - コマンド関数は `async fn(CommandContext<'_>) -> Result<()>` の形です。
 
+## コマンドに別名を付ける
+
+```rust
+use disnana_akari::{CommandContext, Commands, Result};
+
+fn register(commands: &mut Commands) -> Result<()> {
+    commands.register_with_aliases("echo", &["e", "repeat"], echo)
+}
+
+async fn echo(ctx: CommandContext<'_>) -> Result<()> {
+    ctx.reply(&format!("{}: {}", ctx.invoked_with(), ctx.args())).await
+}
+```
+
+`!e こんにちは` の場合、`ctx.command_name()` は `"echo"`、`ctx.invoked_with()` は `"e"` です。別名は大文字と小文字を区別します。正式名やほかの別名と重複した場合、そのコマンドの登録全体が失敗します。
+
+`Commands::with_prefixes(&["!", "akari."])?` を使うと、`!echo` と `akari.echo` のどちらでも同じコマンドを実行できます。プレフィックスが重なる場合は、`!` より長い `!!` のように、最長の一致を選びます。使われたプレフィックスは `ctx.prefix()` で確認できます。
+
+## 投稿ごとにプレフィックスを変える
+
+サーバーごとの設定を読む場合は、`Commands::with_prefix_resolver` に非同期関数を渡します。例では DM で `?`、サーバーで `!` と `akari.` を使います。
+
+```rust
+use disnana_akari::{CommandPrefixes, Commands, Result, model::channel::Message};
+
+fn commands() -> Commands {
+    Commands::with_prefix_resolver(async |message: &Message| -> Result<CommandPrefixes> {
+        if message.guild_id.is_none() {
+            CommandPrefixes::new(&["?"])
+        } else {
+            CommandPrefixes::new(&["!", "akari."])
+        }
+    })
+}
+```
+
+`CommandPrefixes::default()` を返すと、その投稿でのコマンド判定を省きます。候補が複数一致すれば最長のものを使います。同じ候補を繰り返し使う場合は、あらかじめ `CommandPrefixes` を用意し、`clone()` で共有できます。判定のワーカーはコマンド実行用と独立しており、受け付けた投稿ごとに一度だけ関数を呼びます。判定のキューが満杯の場合は投稿への混雑返信を省きます。判定関数のエラーは `Bot::on_error` で `ErrorSource::PrefixResolver` として受け取れます。
+
+## サブコマンドにまとめる
+
+```rust
+use disnana_akari::{CommandContext, Commands, Result};
+
+fn register(commands: &mut Commands) -> Result<()> {
+    let mut settings = commands.group_with_aliases("settings", &["config"])?;
+    settings.subcommand_with_aliases("show", &["get"], show)?;
+    settings.fallback(async |ctx: CommandContext<'_>| -> Result<()> {
+        ctx.reply("show を指定すると設定を確認できます。").await
+    })
+}
+
+async fn show(ctx: CommandContext<'_>) -> Result<()> {
+    ctx.reply(&format!("実行したコマンド: {}", ctx.qualified_name())).await
+}
+```
+
+`!config get` を実行しても、`qualified_name()` は正式な経路の `"settings show"` を返します。`command_name()` は末尾の正式名 `"show"`、`invoked_with()` は入力された末尾の名前 `"get"` です。`!settings` のようにグループ名だけ送ると、登録した `fallback` が実行されます。未知のサブコマンドは一致しません。子グループは `settings.group(name)` で作れます。
+
 ## 引数を受け取る
 
 コマンド名のあとの文章は、`ctx.args()` で丸ごと受け取れます。前後の空白は取り除かれ、引数がなければ空文字列です。
@@ -65,6 +123,28 @@ async fn add(ctx: CommandContext<'_>) -> Result<()> {
     ctx.reply(&format!("{a} + {b} = {}", a + b)).await
 }
 ```
+
+### 空白を含む値を読む
+
+例えば `!search 「Rust の本」 3` から検索語と件数を取り出せます。`arguments()` は必要な分だけ読み進め、元の本文は引き続き `args()` から参照できます。
+
+```rust
+use disnana_akari::{CommandContext, Error, Result};
+
+async fn search(ctx: CommandContext<'_>) -> Result<()> {
+    let mut args = ctx.arguments();
+    let Some(query) = args.next().transpose().map_err(Error::handler)? else {
+        return ctx.reply("検索語を指定してください。").await;
+    };
+    let count = match args.next().transpose().map_err(Error::handler)? {
+        Some(value) => value.parse::<u32>().map_err(Error::handler)?,
+        None => 1,
+    };
+    ctx.reply(&format!("{query} を {count} 件検索します。")).await
+}
+```
+
+半角の一重・二重引用符、スマートクォート、`「」`、`『』` で囲めます。クォートの閉じ忘れはエラーになります。
 
 ## 誰が呼んだか調べる
 

@@ -64,6 +64,62 @@ async fn main() -> Result<()> {
 
 同じ Bot に、グローバルとサーバー限定のコマンドを同時には登録できません。
 
+## 利用場所と翻訳を設定する
+
+登録済みのコマンドに `set_command_settings` で設定を追加します。グローバルコマンドでは、インストール先と利用場所を選べます。翻訳はギルドコマンドにも設定できます。
+
+```rust
+use disnana_akari::{CommandSettings, Result, SlashCommands, SlashContext};
+use disnana_akari::model::{
+    application::{command::CommandType, interaction::InteractionContextType},
+    oauth::ApplicationIntegrationType,
+};
+
+fn register(slash: &mut SlashCommands) -> Result<()> {
+    slash.register("ping", "Check the response", vec![], ping)?;
+    slash.set_command_settings(
+        CommandType::ChatInput,
+        "ping",
+        CommandSettings::new()
+            .contexts([InteractionContextType::Guild, InteractionContextType::PrivateChannel])
+            .install_types([ApplicationIntegrationType::UserInstall])
+            .name_localization("ja", "ピング")
+            .description_localization("ja", "応答を確認する"),
+    )
+}
+
+async fn ping(ctx: &mut SlashContext<'_>) -> Result<()> {
+    let text = if ctx.locale() == Some("ja") { "応答しました。" } else { "Pong!" };
+    ctx.reply_ephemeral(text).await
+}
+```
+
+この例には `SlashCommands::global()` を使い、Developer Portal でもユーザーインストールを有効にします。ユーザー・メッセージのメニューはそれぞれ `CommandType::User`、`CommandType::Message` で指定できます。設定に渡す名前は登録時の名前です。[Discord の利用場所とインストール先](https://docs.discord.com/developers/interactions/application-commands#contexts)
+
+## コンテキストメニューを登録する
+
+Discord でユーザーやメッセージのメニューを開き、アプリの一覧に出るコマンドを登録できます。スラッシュコマンドと同じ `SlashCommands` に登録し、同じ手順で同期します。
+
+```rust
+use disnana_akari::{Result, SlashCommands, SlashContext, UserMenuTarget};
+use disnana_akari::model::channel::Message;
+
+fn register(slash: &mut SlashCommands) -> Result<()> {
+    slash.register_user_menu("ユーザーの ID", user_id)?;
+    slash.register_message_menu("メッセージの ID", message_id)
+}
+
+async fn user_id(ctx: &mut SlashContext<'_>, target: UserMenuTarget<'_>) -> Result<()> {
+    ctx.reply_ephemeral(&target.user.id.to_string()).await
+}
+
+async fn message_id(ctx: &mut SlashContext<'_>, message: &Message) -> Result<()> {
+    ctx.reply_ephemeral(&message.id.to_string()).await
+}
+```
+
+実行したユーザーは `ctx.author_id()`、選ばれたユーザーは `target.user` です。Discord が選択対象のサーバー内情報を送った場合は `target.member` で取得できます。Discord が送った選択対象を使うため、受け取り時に追加の REST リクエストはありません。
+
 ## 引数を受け取る
 
 引数の定義は、`register` の 3 番目の引数に渡します。文字列の引数は `SlashCommands::string_option` で作れます。
@@ -195,6 +251,38 @@ async fn reset(ctx: &mut SlashContext<'_>) -> Result<()> {
 - `ctx.command_path()` は、`["config", "advanced", "reset"]` のように呼ばれた経路を返します。`Bot::on_error` に渡る名前も `config advanced reset` の形です。
 - `default_member_permissions("config", ..)` は、グループ全体にかかります。
 
+### サブコマンドや引数を翻訳する
+
+`CommandOptionLocalizations` を使うと、引数とサブコマンドにロケールごとの名前や説明を設定できます。固定の選択肢は `SlashCommands::localize_choice` で表示名を翻訳します。
+
+```rust
+use disnana_akari::{CommandOptionLocalizations, Result, SlashCommands, SlashContext};
+
+async fn find(ctx: &mut SlashContext<'_>) -> Result<()> {
+    let query = ctx.string("keyword").unwrap_or_default();
+    ctx.reply(&format!("検索語句は {query} です。")).await
+}
+
+fn localized_group(slash: &mut SlashCommands) -> Result<()> {
+    let keyword = CommandOptionLocalizations::new()
+        .name_localization("ja", "キーワード")
+        .description_localization("ja", "調べたい語句")
+        .apply(SlashCommands::string_option("keyword", "Search term", true))?;
+
+    let mut group = slash.group("tools", "Utilities")?;
+    group.subcommand("find", "Find a record", vec![keyword], find)?;
+    group.set_child_localizations(
+        "find",
+        CommandOptionLocalizations::new()
+            .name_localization("ja", "検索")
+            .description_localization("ja", "記録を検索"),
+    )?;
+    Ok(())
+}
+```
+
+翻訳は Discord 上の表示に反映されます。登録、ハンドラー、引数の取得では `find` と `keyword` のような元の名前を使います。同じ階層で元の名前や同じロケールの表示名が重複する場合は、登録時にエラーになります。[Discord のコマンド翻訳仕様](https://docs.discord.com/developers/interactions/application-commands#localization)
+
 ## 呼び出した人やチャンネルを調べる
 
 | メソッド | 返す値 |
@@ -263,4 +351,4 @@ fn build() -> SlashCommands {
 > [!WARNING]
 > 一括同期は、このアプリがそのサーバーに登録している **すべての** アプリケーションコマンド（右クリックメニューのコマンドを含む）を、今の一覧で置き換えます。一覧が空なら、すべて削除されます。テスト用のサーバーで使ってください。
 
-Akari に登録していないコマンドが実行されたときは、`Bot::on_error` に報告し、本人にだけ「このコマンドは現在利用できません。」と返します（`Messages::slash_command_unavailable`）。
+設定したサーバーに登録された古いコマンドが実行された場合は、`Bot::on_error` に報告し、本人にだけ「このコマンドは現在利用できません。」と返します（`Messages::slash_command_unavailable`）。グローバルの場合、Akari が同期した一覧に ID がないコマンドは処理対象から外れます。

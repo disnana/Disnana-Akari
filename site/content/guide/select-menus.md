@@ -110,6 +110,29 @@ async fn picked(ctx: &mut MentionableSelectContext<'_>) -> Result<()> {
 
 Discord が選択対象の詳しい情報を一緒に送ってきたときは、`ctx.resolved()` で読めます。
 
+## 初期選択を指定する
+
+`SelectOption::selected_by_default(true)` を付けた文字列の選択肢は初期状態で選択されます。ユーザー、ロール、チャンネルのメニューには、各種類に合う型付き ID を `default_values` に渡します。メンションのメニューでは、異なる種類を `Mentionable` でまとめます。
+
+```rust
+use disnana_akari::{Mentionable, model::id::Id, ui::{MentionableSelect, SelectOption, UserSelect}};
+
+fn defaults() -> (SelectOption, UserSelect, MentionableSelect) {
+    (
+        SelectOption::new("青", "blue").selected_by_default(true),
+        UserSelect::new("user").default_values([Id::new(123)]),
+        MentionableSelect::new("team").max_values(2).default_values([
+            Mentionable::User(Id::new(123)),
+            Mentionable::Role(Id::new(456)),
+        ]),
+    )
+}
+```
+
+初期選択の件数はメニューの上限に収め、同じ対象を重複させないようにします。
+
+対象ごとに違う ID を使うメニューは、`DynamicId` と `on_dynamic_select`、`on_dynamic_user_select` などを使います。対象は `ctx.dynamic_id()`、実際に選ばれた項目は `ctx.values()` で取得します。[動的 ID の使い方](buttons.md#再起動後も同じボタンを使う)
+
 ## 選択のあとにできること
 
 選択メニューのコンテキストでも、[ボタンと同じメソッド](buttons.md)が使えます。`reply_ephemeral`、`defer_update`、`update_message`、`update_v2`、`show_modal`、`followup`、`author_id`、`invoker_id`、`message` などです。時間のかかる処理は、先に `defer_update` で受け付けます。

@@ -1,0 +1,38 @@
+# discord.py 相当の機能と品質
+
+**目標は、discord.py 2.7.1 で書ける Discord Bot の主要な利用シナリオを、Akari でも実装・検証できることです。** Rust の型付き ID・エラーと明示的な Intent を使い、既存コードの移行経路を保ちます。
+
+比較元は [discord.py 2.7.1 の変更履歴](https://discordpy.readthedocs.io/en/stable/whats_new.html#v2-7-1)、[クライアントとイベント](https://discordpy.readthedocs.io/en/stable/api.html)、[コマンド拡張](https://discordpy.readthedocs.io/en/stable/ext/commands/api.html)、[Interactions と UI](https://discordpy.readthedocs.io/en/stable/interactions/api.html)、[定期処理](https://discordpy.readthedocs.io/en/stable/ext/tasks/) です。Intent・ペイロード・登録条件は [Discord Gateway](https://docs.discord.com/developers/events/gateway#list-of-intents) と [Discord のアプリ機能](https://docs.discord.com/developers/interactions/application-commands) を確認します。
+
+## 機能ごとの完了条件
+
+既存機能と作業中の実装は「現状」に記し、残りは右の列に記します。Twilight や Tokio で実現できる操作も、認証、型、エラー、接続の管理を含めた利用例とテストが揃った時点で完了とします。
+
+| 領域 | Akari の現状 | 残りの完了条件 |
+| --- | --- | --- |
+| 接続と運用 | 単一接続と推奨数での複数シャード、Identify 枠、シャードごとの再開・Gateway RTT・Presence 再送、接続状態の購読、共有の並行処理枠、制限時間付きの停止 | 実際の Discord の複数シャード環境での起動・再開・停止 |
+| Gateway イベント | Ready、新着とメッセージ編集・削除、リアクション4種、投票2種、入力開始、サーバー・チャンネル・ロール・メンバー・スレッド・プレゼンス・音声状態、管理・予定・招待・連携・Webhook・有料機能の型付き通知 | Twilight 0.18 が型を持たない Soundboard・音声効果などの通知、キャッシュ要否や欠落時の挙動を検証 |
+| キャッシュと権限 | 明示的な権限確認、Gateway 連動の権限キャッシュ、上限を指定できるメッセージキャッシュ、保存済みメッセージの編集前後・削除通知、上限付きメンバーキャッシュと更新前後・退出前の通知 | メンバーを必要に応じて取り込む設定やキャッシュを読む API。取得と更新が競合しても古い値で権限を付与しない |
+| テキストコマンド | 複数の固定・動的プレフィックス、別名とグループ、非同期ハンドラー、クォート付き引数と元の本文へのアクセス | 型付きの変換を一貫した方法で組み立てる仕組み、補助メタデータ、ヘルプ、引数束縛後の実行前後フック |
+| Application Commands | グローバル・ギルド登録、グループ、型付きオプション、オートコンプリート、権限と DM 制限、コンテキストメニュー、インストール先・利用場所、コマンド・サブコマンド・引数・選択肢の翻訳 | 同期・権限・応答の実機での境界条件 |
+| ハイブリッドと実行制御 | 型付き引数とグループの共有、キー別・回数指定のクールダウン、キー別の同時実行枠、テキスト・アプリ間の共通チェック | 添付や対象の解決、型付き変換の再利用 |
+| UI と応答 | Embed、ボタン、5 種の選択メニュー、初期選択、テキスト・添付・チェック・ラジオ・選択入力の Modal、Components V2、defer と followup、アプリコマンドとフォーム送信の元の応答の取得・編集・削除、コンポーネントとモーダルの動的 ID と再起動後の配信 | コンポーネントの元の応答の操作、V2 部品の追加検証。送信ペイロードと遅延時の動作を検証 |
+| Discord 操作 | 型付きの Twilight REST クライアント、履歴・添付・スレッド・メンバー・招待・Webhook・予定・絵文字・投票・有料機能の例 | 読み取りと変更のページング、送信ペイロード、権限ごとの API の実機試験を広げる |
+| 拡張と定期処理 | `Module` で機能をまとめて登録、[Tokio で Ready 後に処理を繰り返す例](../site/content/guide/tasks.md) | モジュールの状態と終了処理、定期的な処理を完了まで待つ場合の停止と再試行を扱う例 |
+| 音声 | Gateway での参加・移動・退出とミュート状態の変更、音声状態・音声サーバー更新の型付き受信 | 音声ハンドシェイクの管理、DAVE 対応ドライバー、接続・切断・再接続、再生・停止、音声ソースを検証 |
+| 品質・性能・ドキュメント | Rust CI、依存検査、ガイドのコード例、署名付き来歴証明 | API 互換性チェック、主要操作を通すオフライン試験、混雑・再接続・並列性を再現するテスト、メモリと遅延の再現可能な計測、移行ガイド。公開時の実機確認はオフラインの結果と区別して記録 |
+
+## 開発と検証の進め方
+
+1. 同じファイルを触らない単位で、仕様確認・実装・テストを並行する。各変更の公開 API と Intent を先に揃える。
+2. Discord の JSON、疑似 Gateway、ローカル HTTP モック、Tokio の仮想時計を使い、操作ごとに成功・失敗・競合を再現する。テストは既存の `cargo test --locked` から実行できる状態にする。
+3. 統合後に整形、Clippy、テスト、rustdoc、ガイドのコード例、依存と配布物を確認する。参照した上流仕様と確認済みの範囲をこの表へ戻す。
+4. 右列に未検証の必須シナリオが残る間は、同等と判定しない。実機が必要な項目は、オフラインで確認できた範囲と実機で残る差を記録する。
+
+discord.py 2.7.1 は pytest、pytest-asyncio、pytest-mock とカバレッジを用意し、非同期テストは strict モードで実行します。フォーマットと静的解析の設定は Ruff と Pyright で管理しています。Akari では Rust のテスト、Tokio の仮想時計、コンパイル例、Clippy に対応づけ、通信の契約は Gateway ペイロードとローカル HTTP で確認します。[discord.py のテスト](https://github.com/Rapptz/discord.py/tree/v2.7.1/tests) · [discord.py 2.7.1 の品質設定](https://github.com/Rapptz/discord.py/blob/v2.7.1/pyproject.toml)
+
+## 複数シャードを検証する順序
+
+1. **確認済み。** 単一シャードの受信処理を分離した。ローカル WebSocket に Bot の起動経路から接続し、Identify、Ready、ハートビートと RTT、部分編集通知、Resume、Presence の再送、正常切断を確認した。
+2. `with_recommended_shards` で推奨数とセッション開始枠を起動時に検証する。REST クライアント、コマンド同期、処理キューは共有し、最初の Ready を待ってから次の組の Identify を開始する。[Discord のシャーディング仕様](https://docs.discord.com/developers/events/gateway#sharding)
+3. ローカル WebSocket で片方だけの再接続と全シャードの停止を検証する。権限キャッシュのテストでは、そのシャードに属するサーバーだけを無効化し、以前に始めた取得が戻っても古い値を有効としないことを確認する。

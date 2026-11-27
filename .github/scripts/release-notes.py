@@ -41,7 +41,7 @@ def main():
                for commit in page["commits"]]
     authors = {}
     pull_requests = {}
-    print("## 変更コミット\n")
+    print(f"<details>\n<summary>変更コミット（{len(commits)}件）</summary>\n")
     for commit in commits:
         sha = commit["sha"]
         subject = commit["commit"]["message"].splitlines()[0]
@@ -58,7 +58,8 @@ def main():
                 if pr["merged_at"] and pr["base"]["repo"]["full_name"].casefold() == repo.casefold():
                     pull_requests[pr["number"]] = pr
 
-    print("\n## マージされた PR\n")
+    print("\n</details>\n")
+    print(f"<details>\n<summary>マージされた PR（{len(pull_requests)}件）</summary>\n")
     if pull_requests:
         for number, pr in sorted(pull_requests.items()):
             print(f"- [#{number}]({root}/pull/{number}) {pr['title']}")
@@ -68,7 +69,8 @@ def main():
     else:
         print("対象期間にマージされた PR はありません。")
 
-    print("\n## コントリビューター\n")
+    print("\n</details>\n")
+    print("## コントリビューター\n")
     for name in sorted(authors, key=str.casefold):
         print(f"- {authors[name]}")
 

@@ -58,6 +58,52 @@ fn register(commands: &mut Commands) -> Result<()> {
 }
 ```
 
+## チャンネルごとに複数回を許可する
+
+`Cooldown::per_key` を使うと、最初に通過してから決めた時間が過ぎるまでに、同じキーで何回実行できるかを指定できます。例えばメッセージの投稿をチャンネルごとに 10 秒で 3 回までに絞れます。
+
+```rust
+use std::{num::NonZeroU32, time::Duration};
+use disnana_akari::{CommandContext, Commands, Cooldown, Result};
+use disnana_akari::model::id::{Id, marker::ChannelMarker};
+
+fn register(commands: &mut Commands) -> Result<()> {
+    let rate = NonZeroU32::new(3).unwrap();
+    let cooldown = Cooldown::<Id<ChannelMarker>>::per_key(rate, Duration::from_secs(10));
+    commands.register("post", async move |ctx: CommandContext<'_>| -> Result<()> {
+        let channel = ctx.context().message().channel_id;
+        if let Err(wait) = cooldown.check(channel) {
+            return ctx.reply(&format!("{:.1} 秒待ってください。", wait.as_secs_f64())).await;
+        }
+        ctx.reply("受け付けました。").await
+    })
+}
+```
+
+複数の ID を組にすると「チャンネルごと、かつユーザーごと」に制限できます。全体で共有したい場合はキーに `()` を使います。
+
+## 同時に実行できる件数を制限する
+
+時間のかかるコマンドを同じ人が重ねて呼ぶのを抑えるには、`ConcurrencyLimit` を使います。処理が終わるまで枠を保持し、終わった直後から次の呼び出しを受け付けます。
+
+```rust
+use std::num::NonZeroU16;
+use disnana_akari::{Commands, CommandContext, ConcurrencyLimit, Result};
+
+fn register(commands: &mut Commands) -> Result<()> {
+    let limit = ConcurrencyLimit::new(NonZeroU16::MIN);
+    commands.register("report", async move |ctx: CommandContext<'_>| -> Result<()> {
+        let user = ctx.context().message().author.id;
+        let Some(_permit) = limit.try_acquire(user) else {
+            return ctx.reply("前の処理が終わってから送ってください。").await;
+        };
+        ctx.reply("集計が完了しました。").await
+    })
+}
+```
+
+枠が空くまで待たせる場合は `acquire(key).await` を使います。スラッシュコマンドでは、待ち始める前に `defer` で初回応答を送ってください。同じ制限をハイブリッドハンドラーに渡せば、両方の呼び出しで枠を共有できます。
+
 ## 知っておくこと
 
 - 拒否された呼び出しは、待ち時間を **延ばしません**。
