@@ -588,7 +588,9 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 
 `Needs` は、コマンドの実行に必要な権限を宣言する型です。`Needs::new().author(..).bot(..)` を、`Commands::require` と `SlashCommands::require` に渡すと、ハンドラーの前に、実行者、Bot の順に確認します。宣言は、指定したコマンドとその配下だけに適用し、登録されていない名前は、登録の時点で失敗します。独自のチェックでは、`CommandCheckContext::access()` で `Access` を使えます。
 
-権限の上書きとロールの権限は、`Access` の `overwrite_of`、`set_overwrite`、`delete_overwrite`、`role_permissions`、`set_role_permissions` で読み書きします。`Overwrite` は、`allow`、`deny`、`inherit` で権限ごとの状態を指定する型で、`state` が `Tri`（`Allow`、`Deny`、`Inherit`）を返します。対象は `OverwriteTarget`（`Role` か `Member`）で指定します。書き込みは、送る前に Bot の権限とロールの位置を確認しますが、実行した人への確認は、呼ぶ側の責任です。ロールの階層で断られた理由は、`CheckFailure::Hierarchy` が持つ `HierarchyDenied` で分かります。
+権限の上書きとロールの権限は、`Access` の `overwrite_of`、`set_overwrite`、`delete_overwrite`、`role_permissions`、`set_role_permissions` で読み書きします。`Overwrite` は、`allow`、`deny`、`inherit` で権限ごとの状態を指定する型で、`state` が `Tri`（`Allow`、`Deny`、`Inherit`）を返します。対象は `OverwriteTarget`（`Role` か `Member`）で指定します。書き込みは、送る前に Bot の権限とロールの位置を確認しますが、実行した人への確認は、呼ぶ側の責任です。
+
+`ctx.manage()` が返す `Manage` で、`kick_member`、`ban_member`、`unban_member`、`timeout_member`、`set_nickname`、`add_role`、`remove_role`、`move_member`、`set_voice_mute`、`set_voice_deafen` を呼べます。送る前に Bot の権限とロールの階層を確認し、実行した人への確認は呼ぶ側の責任です。タイムアウトは `MAX_TIMEOUT`（28 日）、BAN と一緒に削除するメッセージは `MAX_BAN_MESSAGE_DELETE`（7 日）までで、超えると `InvalidArgument` で、通信せずに失敗します。ロールの階層で断られた理由は、`CheckFailure::Hierarchy` が持つ `HierarchyDenied` で分かります。
 
 ## 権限やフラグを名前で扱う
 

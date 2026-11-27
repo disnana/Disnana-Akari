@@ -69,6 +69,10 @@ impl GuildInfo {
             .max(0)
     }
 
+    pub(crate) fn role_position(&self, id: Id<RoleMarker>) -> Option<i64> {
+        self.positions.get(&id).copied()
+    }
+
     /// メンバーの、サーバー全体の権限（チャンネルの上書きを含まない）。
     /// 所有者と管理者は、すべての権限を持つ。
     pub(crate) fn root_permissions(

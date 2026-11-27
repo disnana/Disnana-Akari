@@ -577,6 +577,45 @@ impl<'a> Access<'a> {
         Ok(())
     }
 
+    pub(crate) fn http(&self) -> &'a Client {
+        self.http
+    }
+
+    /// Bot が、ロールの階層から見て、対象のメンバーを操作できることを確認する。
+    /// 実行した人の階層は確認しない（[`require_can_moderate`](Self::require_can_moderate) で確認する）。
+    pub(crate) async fn require_bot_can_moderate(&self, target: Id<UserMarker>) -> Result<()> {
+        let guild_id = self.require_guild()?;
+        let bot_id = self.resolver.bot_id(self.http).await?;
+        if target == bot_id {
+            return Err(CheckFailure::Hierarchy(HierarchyDenied::TargetIsBot).into());
+        }
+        let (info, target_member, bot_member) = tokio::try_join!(
+            self.resolver.guild_info(self.http, guild_id),
+            fetch_member(self.http, guild_id, target),
+            fetch_member(self.http, guild_id, bot_id),
+        )?;
+        check_bot_hierarchy(
+            info.owner_id,
+            target,
+            info.top_position(&bot_member.roles),
+            info.top_position(&target_member.roles),
+        )
+        .map_err(|denied| CheckFailure::Hierarchy(denied).into())
+    }
+
+    /// Bot の最上位ロールが、指定したロールより高いか。ロールが存在しないときは `false`。
+    pub(crate) async fn bot_outranks_role(&self, role: Id<RoleMarker>) -> Result<bool> {
+        let guild_id = self.require_guild()?;
+        let bot_id = self.resolver.bot_id(self.http).await?;
+        let (info, bot_member) = tokio::try_join!(
+            self.resolver.guild_info(self.http, guild_id),
+            fetch_member(self.http, guild_id, bot_id),
+        )?;
+        Ok(info
+            .role_position(role)
+            .is_some_and(|position| info.top_position(&bot_member.roles) > position))
+    }
+
     /// ロールの階層から見て、実行した人と Bot が、対象のメンバーを操作できることを確認します。
     ///
     /// サーバーの所有者は操作できません。最上位ロールが対象以上のときも拒否します（同じ位置も拒否）。
@@ -651,6 +690,22 @@ pub(crate) struct HierarchyInput {
     pub(crate) target_top: i64,
 }
 
+/// Bot だけについて、ロール階層の規則を判定する。所有者は操作できず、最上位ロールが同位以下も拒否する。
+pub(crate) fn check_bot_hierarchy(
+    owner_id: Id<UserMarker>,
+    target_id: Id<UserMarker>,
+    bot_top: i64,
+    target_top: i64,
+) -> std::result::Result<(), HierarchyDenied> {
+    if target_id == owner_id {
+        return Err(HierarchyDenied::TargetIsOwner);
+    }
+    if bot_top <= target_top {
+        return Err(HierarchyDenied::BotTooLow);
+    }
+    Ok(())
+}
+
 /// Discord のロール階層の規則を、純粋に判定する。
 ///
 /// 所有者は誰からも操作されない。最上位ロールが同じ位置のときは「高くない」として拒否する。
@@ -675,7 +730,7 @@ pub(crate) fn check_hierarchy(input: &HierarchyInput) -> std::result::Result<(),
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn user(id: u64) -> Id<UserMarker> {
@@ -752,14 +807,14 @@ mod tests {
     }
 
     /// 通信が起きたら失敗する、行き先のないクライアント。
-    fn offline_http() -> Client {
+    pub(crate) fn offline_http() -> Client {
         Client::builder()
             .token("token".into())
             .proxy("127.0.0.1:1".into(), true)
             .build()
     }
 
-    fn slash_interaction(
+    pub(crate) fn slash_interaction(
         guild: bool,
         member_permissions: u64,
         app_permissions: u64,
@@ -889,14 +944,14 @@ mod tests {
     }
 
     /// パスごとに決まった応答を返し、受けたリクエストを記録する簡易サーバー。
-    struct Mock {
+    pub(crate) struct Mock {
         port: u16,
         hits: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         bodies: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
     }
 
     impl Mock {
-        async fn start(routes: Vec<(String, String)>) -> Self {
+        pub(crate) async fn start(routes: Vec<(String, String)>) -> Self {
             use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
@@ -978,14 +1033,14 @@ mod tests {
             Self { port, hits, bodies }
         }
 
-        fn client(&self) -> Client {
+        pub(crate) fn client(&self) -> Client {
             Client::builder()
                 .token("token".into())
                 .proxy(format!("127.0.0.1:{}", self.port), true)
                 .build()
         }
 
-        fn body_of(&self, request: &str) -> Option<serde_json::Value> {
+        pub(crate) fn body_of(&self, request: &str) -> Option<serde_json::Value> {
             let bodies = self.bodies.lock().ok()?;
             let (_, body) = bodies
                 .iter()
@@ -994,7 +1049,7 @@ mod tests {
         }
 
         /// `suffix` は、パスの末尾（`/users/@me`）か、メソッド付き（`PUT /channels/30/...`）。
-        fn count(&self, suffix: &str) -> usize {
+        pub(crate) fn count(&self, suffix: &str) -> usize {
             self.hits.lock().map_or(0, |hits| {
                 hits.iter()
                     .filter(|request| request_matches(request, suffix))
@@ -1013,11 +1068,11 @@ mod tests {
         }
     }
 
-    fn role_json(id: u64, position: i64) -> String {
+    pub(crate) fn role_json(id: u64, position: i64) -> String {
         role_json_with(id, position, Permissions::empty())
     }
 
-    fn role_json_with(id: u64, position: i64, permissions: Permissions) -> String {
+    pub(crate) fn role_json_with(id: u64, position: i64, permissions: Permissions) -> String {
         format!(
             r#"{{"id": "{id}", "name": "r", "color": 0, "colors": {{"primary_color": 0}},
             "hoist": false, "managed": false, "mentionable": false, "position": {position},
@@ -1026,12 +1081,12 @@ mod tests {
         )
     }
 
-    fn guild_json() -> String {
+    pub(crate) fn guild_json() -> String {
         guild_json_with(Permissions::empty())
     }
 
     /// Bot のロール（102、位置 9）が持つ権限を指定してサーバーを作る。
-    fn guild_json_with(bot_role: Permissions) -> String {
+    pub(crate) fn guild_json_with(bot_role: Permissions) -> String {
         let roles = [
             role_json(20, 0),
             role_json(100, 5),
@@ -1048,7 +1103,7 @@ mod tests {
         )
     }
 
-    fn member_json(user: u64, roles: &[u64]) -> String {
+    pub(crate) fn member_json(user: u64, roles: &[u64]) -> String {
         let roles: Vec<String> = roles.iter().map(|role| format!("\"{role}\"")).collect();
         format!(
             r#"{{"user": {{"id": "{user}", "username": "u", "discriminator": "0", "avatar": null}},
@@ -1260,7 +1315,7 @@ mod tests {
         ));
     }
 
-    fn channel_json(id: u64, overwrites: &str) -> String {
+    pub(crate) fn channel_json(id: u64, overwrites: &str) -> String {
         format!(
             r#"{{"id": "{id}", "type": 0, "guild_id": "20", "permission_overwrites": [{overwrites}]}}"#
         )

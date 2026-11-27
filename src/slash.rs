@@ -1609,6 +1609,11 @@ impl<'a> SlashContext<'a> {
         )
     }
 
+    /// メンバー、ロール、VC の管理操作に使う [`Manage`](crate::Manage) を返します。
+    pub fn manage(&self) -> crate::Manage<'a> {
+        crate::Manage::new(self.access())
+    }
+
     /// 呼び出した人の、このチャンネルでの権限を返します。DM などで届かないときは `None` です。
     ///
     /// Discord が、ロールとチャンネルごとの上書きを反映して計算した値です。

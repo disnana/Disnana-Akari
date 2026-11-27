@@ -213,6 +213,45 @@ async fn lock(
 - ロールの権限は、Discord が全体を置き換える仕様です。`role_permissions` で現在の値を読み、足したい権限だけを足して渡してください。読んでから書くまでの間に別の変更があると、それを上書きします。
 - チャンネルの上書きは、1 つの対象だけを更新するので、ほかの対象の設定は巻き戻りません。
 
+## メンバーを管理する（キック、BAN、タイムアウトなど）
+
+`ctx.manage()` で、メンバーとロール、ボイスチャンネルの管理操作ができます。どの操作も、**Discord に送る前に、Bot の権限とロールの階層を確認し、足りなければ通信せずに失敗します。** 実行した人に操作してよいかは、確認しません。先に `require_permissions` と `require_can_moderate` で確認してください。
+
+```rust
+use std::time::Duration;
+
+use disnana_akari::model::{guild::Permissions, id::{Id, marker::UserMarker}};
+use disnana_akari::{Result, SlashContext};
+
+async fn mute(ctx: &mut SlashContext<'_>, target: Id<UserMarker>) -> Result<()> {
+    let access = ctx.access();
+    // 実行した人の権限と階層を、先に確認する（Akari は確認しません）
+    access.require_permissions(Permissions::MODERATE_MEMBERS).await?;
+    access.require_can_moderate(target).await?;
+
+    // Bot の権限と階層は、manage の中で確認される。10 分のタイムアウト
+    ctx.manage()
+        .timeout_member(target, Duration::from_secs(600), "スパムのため")
+        .await?;
+    ctx.reply_ephemeral("タイムアウトしました。").await
+}
+```
+
+| メソッド | 必要な Bot の権限 | 補足 |
+| --- | --- | --- |
+| `kick_member(user, reason)` | `KICK_MEMBERS` | ロール階層を確認します |
+| `ban_member(user, delete_messages, reason)` | `BAN_MEMBERS` | サーバーにいないユーザーも BAN できます。削除するメッセージは 7 日以内 |
+| `unban_member(user, reason)` | `BAN_MEMBERS` | |
+| `timeout_member(user, duration, reason)` | `MODERATE_MEMBERS` | 28 日以内。`Duration::ZERO` で解除 |
+| `set_nickname(user, nickname, reason)` | `MANAGE_NICKNAMES` | `None` で解除 |
+| `add_role(user, role, reason)`、`remove_role(...)` | `MANAGE_ROLES` | ロールが Bot の最上位ロールより低い必要があります |
+| `move_member(user, channel, reason)` | `MOVE_MEMBERS` | `None` で切断 |
+| `set_voice_mute(...)`、`set_voice_deafen(...)` | `MUTE_MEMBERS`、`DEAFEN_MEMBERS` | |
+
+- 失敗の理由は、`CheckFailure::BotMissingPermissions`（Bot の権限不足）、`CheckFailure::Hierarchy`（階層）、`InvalidArgument`（タイムアウトや削除期間が Discord の範囲外）で分かります。
+- 理由は監査ログに残る文字列で、512 文字以内です。
+- 1 つの操作は、Discord への 1 回のリクエストです（確認のための取得は別です）。
+
 ## テキストコマンドで確認する
 
 メッセージには権限が付いていないため、Akari が Discord からサーバーとチャンネルの情報を取得して計算します（Twilight 公式の `twilight-util` の計算を使います）。ロールやチャンネルごとの上書きを反映し、サーバーのオーナーと管理者はすべての権限を持つものとして扱います。
