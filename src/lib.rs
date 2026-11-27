@@ -24,6 +24,7 @@ use std::{env, fmt, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use twilight_gateway::{
     ConfigBuilder, Event, EventTypeFlags, Intents, Shard, ShardId, ShardState, StreamExt as _,
+    error::ReceiveMessageError,
 };
 use twilight_http::Client;
 use twilight_model::{
@@ -475,21 +476,9 @@ impl Bot {
 
         let receive = async {
             let mut own_id = None;
-            loop {
-                let event = if let Some(updates) = &mut presence_updates
-                    && shard.state() == ShardState::Active
-                {
-                    tokio::select! {
-                        event = shard.next_event(event_types) => event,
-                        update = updates.next() => {
-                            shard.command(&update);
-                            continue;
-                        }
-                    }
-                } else {
-                    shard.next_event(event_types).await
-                };
-                let Some(event) = event else { break };
+            while let Some(event) =
+                next_gateway_event(&mut shard, &mut presence_updates, event_types).await
+            {
                 let gateway_rtt = shard.latency().recent().first().copied();
                 if permissions.cache_enabled()
                     && let Ok(event) = &event
@@ -595,6 +584,25 @@ impl Bot {
         }
 
         Err(Error::GatewayEnded)
+    }
+}
+
+async fn next_gateway_event(
+    shard: &mut Shard,
+    presence: &mut Option<presence::PresenceUpdates>,
+    event_types: EventTypeFlags,
+) -> Option<Result<Event, ReceiveMessageError>> {
+    loop {
+        let Some(updates) = presence.as_mut() else {
+            return shard.next_event(event_types).await;
+        };
+        if shard.state() != ShardState::Active {
+            return shard.next_event(event_types).await;
+        }
+        tokio::select! {
+            event = shard.next_event(event_types) => return event,
+            update = updates.next() => shard.command(&update),
+        }
     }
 }
 
