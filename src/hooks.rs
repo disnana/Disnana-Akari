@@ -174,7 +174,7 @@ impl Reporter {
         };
         match &self.hook {
             Some(hook) => hook(&report),
-            None => eprintln!("[akari] {report}"),
+            None => write_stderr(&report),
         }
     }
 
@@ -240,6 +240,15 @@ pub(crate) struct Hooks {
     pub(crate) reporter: Reporter,
     pub(crate) info: InfoReporter,
     pub(crate) messages: Messages,
+}
+
+/// `Bot::on_error` が未設定のときの既定の出力先。
+#[allow(
+    clippy::print_stderr,
+    reason = "既定の出力先として、標準エラー出力に書く。ライブラリが出力するのは、ここだけ。"
+)]
+fn write_stderr(report: &ErrorReport<'_>) {
+    eprintln!("[akari] {report}");
 }
 
 #[cfg(test)]

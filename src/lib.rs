@@ -297,6 +297,10 @@ impl Bot {
         .await
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "接続の組み立てと、受信と処理の並行実行を、1 か所に集めている。#23 と #24 のマージ後に分割する。"
+    )]
     async fn connect(
         self,
         on_message: Option<impl for<'a> AsyncFn(Context<'a>) -> Result<()>>,

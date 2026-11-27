@@ -296,7 +296,7 @@ pub struct TextInput {
 impl TextInput {
     /// 入力欄の ID とラベルを設定します。
     pub fn new(custom_id: impl Into<String>, label: impl Into<String>) -> Self {
-        #[allow(deprecated)] // 表示ラベルは外側の Label に設定します。
+        #[allow(deprecated, reason = "表示ラベルは外側の Label に設定する。")]
         let input = RawTextInput {
             custom_id: custom_id.into(),
             id: None,
@@ -909,10 +909,10 @@ mod tests {
         }
 
         let Component::ActionRow(row) = channel else {
-            unreachable!()
+            panic!("想定外の構造")
         };
         let [Component::SelectMenu(select)] = row.components.as_slice() else {
-            unreachable!()
+            panic!("想定外の構造")
         };
         assert_eq!(
             select.channel_types.as_deref(),

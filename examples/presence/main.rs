@@ -1,3 +1,4 @@
+//! 管理者だけが、Bot のステータスとアクティビティを変えられるコマンドのサンプル。
 use std::env;
 
 use disnana_akari::{
