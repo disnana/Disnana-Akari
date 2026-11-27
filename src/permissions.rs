@@ -17,6 +17,7 @@ use twilight_model::{
         ChannelType, Message,
         permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
     },
+    gateway::ShardId,
     guild::Permissions,
     id::{
         Id,
@@ -164,6 +165,21 @@ impl PermissionResolver {
         self.invalidate(|cache| {
             cache.guilds.clear();
             cache.channels.clear();
+        });
+    }
+
+    pub(crate) fn clear_shard(&self, shard: ShardId) {
+        if shard.total() == 1 {
+            self.clear_cache();
+            return;
+        }
+        // Discord は guild_id の上位ビットでシャードを割り当てる。
+        let belongs = |guild_id: Id<GuildMarker>| {
+            (guild_id.get() >> 22) % u64::from(shard.total()) == u64::from(shard.number())
+        };
+        self.invalidate(|cache| {
+            cache.guilds.retain(|id, _| !belongs(*id));
+            cache.channels.retain(|_, slot| !belongs(slot.guild_id));
         });
     }
 
@@ -763,6 +779,44 @@ mod tests {
         let cache = resolver.cache.lock().unwrap();
         assert!(cache.guilds.is_empty());
         assert!(cache.channels.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shard_invalidation_keeps_unrelated_slots_and_rejects_an_old_fetch() -> Result<()> {
+        let resolver = PermissionResolver::new(Some(Duration::from_secs(60)));
+        let first = Id::new(1 << 22);
+        let second = Id::new(2 << 22);
+        // チャンネルの Snowflake から計算した値とは一致しない。
+        let first_channel = Id::new(17);
+        let second_channel = Id::new(1 << 22);
+        let first_guild_slot = resolver.slot(first, first, |cache| &mut cache.guilds)?;
+        let second_guild_slot = resolver.slot(second, second, |cache| &mut cache.guilds)?;
+        let first_channel_slot =
+            resolver.slot(first_channel, first, |cache| &mut cache.channels)?;
+        let second_channel_slot =
+            resolver.slot(second_channel, second, |cache| &mut cache.channels)?;
+        let first_guild = Snapshot::load(first_guild_slot, async || Ok(guild(1, &[]))).await?;
+        let second_guild = Snapshot::load(second_guild_slot, async || Ok(guild(2, &[]))).await?;
+        let unaffected_channel =
+            Snapshot::load(second_channel_slot, async || Ok(channel(Vec::new()))).await?;
+
+        let old = Snapshot::load(first_channel_slot, async || {
+            resolver.clear_shard(twilight_model::gateway::ShardId::new(1, 2));
+            Ok(channel(Vec::new()))
+        })
+        .await?;
+        let fresh = resolver.slot(first_channel, first, |cache| &mut cache.channels)?;
+        assert!(!old.is_current(fresh.as_ref()));
+        assert!(fresh.unwrap().data.get().is_none());
+        assert!(!resolver.snapshots_are_current(first, &first_guild, first_channel, &old, None)?);
+        assert!(resolver.snapshots_are_current(
+            second,
+            &second_guild,
+            second_channel,
+            &unaffected_channel,
+            None,
+        )?);
         Ok(())
     }
 

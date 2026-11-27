@@ -2,6 +2,7 @@
 
 use std::{fmt, sync::Arc, time::Duration};
 
+use twilight_gateway::error::ReceiveMessageErrorType;
 use twilight_model::{
     application::interaction::InteractionType,
     http::interaction::InteractionResponseType,
@@ -18,6 +19,8 @@ type ErrorHook = dyn Fn(&ErrorReport<'_>) + Send + Sync;
 pub enum ErrorSource {
     /// テキストコマンドの関数が返したエラーです。
     TextCommand,
+    /// 動的なプレフィックス判定の関数が返したエラーです。
+    PrefixResolver,
     /// スラッシュコマンドの関数が返したエラーです。
     SlashCommand,
     /// ボタンの関数が返したエラーです。
@@ -43,6 +46,7 @@ impl ErrorSource {
     pub fn label(self) -> &'static str {
         match self {
             Self::TextCommand => "テキストコマンド",
+            Self::PrefixResolver => "プレフィックスの判定",
             Self::SlashCommand => "スラッシュコマンド",
             Self::Button => "ボタン",
             Self::Select => "選択メニュー",
@@ -73,11 +77,26 @@ pub struct ErrorReport<'a> {
     pub error: &'a Error,
 }
 
+impl ErrorReport<'_> {
+    fn redacted_payload_error(&self) -> Option<&'static str> {
+        if let Error::GatewayReceive(error) = self.error
+            && matches!(error.kind(), ReceiveMessageErrorType::Deserializing { .. })
+        {
+            // Twilight のエラー本文には受信ペイロード全体が含まれます。
+            return Some("Gateway のイベントを読み取れませんでした");
+        }
+        None
+    }
+}
+
 impl fmt::Display for ErrorReport<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.source)?;
         if let Some(name) = self.name {
             write!(f, " `{name}`")?;
+        }
+        if let Some(message) = self.redacted_payload_error() {
+            return write!(f, ": {message}");
         }
         write!(f, ": {}", self.error)?;
         // 原因の連鎖も、「: 原因」の形で続ける（`Http` などは、原因に本当の理由がある）。
@@ -92,11 +111,16 @@ impl fmt::Display for ErrorReport<'_> {
 
 impl fmt::Debug for ErrorReport<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ErrorReport")
+        let mut report = f.debug_struct("ErrorReport");
+        report
             .field("source", &self.source)
-            .field("name", &self.name)
-            .field("error", &format_args!("{}", self.error))
-            .finish()
+            .field("name", &self.name);
+        if let Some(message) = self.redacted_payload_error() {
+            report.field("error", &format_args!("{message}"));
+        } else {
+            report.field("error", &format_args!("{}", self.error));
+        }
+        report.finish()
     }
 }
 
@@ -120,8 +144,8 @@ pub struct Messages {
     pub slash_command_failed: Option<String>,
     /// Akari に登録していないスラッシュコマンドが実行されたときに、本人にだけ送る文言です。
     pub slash_command_unavailable: Option<String>,
-    /// 実行前の確認（権限など）に通らなかったときに、本人にだけ送る文言です。
-    /// ハンドラーが `require_*` で返した [`CheckFailure`](crate::CheckFailure) に使います。
+    /// 登録したチェックやハンドラーが [`CheckFailure`](crate::CheckFailure) を返したときの文言です。
+    /// アプリコマンドでは本人にだけ、テキストコマンドでは元の投稿への返信で送ります。
     /// 公開の遅延応答がある場合は、固定文言で待機表示を終了してから、本人への追加応答で送ります。
     /// テキストコマンドでは、元の投稿への返信になります（送らない場合は `None` にします）。
     pub check_failed: Option<String>,
@@ -308,6 +332,33 @@ mod tests {
     use super::{ErrorSource, Hooks, Messages, Reporter};
 
     #[test]
+    fn gateway_payload_credentials_are_omitted_from_formatted_reports() -> crate::Result<()> {
+        use twilight_gateway::EventTypeFlags;
+
+        let invalid = r#"{"op":0,"s":1,"t":"VOICE_SERVER_UPDATE","d":{"token":"credential-fixture","endpoint":"test"}}"#;
+        let Some(Err(error)) = crate::message_events::decode_text(
+            invalid.to_owned(),
+            EventTypeFlags::VOICE_SERVER_UPDATE,
+            false,
+        ) else {
+            return Err(Error::msg("壊れた音声イベントがエラーになっていません"));
+        };
+        let report = super::ErrorReport {
+            source: ErrorSource::Gateway,
+            name: None,
+            error: &error,
+        };
+        assert!(
+            report
+                .to_string()
+                .contains("Gateway のイベントを読み取れませんでした")
+        );
+        assert!(!report.to_string().contains("credential-fixture"));
+        assert!(!format!("{report:?}").contains("credential-fixture"));
+        Ok(())
+    }
+
+    #[test]
     fn report_text_continues_with_the_cause_chain() {
         use std::fmt;
 
@@ -405,6 +456,9 @@ mod tests {
         use super::{InfoEvent, InfoReporter};
 
         let seen: capture::Seen = Arc::new(Mutex::new(Vec::new()));
+        // 他のテストが同じ callsite を先に登録しても、購読先の候補を
+        // そのスレッドの既定値だけで決めないようにする。
+        let _idle_dispatch = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         tracing::subscriber::with_default(capture::Capture(Arc::clone(&seen)), || {
             // フックがなくても、ログには出る（出力先は、購読先が決める）。
             let reporter = Reporter::default();

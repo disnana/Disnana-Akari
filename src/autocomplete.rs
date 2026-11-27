@@ -125,14 +125,7 @@ impl<'a> AutocompleteContext<'a> {
     }
 
     async fn send(&mut self, choices: Vec<CommandOptionChoice>) -> Result<()> {
-        let response = InteractionResponse {
-            kind: InteractionResponseType::ApplicationCommandAutocompleteResult,
-            data: Some(InteractionResponseData {
-                choices: Some(choices),
-                ..Default::default()
-            }),
-        };
-        self.initial.send(&response).await?;
+        self.initial.autocomplete(choices).await?;
         self.responded = true;
         Ok(())
     }
@@ -143,6 +136,19 @@ impl<'a> AutocompleteContext<'a> {
             return Ok(());
         }
         self.send(Vec::new()).await
+    }
+}
+
+impl InitialResponder<'_> {
+    pub(crate) async fn autocomplete(self, choices: Vec<CommandOptionChoice>) -> Result<()> {
+        self.send(&InteractionResponse {
+            kind: InteractionResponseType::ApplicationCommandAutocompleteResult,
+            data: Some(InteractionResponseData {
+                choices: Some(choices),
+                ..Default::default()
+            }),
+        })
+        .await
     }
 }
 

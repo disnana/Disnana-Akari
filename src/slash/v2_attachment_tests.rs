@@ -1,0 +1,255 @@
+use serde_json::{Value, json};
+use tokio::net::TcpListener;
+use twilight_model::application::interaction::{
+    InteractionData, InteractionType, message_component::MessageComponentInteractionData,
+};
+use twilight_model::channel::message::component::ComponentType;
+
+use super::*;
+use crate::{
+    ButtonContext, Context, Events,
+    hooks::Hooks,
+    permissions::PermissionResolver,
+    slash::{
+        ResponseState, SlashContext,
+        tests::{command_interaction, exchange_response, test_command_message},
+    },
+    timing::Pending,
+    ui::FileDisplay,
+};
+
+fn upload() -> ComponentsV2 {
+    ComponentsV2::new()
+        .file(FileDisplay::new("manual.pdf").spoiler(true))
+        .attachment(Upload::from_bytes(
+            "manual.pdf".into(),
+            b"pdf-content".to_vec(),
+            0,
+        ))
+}
+
+async fn local_http() -> Result<(TcpListener, Client)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(Error::handler)?;
+    let http = Client::builder()
+        .proxy(
+            listener.local_addr().map_err(Error::handler)?.to_string(),
+            true,
+        )
+        .build();
+    Ok((listener, http))
+}
+
+async fn multipart(listener: &TcpListener, method: &str, path: &str) -> Result<Value> {
+    let body = exchange_response(listener, method, Some(path), None)
+        .await
+        .map_err(Error::handler)?;
+    assert!(body.contains("name=\"payload_json\""));
+    assert!(body.contains("name=\"files[0]\"; filename=\"manual.pdf\""));
+    assert!(body.contains("\r\n\r\npdf-content\r\n--"));
+    let payload = body
+        .split_once("Content-Type: application/json\r\n\r\n")
+        .and_then(|(_, contents)| contents.lines().next())
+        .unwrap();
+    let payload: Value = serde_json::from_str(payload).map_err(Error::handler)?;
+    let data = payload.get("data").unwrap_or(&payload);
+    assert_eq!(data["allowed_mentions"]["parse"], json!([]));
+    assert_eq!(
+        data["components"],
+        json!([{
+            "type": 13, "file": {"url": "attachment://manual.pdf"}, "spoiler": true
+        }])
+    );
+    assert_eq!(
+        data["attachments"][0],
+        json!({"id": 0, "filename": "manual.pdf"})
+    );
+    Ok(payload)
+}
+
+#[tokio::test]
+async fn channel_and_private_initial_v2_reply_upload_files() -> Result<()> {
+    let (listener, http) = local_http().await?;
+    let message = test_command_message("!file")?;
+    let (_, timing) = Pending::new((), None).begin();
+    let permissions = PermissionResolver::new(None);
+    let ctx = Context {
+        http: &http,
+        message: &message,
+        timing,
+        permissions: &permissions,
+    };
+    let mut interaction = command_interaction(None, None, 5);
+    interaction.token = "token".into();
+    let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
+        return Err(Error::msg(
+            "試験用の Interaction にコマンドデータがありません",
+        ));
+    };
+    let hooks = Hooks::default();
+    let mut state = ResponseState::Pending;
+    let mut slash = SlashContext {
+        initial: InitialResponder {
+            http: &http,
+            interaction: &interaction,
+            timing,
+            info: &hooks.info,
+        },
+        data,
+        response_state: &mut state,
+    };
+    let message = upload();
+    let client = async {
+        ctx.reply_v2(&message).await?;
+        slash.reply_v2_ephemeral(&message).await
+    };
+    let server = async {
+        let channel_side = multipart(&listener, "POST", "/channels/2/messages").await?;
+        assert_eq!(channel_side["flags"], 32768);
+        assert_eq!(channel_side["message_reference"]["message_id"], "1");
+        let callback = multipart(&listener, "POST", "/interactions/1/token/callback").await?;
+        assert_eq!(callback["type"], 4);
+        assert_eq!(callback["data"]["flags"], 32832);
+        Ok::<_, Error>(())
+    };
+    let (client, server) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(client, server)
+    })
+    .await
+    .map_err(Error::handler)?;
+    client?;
+    server?;
+    assert_eq!(state, ResponseState::RepliedV2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn deferred_v2_reply_uploads_file_when_completing_private_original() -> Result<()> {
+    let (listener, http) = local_http().await?;
+    let mut interaction = command_interaction(None, None, 5);
+    interaction.token = "token".into();
+    let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
+        return Err(Error::msg(
+            "試験用の Interaction にコマンドデータがありません",
+        ));
+    };
+    let hooks = Hooks::default();
+    let (_, timing) = Pending::new((), None).begin();
+    let mut state = ResponseState::Pending;
+    let mut slash = SlashContext {
+        initial: InitialResponder {
+            http: &http,
+            interaction: &interaction,
+            timing,
+            info: &hooks.info,
+        },
+        data,
+        response_state: &mut state,
+    };
+    let client = async {
+        slash.defer_ephemeral().await?;
+        slash.reply_v2(&upload()).await
+    };
+    let server = async {
+        let defer: Value = serde_json::from_str(
+            &exchange_response(
+                &listener,
+                "POST",
+                Some("/interactions/1/token/callback"),
+                None,
+            )
+            .await
+            .map_err(Error::handler)?,
+        )
+        .map_err(Error::handler)?;
+        assert_eq!(defer["type"], 5);
+        assert_eq!(defer["data"]["flags"], 64);
+        let edit = multipart(&listener, "PATCH", "/webhooks/10/token/messages/@original").await?;
+        assert_eq!(edit["flags"], 32768);
+        assert_eq!(edit["attachments"].as_array().unwrap().len(), 1);
+        Ok::<_, Error>(())
+    };
+    let (client, server) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(client, server)
+    })
+    .await
+    .map_err(Error::handler)?;
+    client?;
+    server?;
+    assert_eq!(state, ResponseState::RepliedV2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn component_v2_updates_keep_existing_files_for_callback_and_patch() -> Result<()> {
+    let (listener, http) = local_http().await?;
+    let mut interaction = command_interaction(None, None, 5);
+    interaction.kind = InteractionType::MessageComponent;
+    interaction.token = "token".into();
+    let mut source = test_command_message("")?;
+    source.flags = Some(MessageFlags::IS_COMPONENTS_V2);
+    source.attachments.push(
+        serde_json::from_value(json!({
+            "id": "900", "filename": "old.pdf", "size": 1, "url": "https://cdn.example/old.pdf",
+            "proxy_url": "https://cdn.example/old.pdf"
+        }))
+        .map_err(Error::handler)?,
+    );
+    upload()
+        .file(FileDisplay::new("old.pdf"))
+        .validate_attachment_references(&source.attachments)?;
+    let conflicting_name = Upload::from_bytes("old.pdf".into(), vec![1], 1);
+    let conflicting_id = Upload::from_bytes("new.pdf".into(), vec![1], 900);
+    assert!(retained_ids(&[conflicting_name], &source.attachments).is_err());
+    assert!(retained_ids(&[conflicting_id], &source.attachments).is_err());
+    interaction.message = Some(source);
+    let mut events = Events::new();
+    events.on_button("upload", async |ctx: &mut ButtonContext<'_>| {
+        ctx.update_v2(&upload()).await
+    })?;
+    events.on_button("defer", async |ctx: &mut ButtonContext<'_>| -> Result<()> {
+        ctx.defer_update().await?;
+        ctx.update_v2(&upload()).await
+    })?;
+    let hooks = Hooks::default();
+    let client = async {
+        for id in ["upload", "defer"] {
+            interaction.data = Some(InteractionData::MessageComponent(Box::new(
+                MessageComponentInteractionData {
+                    component_type: ComponentType::Button,
+                    custom_id: id.into(),
+                    resolved: None,
+                    values: Vec::new(),
+                },
+            )));
+            let (_, timing) = Pending::new((), None).begin();
+            events
+                .interaction_handlers
+                .dispatch(&http, &interaction, timing, &hooks, &[])
+                .await;
+        }
+    };
+    let server = async {
+        let callback_path = "/interactions/1/token/callback";
+        let callback = multipart(&listener, "POST", callback_path).await?;
+        assert_eq!(callback["type"], 7);
+        assert_eq!(callback["data"]["attachments"][1], json!({"id": 900}));
+        let defer: Value = serde_json::from_str(
+            &exchange_response(&listener, "POST", Some(callback_path), None)
+                .await
+                .map_err(Error::handler)?,
+        )
+        .map_err(Error::handler)?;
+        assert_eq!(defer["type"], 6);
+        let edit = multipart(&listener, "PATCH", "/webhooks/10/token/messages/@original").await?;
+        assert_eq!(edit["attachments"][1], json!({"id": 900}));
+        Ok::<_, Error>(())
+    };
+    let (_, server) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(client, server)
+    })
+    .await
+    .map_err(Error::handler)?;
+    server
+}

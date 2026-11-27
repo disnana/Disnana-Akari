@@ -18,6 +18,118 @@ use crate::{
     ui::{ComponentsV2, UiMessage},
 };
 
+mod arguments;
+mod groups;
+use arguments::HybridSchema;
+pub use arguments::{HybridArgumentError, HybridArguments};
+pub use groups::{HybridCommandGroup, register_hybrid_group, register_hybrid_group_with_aliases};
+
+/// 型付きの引数を、テキストとスラッシュで共有するコマンドを登録します。
+///
+/// `options` の順序でテキストの引数を読みます。空白を含む文字列はクォートで囲み、
+/// 省略できる引数は必須の引数より後ろに置きます。テキストで省略できるのは末尾からです。
+/// スラッシュでは Discord が送った名前で引数を照合します。
+///
+/// 文字列・整数・数値・真偽値・ユーザー・ロール・チャンネルに対応します。
+/// 真偽値は `true/false` や `yes/no`、ID は数字または種類に合う Discord のメンションで
+/// 入力できます。ID の変換に Discord との通信は発生しません。チャンネル種類の指定には対応していません。
+///
+/// `slash` が `None` のときはテキストだけに登録します。入力が不正な場合はハンドラーを実行せず、
+/// [`Error::HybridArgument`] を既存のエラー処理へ渡します。引数は [`HybridArguments`] から取得します。
+///
+/// # エラー
+///
+/// 重複したコマンドや Discord の制約に合わない定義を拒否します。
+/// 登録に失敗した場合は、どちらの一覧にも追加しません。
+pub fn register_typed_hybrid<E>(
+    commands: &mut Commands,
+    slash: Option<&mut SlashCommands>,
+    name: &str,
+    description: &str,
+    options: Vec<CommandOption>,
+    handler: impl for<'a> AsyncFn(
+        &mut HybridContext<'a>,
+        HybridArguments<'a>,
+    ) -> std::result::Result<(), E>
+    + Send
+    + Sync
+    + 'static,
+) -> Result<()>
+where
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    commands.ensure_available(name)?;
+    twilight_validate::command::chat_input_name(name)?;
+    twilight_validate::command::description(description)?;
+    let typed = Arc::new(TypedHandler::new(options, handler)?);
+
+    if let Some(slash) = slash {
+        let options = typed.schema.options().to_vec();
+        let typed = Arc::clone(&typed);
+        slash.register(
+            name,
+            description,
+            options,
+            async move |ctx: &mut SlashContext<'_>| typed.slash(ctx).await,
+        )?;
+    }
+
+    commands.register(name, async move |ctx: CommandContext<'_>| {
+        typed.text(ctx).await
+    })
+}
+
+struct TypedHandler<F> {
+    schema: HybridSchema,
+    handler: F,
+}
+
+impl<F> TypedHandler<F> {
+    fn new(options: Vec<CommandOption>, handler: F) -> Result<Self> {
+        Ok(Self {
+            schema: HybridSchema::new(options)?,
+            handler,
+        })
+    }
+
+    async fn text<E>(&self, ctx: CommandContext<'_>) -> Result<()>
+    where
+        F: for<'a> AsyncFn(
+            &mut HybridContext<'a>,
+            HybridArguments<'a>,
+        ) -> std::result::Result<(), E>,
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let arguments = self.schema.bind_text(ctx.args())?;
+        let mut ctx = HybridContext {
+            inner: SourceContext::Text {
+                ctx,
+                option_name: None,
+            },
+        };
+        (self.handler)(&mut ctx, arguments)
+            .await
+            .map_err(handler_error)
+    }
+
+    async fn slash<E>(&self, ctx: &mut SlashContext<'_>) -> Result<()>
+    where
+        F: for<'a> AsyncFn(
+            &mut HybridContext<'a>,
+            HybridArguments<'a>,
+        ) -> std::result::Result<(), E>,
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let arguments = self.schema.bind_slash(ctx.leaf_options())?;
+        let mut ctx = HybridContext {
+            inner: SourceContext::Slash(ctx.reborrow()),
+        };
+        (self.handler)(&mut ctx, arguments)
+            .await
+            .map_err(handler_error)
+    }
+}
+
 /// 同じ関数をテキストコマンドと、指定した場合はスラッシュコマンドに登録します。
 ///
 /// `slash` が `None` のときは、テキストコマンドだけを登録します。
@@ -346,5 +458,55 @@ mod tests {
         let result = register_hybrid(&mut text, Some(&mut slash), "ping", "説明", vec![], handler);
         assert!(result.is_err());
         slash.register("ping", "説明", vec![], async |_| -> Result<()> { Ok(()) })
+    }
+
+    #[test]
+    fn typed_registration_does_not_partially_add_commands() -> Result<()> {
+        let mut text = Commands::new("!")?;
+        let mut slash = SlashCommands::for_guild(Id::new(1));
+        let typed =
+            async |_: &mut HybridContext<'_>, _: HybridArguments<'_>| -> Result<()> { Ok(()) };
+        slash.register("reserved", "説明", vec![], async |_| -> Result<()> {
+            Ok(())
+        })?;
+        assert!(
+            register_typed_hybrid(
+                &mut text,
+                Some(&mut slash),
+                "reserved",
+                "説明",
+                vec![],
+                typed
+            )
+            .is_err()
+        );
+        text.ensure_available("reserved")?;
+
+        text.register_with_aliases("name", &["alias"], async |_| -> Result<()> { Ok(()) })?;
+        assert!(
+            register_typed_hybrid(&mut text, Some(&mut slash), "alias", "説明", vec![], typed)
+                .is_err()
+        );
+        slash.register("alias", "説明", vec![], async |_| -> Result<()> {
+            Ok(())
+        })?;
+
+        let mut unsupported = SlashCommands::string_option("file", "添付", true);
+        unsupported.kind = CommandOptionType::Attachment;
+        assert!(
+            register_typed_hybrid(
+                &mut text,
+                Some(&mut slash),
+                "invalid",
+                "説明",
+                vec![unsupported],
+                typed
+            )
+            .is_err()
+        );
+        text.ensure_available("invalid")?;
+        slash.register("invalid", "説明", vec![], async |_| -> Result<()> {
+            Ok(())
+        })
     }
 }

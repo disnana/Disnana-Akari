@@ -1,14 +1,23 @@
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
+    sync::mpsc,
 };
 use twilight_model::gateway::payload::incoming::{ChannelUpdate, RoleDelete};
 
 use super::{
-    Client, Event, EventTypeFlags, Id, Intents, Message, PermissionResolver, Permissions,
-    gateway_event_types, permission_cache_events, update_permission_cache,
+    Client, Event, EventTypeFlags, Events, Id, Intents, Message, NoMessageHandler,
+    PermissionResolver, Permissions, Result, dispatch_events, gateway_event_types, hooks::Hooks,
+    message_events::IncomingEvent, permission_cache_events, route_gateway_event,
+    update_permission_cache,
 };
 
 #[test]
@@ -42,10 +51,12 @@ fn cache_events_require_the_caller_to_enable_guilds() {
 #[tokio::test]
 async fn gateway_updates_refresh_only_the_needed_rest_entries() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let http = Client::builder()
-        .proxy(listener.local_addr().unwrap().to_string(), true)
-        .build();
-    let resolver = PermissionResolver::new(Some(Duration::from_secs(60)));
+    let http = Arc::new(
+        Client::builder()
+            .proxy(listener.local_addr().unwrap().to_string(), true)
+            .build(),
+    );
+    let resolver = Arc::new(PermissionResolver::new(Some(Duration::from_secs(60))));
     let allowed = Permissions::MANAGE_MESSAGES | Permissions::BAN_MEMBERS;
 
     let server = async {
@@ -66,7 +77,7 @@ async fn gateway_updates_refresh_only_the_needed_rest_entries() {
         }
     };
     let commands = async {
-        let message = message(&http).await;
+        let message = Arc::new(message(&http).await);
         let modified_parent = http
             .channel(Id::new(11))
             .await
@@ -81,7 +92,7 @@ async fn gateway_updates_refresh_only_the_needed_rest_entries() {
         assert!(first.unwrap().contains(allowed));
         assert!(second.unwrap().contains(allowed));
 
-        update_permission_cache(&resolver, &role_deleted(20));
+        update_permission_cache(&resolver, &role_deleted(20), twilight_gateway::ShardId::ONE);
         assert!(
             resolver
                 .resolve(&http, &message)
@@ -91,16 +102,55 @@ async fn gateway_updates_refresh_only_the_needed_rest_entries() {
         );
 
         let parent_update = Event::ChannelUpdate(Box::new(ChannelUpdate(modified_parent)));
-        update_permission_cache(&resolver, &parent_update);
+        update_permission_cache(&resolver, &parent_update, twilight_gateway::ShardId::ONE);
         let held = resolver.resolve(&http, &message).await.unwrap();
         assert!(!held.contains(Permissions::MANAGE_MESSAGES));
         assert!(held.contains(Permissions::BAN_MEMBERS));
 
-        update_permission_cache(&resolver, &role_deleted(10));
+        let checked = Arc::new(AtomicBool::new(false));
+        let handler_checked = Arc::clone(&checked);
+        let handler_http = Arc::clone(&http);
+        let handler_resolver = Arc::clone(&resolver);
+        let handler_message = Arc::clone(&message);
+        let mut events = Events::new();
+        events.on_gateway(async move |role: &RoleDelete| -> Result<()> {
+            assert_eq!(role.guild_id, Id::new(10));
+            let held = handler_resolver
+                .resolve(&handler_http, &handler_message)
+                .await?;
+            handler_checked.store(!held.intersects(allowed), Ordering::Relaxed);
+            Ok(())
+        });
+        let hooks = Hooks::default();
+        let (tx, rx) = mpsc::channel(1);
+        let incoming = IncomingEvent::Standard(role_deleted(10));
+        assert!(
+            route_gateway_event(
+                Ok(incoming),
+                &events,
+                &resolver,
+                &tx,
+                &hooks.reporter,
+                twilight_gateway::ShardId::ONE,
+                (None, None),
+            )
+            .is_none()
+        );
+        drop(tx);
+        dispatch_events(
+            rx,
+            None::<NoMessageHandler>,
+            &events,
+            &http,
+            &resolver,
+            &hooks,
+        )
+        .await;
+        assert!(checked.load(Ordering::Relaxed));
         let held = resolver.resolve(&http, &message).await.unwrap();
         assert!(!held.intersects(allowed));
 
-        update_permission_cache(&resolver, &Event::Resumed);
+        update_permission_cache(&resolver, &Event::Resumed, twilight_gateway::ShardId::ONE);
         let held = resolver.resolve(&http, &message).await.unwrap();
         assert!(!held.intersects(allowed));
     };
@@ -121,7 +171,7 @@ async fn role_delete_during_rest_fetch_prevents_using_the_old_permissions() {
     let server = async {
         reply(&listener, "/channels/12/messages/100", MESSAGE).await;
         let request = read_request(&listener, "/guilds/10").await;
-        update_permission_cache(&resolver, &role_deleted(10));
+        update_permission_cache(&resolver, &role_deleted(10), twilight_gateway::ShardId::ONE);
         write_response(request, &guild(Permissions::MANAGE_MESSAGES)).await;
         reply(&listener, "/channels/11", &parent(false)).await;
         reply(&listener, "/guilds/10", &guild(Permissions::empty())).await;

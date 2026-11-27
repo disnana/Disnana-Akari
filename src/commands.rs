@@ -1,28 +1,70 @@
-use std::{collections::HashMap, future::Future, pin::Pin};
+use std::{future::Future, pin::Pin};
+
+mod arguments;
+mod groups;
+mod prefix;
+mod workers;
+pub use arguments::{ArgumentError, Arguments};
+use groups::CommandTree;
+pub use groups::TextCommandGroup;
+pub use prefix::CommandPrefixes;
+use prefix::PrefixPolicy;
+pub(crate) use workers::text_workers;
 
 use twilight_model::{
+    channel::Message,
     guild::Permissions,
     id::{Id, marker::GuildMarker},
 };
 
 use crate::{
-    Context, Error, ErrorSource, HandlerKind, RegistrationError, Result, Timing,
+    CommandCheck, CommandCheckContext, Context, Error, ErrorSource, HandlerKind, RegistrationError,
+    Result, Timing,
+    command_check::run_checks,
     error::adapt_handler,
     hooks::Hooks,
     ui::{ComponentsV2, UiMessage},
 };
 
-/// 共通のプレフィックスを使うテキストコマンドの登録先です。
+/// 共通のプレフィックス候補を使うテキストコマンドの登録先です。
 pub struct Commands {
-    prefix: String,
-    handlers: HashMap<String, Box<dyn CommandHandler>>,
+    prefixes: PrefixPolicy,
+    entries: CommandTree,
+    checks: Vec<CommandCheck>,
+}
+
+struct Invocation<'a> {
+    handler: &'a dyn CommandHandler,
+    command_name: &'a str,
+    qualified_name: &'a str,
+    invoked_with: &'a str,
+    prefix: &'a str,
+    args: &'a str,
+}
+
+impl<'a> Invocation<'a> {
+    async fn call(&self, ctx: Context<'a>, checks: &[CommandCheck]) -> Result<()> {
+        if !checks.is_empty() {
+            run_checks(checks, CommandCheckContext::text(&ctx, self.qualified_name)).await?;
+        }
+        self.handler
+            .call(CommandContext {
+                ctx,
+                command_name: self.command_name,
+                qualified_name: self.qualified_name,
+                invoked_with: self.invoked_with,
+                prefix: self.prefix,
+                args: self.args,
+            })
+            .await
+    }
 }
 
 impl std::fmt::Debug for Commands {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Commands")
-            .field("prefix", &self.prefix)
-            .field("registered", &self.handlers.keys().collect::<Vec<_>>())
+            .field("prefixes", &self.prefixes)
+            .field("registered", &self.entries.names().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -34,14 +76,53 @@ impl Commands {
     ///
     /// プレフィックスが空、または空白を含む場合に失敗します。
     pub fn new(prefix: &str) -> Result<Self> {
-        if prefix.is_empty() || prefix.chars().any(char::is_whitespace) {
+        Self::with_prefixes(&[prefix])
+    }
+
+    /// 同じコマンド一覧を呼び出せるプレフィックスをまとめて指定します。
+    ///
+    /// 複数の候補が同じ投稿に一致する場合は、最も長いものを使います。
+    ///
+    /// # エラー
+    /// 候補がない場合や、空または空白を含む候補がある場合に失敗します。
+    pub fn with_prefixes(prefixes: &[&str]) -> Result<Self> {
+        if prefixes.is_empty() {
             return Err(RegistrationError::InvalidPrefix.into());
         }
-
         Ok(Self {
-            prefix: prefix.into(),
-            handlers: HashMap::new(),
+            prefixes: PrefixPolicy::Fixed(CommandPrefixes::new(prefixes)?),
+            entries: CommandTree::default(),
+            checks: Vec::new(),
         })
+    }
+
+    /// 投稿ごとにプレフィックスの候補を返す非同期関数を指定します。
+    ///
+    /// [`Bot::run_commands`](crate::Bot::run_commands) で条件を満たした投稿は、
+    /// コマンド実行と別の待ち行列で判定します。待ち行列に入った投稿ごとに最大 1 回関数を呼びます。
+    /// 判定の同時数と待ち行列の長さは [`Limits`](crate::Limits) の
+    /// `text_workers` と `queue_capacity` です。判定が混雑した場合は投稿に返信しません。
+    /// 関数内の待機には非同期処理を使ってください。
+    pub fn with_prefix_resolver<E>(
+        resolver: impl AsyncFn(&Message) -> std::result::Result<CommandPrefixes, E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        Self {
+            prefixes: PrefixPolicy::dynamic(resolver),
+            entries: CommandTree::default(),
+            checks: Vec::new(),
+        }
+    }
+
+    /// この一覧で実行するコマンドにチェックを追加します。
+    /// コマンドを特定した後に登録順に実行し、最初のエラーで実行を止めます。
+    pub fn add_check(&mut self, check: CommandCheck) {
+        self.checks.push(check);
     }
 
     /// プレフィックスを除いた名前で `async fn` または async クロージャを登録します。
@@ -60,49 +141,124 @@ impl Commands {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        self.ensure_available(name)?;
+        self.register_with_aliases(name, &[], handler)
+    }
+
+    /// 正式名と別名をまとめて登録し、どの名前からも同じ関数を実行します。
+    ///
+    /// 正式名と別名はどちらも大文字・小文字を区別します。
+    ///
+    /// # エラー
+    ///
+    /// 空の名前、空白を含む名前、重複する名前がある場合に失敗します。
+    /// 失敗した場合は、正式名と別名のどちらも登録しません。
+    pub fn register_with_aliases<E>(
+        &mut self,
+        name: &str,
+        aliases: &[&str],
+        handler: impl for<'a> AsyncFn(CommandContext<'a>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
         let handler = adapt_handler!(handler, ctx: CommandContext<'_>);
-        self.handlers.insert(name.into(), Box::new(handler));
-        Ok(())
+        self.entries.register(name, aliases, Box::new(handler))
+    }
+
+    /// サブコマンドやグループを登録するための、最上位グループを作ります。
+    ///
+    /// # エラー
+    ///
+    /// 名前が空、空白を含む、または登録済みの場合に失敗します。
+    pub fn group(&mut self, name: &str) -> Result<TextCommandGroup<'_>> {
+        self.group_with_aliases(name, &[])
+    }
+
+    /// 別名でも呼び出せる最上位グループを作ります。
+    ///
+    /// # エラー
+    ///
+    /// 無効な名前や同じ階層の重複を拒否します。失敗すると、グループも別名も登録しません。
+    pub fn group_with_aliases(
+        &mut self,
+        name: &str,
+        aliases: &[&str],
+    ) -> Result<TextCommandGroup<'_>> {
+        self.entries.group(name, aliases)
     }
 
     pub(crate) fn ensure_available(&self, name: &str) -> Result<()> {
-        if name.is_empty() || name.chars().any(char::is_whitespace) {
-            return Err(RegistrationError::InvalidCommandName.into());
+        self.entries.ensure_available(name)
+    }
+
+    pub(crate) fn ensure_available_with_aliases(&self, name: &str, aliases: &[&str]) -> Result<()> {
+        self.entries.validate_names(name, aliases)
+    }
+
+    pub(crate) fn stage_group(&self) -> Self {
+        Self {
+            prefixes: self.prefixes.clone(),
+            entries: CommandTree::default(),
+            checks: Vec::new(),
         }
-        if self.handlers.contains_key(name) {
-            return Err(RegistrationError::Duplicate {
-                kind: HandlerKind::TextCommand,
-                name: name.to_owned(),
-            }
-            .into());
-        }
-        Ok(())
+    }
+
+    pub(crate) fn append_staged_group(&mut self, staged: Self) {
+        self.entries.append(staged.entries);
     }
 
     /// メッセージに一致するコマンドを実行します。未登録の名前や通常の投稿は無視します。
     ///
     /// # エラー
     ///
-    /// コマンド関数が返したエラーを呼び出し元に伝えます。
+    /// プレフィックスの判定、チェック、コマンド関数のエラーを呼び出し元に伝えます。
     pub async fn dispatch(&self, ctx: Context<'_>) -> Result<()> {
-        if let Some((handler, args)) = self.resolve(&ctx.message().content) {
-            handler.call(CommandContext { ctx, args }).await?;
+        if let Some(invocation) = self.resolve_message(ctx.message()).await? {
+            invocation.call(ctx, &self.checks).await?;
         }
 
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn matches_message(&self, content: &str) -> bool {
         self.resolve(content).is_some()
     }
 
+    fn matching_static_prefix(&self, content: &str) -> Option<usize> {
+        self.resolve(content)
+            .map(|invocation| invocation.prefix.len())
+    }
+
+    async fn matching_prefix(&self, message: &Message) -> Result<Option<usize>> {
+        Ok(self
+            .resolve_message(message)
+            .await?
+            .map(|invocation| invocation.prefix.len()))
+    }
+
+    async fn resolve_message<'a>(&'a self, message: &'a Message) -> Result<Option<Invocation<'a>>> {
+        let PrefixPolicy::Dynamic(resolver) = &self.prefixes else {
+            return Ok(self.resolve(&message.content));
+        };
+        let prefixes = resolver.resolve(message).await?;
+        Ok(prefixes
+            .match_len(&message.content)
+            .and_then(|prefix_len| self.resolve_selected(&message.content, prefix_len)))
+    }
+
     /// コマンドを実行する。失敗はエラーの報告先へ渡し、文言が設定されていれば元の投稿へ返信する。
-    pub(crate) async fn dispatch_with_feedback(&self, ctx: Context<'_>, hooks: &Hooks) {
-        let Err(error) = self.dispatch(ctx).await else {
+    async fn dispatch_with_feedback(&self, ctx: Context<'_>, prefix_len: usize, hooks: &Hooks) {
+        let Some(invocation) = self.resolve_selected(&ctx.message().content, prefix_len) else {
             return;
         };
-        let name = self.command_name(&ctx.message().content);
+        let Err(error) = invocation.call(ctx, &self.checks).await else {
+            return;
+        };
+        let name = Some(invocation.qualified_name);
         hooks
             .reporter
             .report(ErrorSource::TextCommand, name, &error);
@@ -120,27 +276,39 @@ impl Commands {
         }
     }
 
-    fn command_name<'a>(&self, content: &'a str) -> Option<&'a str> {
-        let input = content.strip_prefix(&self.prefix)?;
-        Some(
-            input
-                .split_once(char::is_whitespace)
-                .map_or(input, |(name, _)| name),
-        )
+    fn resolve<'a>(&'a self, content: &'a str) -> Option<Invocation<'a>> {
+        let PrefixPolicy::Fixed(prefixes) = &self.prefixes else {
+            return None;
+        };
+        self.resolve_selected(content, prefixes.match_len(content)?)
     }
 
-    fn resolve<'a>(&self, content: &'a str) -> Option<(&dyn CommandHandler, &'a str)> {
-        let input = content.strip_prefix(&self.prefix)?;
-        let (name, args) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
-        let handler = self.handlers.get(name)?.as_ref();
-        Some((handler, args.trim()))
+    fn resolve_selected<'a>(
+        &'a self,
+        content: &'a str,
+        prefix_len: usize,
+    ) -> Option<Invocation<'a>> {
+        let (prefix, input) = content.split_at_checked(prefix_len)?;
+        self.entries.resolve(prefix, input)
     }
+}
+
+fn duplicate_command(name: &str) -> Error {
+    RegistrationError::Duplicate {
+        kind: HandlerKind::TextCommand,
+        name: name.to_owned(),
+    }
+    .into()
 }
 
 /// コマンド関数に渡す、引数と元のメッセージです。
 #[derive(Debug)]
 pub struct CommandContext<'a> {
     ctx: Context<'a>,
+    command_name: &'a str,
+    qualified_name: &'a str,
+    invoked_with: &'a str,
+    prefix: &'a str,
     args: &'a str,
 }
 
@@ -158,6 +326,33 @@ impl<'a> CommandContext<'a> {
     /// コマンド名より後ろの本文を返します。前後の空白は除去済みです。
     pub fn args(&self) -> &'a str {
         self.args
+    }
+
+    /// 最後に選ばれたコマンドの正式名を、親グループや別名を含めず返します。
+    pub fn command_name(&self) -> &'a str {
+        self.command_name
+    }
+
+    /// 親グループからコマンドまで、正式名を空白でつないだ名前を返します。
+    ///
+    /// たとえば `!c set` の `c` が `config` の別名なら `config set` です。
+    pub fn qualified_name(&self) -> &'a str {
+        self.qualified_name
+    }
+
+    /// メッセージで最後に使われたコマンド名を、登録した別名も含め入力どおりに返します。
+    pub fn invoked_with(&self) -> &'a str {
+        self.invoked_with
+    }
+
+    /// 今回の呼び出しに使われたプレフィックスを取得します。
+    pub fn prefix(&self) -> &'a str {
+        self.prefix
+    }
+
+    /// コマンド名の後ろから、空白やクォートを解釈しながら引数を読み取ります。
+    pub fn arguments(&self) -> Arguments<'a> {
+        Arguments::new(self.args)
     }
 
     /// 元のメッセージコンテキストを借ります。
@@ -257,7 +452,20 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandContext, Commands, Result};
+    use std::sync::{Arc, Mutex};
+
+    use twilight_http::Client;
+    use twilight_model::channel::Message;
+
+    use super::{
+        CommandContext, Commands, Context, Error, ErrorSource, HandlerKind, RegistrationError,
+        Result,
+    };
+    use crate::{
+        hooks::{Hooks, Reporter},
+        permissions::PermissionResolver,
+        timing::Pending,
+    };
 
     async fn command(_: CommandContext<'_>) -> Result<()> {
         Ok(())
@@ -269,12 +477,12 @@ mod tests {
         commands.register("ping", command)?;
         commands.register("echo", command)?;
 
-        assert_eq!(commands.resolve("!ping").map(|(_, args)| args), Some(""));
+        assert_eq!(commands.resolve("!ping").map(|call| call.args), Some(""));
         assert!(commands.matches_message("!ping"));
         assert_eq!(
             commands
                 .resolve("!echo\t こんにちは  世界 ")
-                .map(|(_, args)| args),
+                .map(|call| call.args),
             Some("こんにちは  世界")
         );
         for input in ["ping", "!", "! ping", "!pinged", "!PING", "/ping"] {
@@ -294,6 +502,265 @@ mod tests {
         commands.register("ping", command)?;
         assert!(commands.register("ping", command).is_err());
         assert!(commands.resolve("!ping").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn aliases_share_the_command_namespace_and_register_atomically() -> Result<()> {
+        let mut commands = Commands::new("!")?;
+        commands.register_with_aliases("ping", &["p", "ポン"], command)?;
+
+        for aliases in [
+            &["greet", "ping"][..],
+            &["greet", "p"],
+            &["greet", "greet"],
+            &["greet", "hello"],
+        ] {
+            let conflicting_name = aliases[1];
+            assert!(matches!(
+                commands.register_with_aliases("hello", aliases, command),
+                Err(Error::Registration(RegistrationError::Duplicate {
+                    kind: HandlerKind::TextCommand, name,
+                })) if name == conflicting_name
+            ));
+            assert!(!commands.matches_message("!hello"));
+            assert!(!commands.matches_message("!greet"));
+        }
+        assert!(matches!(
+            commands.register_with_aliases("hello", &["greet", "two words"], command),
+            Err(Error::Registration(RegistrationError::InvalidCommandName))
+        ));
+        assert!(!commands.matches_message("!hello"));
+        assert!(!commands.matches_message("!greet"));
+        assert!(matches!(
+            commands.register("p", command),
+            Err(Error::Registration(RegistrationError::Duplicate {
+                kind: HandlerKind::TextCommand, name,
+            })) if name == "p"
+        ));
+        assert!(commands.matches_message("!ping"));
+        assert!(commands.matches_message("!p"));
+        assert!(commands.matches_message("!ポン"));
+        assert!(!commands.matches_message("!P"));
+        Ok(())
+    }
+
+    #[test]
+    fn longest_prefix_wins_for_canonical_names_and_aliases() -> Result<()> {
+        assert!(Commands::with_prefixes(&[]).is_err());
+        assert!(Commands::with_prefixes(&["!", " "]).is_err());
+        let mut commands = Commands::with_prefixes(&["!", "akari.", "!!"])?;
+        commands.register_with_aliases("echo", &["e"], async |_| -> Result<()> { Ok(()) })?;
+        commands.register("!echo", async |_| -> Result<()> { Ok(()) })?;
+
+        let invocation = commands.resolve("!!echo こんにちは").unwrap();
+        assert_eq!(invocation.prefix, "!!");
+        assert_eq!(invocation.command_name, "echo");
+        assert_eq!(invocation.args, "こんにちは");
+        let invocation = commands.resolve("akari.e").unwrap();
+        assert_eq!(invocation.prefix, "akari.");
+        assert_eq!(invocation.invoked_with, "e");
+        assert!(!commands.matches_message("/echo"));
+        Ok(())
+    }
+
+    #[test]
+    fn groups_route_exact_tokens_greedily_and_do_not_fall_back_on_unknown_children() -> Result<()> {
+        let mut commands = Commands::with_prefixes(&["!", "!!"])?;
+        let mut config = commands.group_with_aliases("config", &["c"])?;
+        config.fallback(command)?;
+        config.subcommand("list", command)?;
+        let mut advanced = config.group_with_aliases("advanced", &["a"])?;
+        advanced.subcommand_with_aliases("set", &["s"], command)?;
+
+        let bare = commands.resolve("!c \t").unwrap();
+        assert_eq!(
+            (
+                bare.command_name,
+                bare.qualified_name,
+                bare.invoked_with,
+                bare.args
+            ),
+            ("config", "config", "c", "")
+        );
+        let list = commands.resolve("!config list one two").unwrap();
+        assert_eq!((list.qualified_name, list.args), ("config list", "one two"));
+        let leaf = commands.resolve(r#"!!c　a s 「二つの 値」 2"#).unwrap();
+        assert_eq!(
+            (
+                leaf.prefix,
+                leaf.command_name,
+                leaf.qualified_name,
+                leaf.invoked_with,
+                leaf.args
+            ),
+            ("!!", "set", "config advanced set", "s", "「二つの 値」 2"),
+        );
+        for input in [
+            "!c a",
+            "!c x",
+            "!c lists",
+            "!c a setting",
+            "!c a SET",
+            "! c",
+            "!cc list",
+            "!c a#s",
+        ] {
+            assert!(!commands.matches_message(input), "{input}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn group_aliases_share_only_the_local_namespace_with_leaf_commands() -> Result<()> {
+        let mut commands = Commands::new("!")?;
+        let mut first = commands.group("first")?;
+        first.subcommand_with_aliases("echo", &["e"], command)?;
+        assert!(matches!(
+            first.group_with_aliases("other", &["o", "e"]),
+            Err(Error::Registration(RegistrationError::Duplicate {
+                kind: HandlerKind::TextCommand, name
+            })) if name == "first e"
+        ));
+        first.group_with_aliases("other", &["o"])?;
+        let mut second = commands.group_with_aliases("second", &["s"])?;
+        second.subcommand_with_aliases("echo", &["e"], command)?;
+        second.fallback(command)?;
+        assert!(matches!(
+            second.fallback(command),
+            Err(Error::Registration(RegistrationError::Duplicate {
+                kind: HandlerKind::TextCommand, name
+            })) if name == "second"
+        ));
+        assert!(commands.register("s", command).is_err());
+        assert!(commands.matches_message("!first e"));
+        assert!(commands.matches_message("!s e"));
+        assert!(commands.matches_message("!s"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dispatch_reports_canonical_name_and_passes_the_invoked_alias() -> Result<()> {
+        let mut commands = Commands::new("!")?;
+        let mut config = commands.group_with_aliases("config", &["c"])?;
+        config.subcommand_with_aliases(
+            "echo",
+            &["e"],
+            async |ctx: CommandContext<'_>| -> Result<()> {
+                assert_eq!(ctx.command_name(), "echo");
+                assert_eq!(ctx.qualified_name(), "config echo");
+                assert_eq!(ctx.invoked_with(), "e");
+                assert_eq!(ctx.args(), "こんにちは  世界");
+                Err(Error::msg("test command failure"))
+            },
+        )?;
+
+        let message = command_message("!c e  こんにちは  世界 ")?;
+        let http = Client::new("test".into());
+        let permissions = PermissionResolver::new(None);
+        let (message, timing) = Pending::new(&message, None).begin();
+        let ctx = Context {
+            http: &http,
+            message,
+            timing,
+            permissions: &permissions,
+        };
+        let names = Arc::new(Mutex::new(Vec::new()));
+        let collected = Arc::clone(&names);
+        let hooks = Hooks {
+            reporter: Reporter::new(move |report| {
+                assert_eq!(report.source, ErrorSource::TextCommand);
+                assert_eq!(report.error.to_string(), "test command failure");
+                collected
+                    .lock()
+                    .unwrap()
+                    .push(report.name.map(str::to_owned));
+            }),
+            ..Hooks::default()
+        };
+        assert!(commands.dispatch(ctx).await.is_err());
+        commands
+            .dispatch_with_feedback(ctx, "!".len(), &hooks)
+            .await;
+        assert_eq!(*names.lock().unwrap(), [Some("config echo".to_owned())]);
+        Ok(())
+    }
+
+    fn command_message(content: &str) -> Result<Message> {
+        let mut message: Message = serde_json::from_str(
+            r#"{
+            "id": "1", "channel_id": "2", "type": 0,
+            "author": {"id": "3", "username": "member", "discriminator": "0"},
+            "content": "", "timestamp": "2026-01-01T00:00:00.000000+00:00",
+            "attachments": [], "embeds": [], "mention_everyone": false, "mention_roles": [],
+            "mentions": [], "pinned": false, "tts": false
+        }"#,
+        )
+        .map_err(Error::handler)?;
+        message.content = content.into();
+        Ok(message)
+    }
+
+    #[tokio::test]
+    async fn checks_use_canonical_route_and_stop_on_first_denial() -> Result<()> {
+        use crate::{CheckFailure, CommandCheck, CommandCheckContext, CommandCheckSource};
+
+        let mut commands = Commands::new("!")?;
+        commands
+            .group_with_aliases("config", &["c"])?
+            .subcommand_with_aliases(
+                "echo",
+                &["e"],
+                async |_: CommandContext<'_>| -> Result<()> { panic!("denied handler ran") },
+            )?;
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let first = Arc::clone(&calls);
+        commands.add_check(CommandCheck::new(
+            async move |ctx: CommandCheckContext<'_>| {
+                assert_eq!(ctx.source(), CommandCheckSource::Text);
+                assert!(ctx.command_path().eq(["config", "echo"]));
+                assert_eq!(ctx.author_id().map(twilight_model::id::Id::get), Some(3));
+                assert_eq!(ctx.channel_id().map(twilight_model::id::Id::get), Some(2));
+                first.lock().unwrap().push(1);
+                Ok(())
+            },
+        ));
+        let second = Arc::clone(&calls);
+        commands.add_check(CommandCheck::new(async move |_| {
+            second.lock().unwrap().push(2);
+            Err(CheckFailure::Rejected.into())
+        }));
+        commands.add_check(CommandCheck::new(async |_| panic!("later check ran")));
+
+        let http = Client::new("test".into());
+        let permissions = PermissionResolver::new(None);
+        let message = command_message("!c e")?;
+        let unknown = command_message("!c missing")?;
+        let (_, timing) = Pending::new((), None).begin();
+        let ctx = Context {
+            http: &http,
+            message: &message,
+            timing,
+            permissions: &permissions,
+        };
+        commands
+            .dispatch(Context {
+                message: &unknown,
+                ..ctx
+            })
+            .await?;
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(matches!(
+            commands.dispatch(ctx).await,
+            Err(Error::Check(CheckFailure::Rejected))
+        ));
+        assert_eq!(*calls.lock().unwrap(), [1, 2]);
+
+        commands.checks.remove(1);
+        assert!(matches!(
+            commands.dispatch(ctx).await,
+            Err(Error::HandlerPanic { .. })
+        ));
         Ok(())
     }
 }

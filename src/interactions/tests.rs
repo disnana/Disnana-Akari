@@ -86,7 +86,7 @@ async fn button_context_debug_omits_credentials() {
         timing,
         info: &info,
     };
-    let ctx = ButtonContext::new(initial, "akari:test");
+    let ctx = ButtonContext::new(initial, "akari:test", None);
     let debug = format!("{ctx:?}");
     assert!(debug.contains("akari:test"));
     assert!(!debug.contains(bot_token));
@@ -132,7 +132,7 @@ async fn initial_response_reports_only_after_discord_accepts_it() -> Result<()> 
         timing,
         info: &info,
     };
-    let mut ctx = ButtonContext::new(initial, "akari:test");
+    let mut ctx = ButtonContext::new(initial, "akari:test", None);
 
     let request = async {
         assert!(ctx.defer_update().await.is_err());
@@ -239,6 +239,95 @@ fn routes_only_matching_kinds_and_exact_ids() -> Result<()> {
         component_payload(ComponentType::TextSelectMenu, "shared"),
     );
     assert!(!handlers.accepts(&malformed));
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_handlers_dispatch_with_borrowed_values_and_static_priority() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    };
+
+    let seen = Arc::new(AtomicU8::new(0));
+    let mut events = crate::Events::new();
+    let state = seen.clone();
+    events.on_button("ticket:fixed", async move |ctx: &mut ButtonContext<'_>| {
+        assert!(ctx.dynamic_id().is_none());
+        ctx.response = ButtonResponse::Sent;
+        state.fetch_or(1, Ordering::Relaxed);
+        Ok::<_, crate::Error>(())
+    })?;
+    let state = seen.clone();
+    events.on_dynamic_button("ticket", async move |ctx: &mut ButtonContext<'_>| {
+        assert_eq!(ctx.custom_id(), "ticket:button");
+        assert_eq!(
+            ctx.dynamic_id().map(crate::ui::DynamicIdRef::value),
+            Some("button")
+        );
+        ctx.response = ButtonResponse::Sent;
+        state.fetch_or(2, Ordering::Relaxed);
+        Ok::<_, crate::Error>(())
+    })?;
+    let state = seen.clone();
+    events.on_dynamic_user_select("ticket", async move |ctx: &mut UserSelectContext<'_>| {
+        assert_eq!(
+            ctx.dynamic_id().map(crate::ui::DynamicIdRef::value),
+            Some("who")
+        );
+        assert_eq!(ctx.values(), &[Id::new(15)]);
+        ctx.inner.response = ButtonResponse::Sent;
+        state.fetch_or(4, Ordering::Relaxed);
+        Ok::<_, crate::Error>(())
+    })?;
+    let state = seen.clone();
+    events.on_dynamic_modal("ticket", async move |ctx: &mut ModalContext<'_>| {
+        assert_eq!(
+            ctx.dynamic_id().map(crate::ui::DynamicIdRef::value),
+            Some("form")
+        );
+        ctx.response = ResponseState::Replied;
+        state.fetch_or(8, Ordering::Relaxed);
+        Ok::<_, crate::Error>(())
+    })?;
+    let handlers = &events.interaction_handlers;
+    assert!(handlers.has_modals());
+    let string_select = interaction(
+        InteractionType::MessageComponent,
+        component_payload(ComponentType::TextSelectMenu, "ticket:who"),
+    );
+    assert!(!handlers.accepts(&string_select));
+    let select = InteractionData::MessageComponent(Box::new(MessageComponentInteractionData {
+        component_type: ComponentType::UserSelectMenu,
+        custom_id: "ticket:who".into(),
+        resolved: None,
+        values: vec!["15".into()],
+    }));
+    let modal = InteractionData::ModalSubmit(Box::new(ModalInteractionData {
+        components: vec![],
+        custom_id: "ticket:form".into(),
+        resolved: None,
+    }));
+    let http = twilight_http::Client::new("dummy".into());
+    let hooks = crate::hooks::Hooks::default();
+    for (kind, data) in [
+        (
+            InteractionType::MessageComponent,
+            component_payload(ComponentType::Button, "ticket:fixed"),
+        ),
+        (
+            InteractionType::MessageComponent,
+            component_payload(ComponentType::Button, "ticket:button"),
+        ),
+        (InteractionType::MessageComponent, select),
+        (InteractionType::ModalSubmit, modal),
+    ] {
+        let event = interaction(kind, data);
+        assert!(handlers.accepts(&event));
+        let (_, timing) = crate::timing::Pending::new((), None).begin();
+        handlers.dispatch(&http, &event, timing, &hooks, &[]).await;
+    }
+    assert_eq!(seen.load(Ordering::Relaxed), 15);
     Ok(())
 }
 
@@ -429,6 +518,488 @@ fn finds_text_inputs_in_label_and_legacy_row() {
     assert_eq!(submitted_text(&label, "description"), Some("new"));
     assert_eq!(submitted_text(&legacy, "description"), Some("legacy"));
     assert_eq!(submitted_text(&label, "Description"), None);
+}
+
+#[tokio::test]
+async fn dispatches_modal_file_upload_and_checkbox_submissions() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let data: ModalInteractionData = serde_json::from_value(serde_json::json!({
+        "custom_id": "feedback",
+        "components": [
+            {"type": 18, "id": 1, "component": {
+                "type": 19, "id": 2, "custom_id": "evidence", "values": ["12", "11", "13"]
+            }},
+            {"type": 18, "id": 3, "component": {
+                "type": 19, "id": 4, "custom_id": "optional", "values": []
+            }},
+            {"type": 18, "id": 5, "component": {
+                "type": 23, "id": 6, "custom_id": "updates", "value": true
+            }},
+            {"type": 18, "id": 7, "component": {
+                "type": 23, "id": 8, "custom_id": "share", "value": false
+            }}
+        ],
+        "resolved": {
+            "attachments": {
+                "11": {
+                    "id": "11", "filename": "preview.png", "content_type": "image/png",
+                    "ephemeral": true, "size": 20, "url": "https://example.test/preview.png",
+                    "proxy_url": "https://example.test/proxy/preview.png"
+                },
+                "13": {
+                    "id": "14", "filename": "mismatched.png", "size": 20,
+                    "url": "https://example.test/mismatched.png",
+                    "proxy_url": "https://example.test/proxy/mismatched.png"
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let event = interaction(
+        InteractionType::ModalSubmit,
+        InteractionData::ModalSubmit(Box::new(data)),
+    );
+    let called = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&called);
+    let mut handlers = InteractionHandlers::default();
+    handlers
+        .register_modal("feedback", async move |ctx: &mut ModalContext<'_>| {
+            assert_eq!(
+                ctx.file_upload("evidence"),
+                Some([Id::new(12), Id::new(11), Id::new(13)].as_slice())
+            );
+            assert_eq!(ctx.file_upload("optional"), Some([].as_slice()));
+            assert!(ctx.file_upload("Evidence").is_none());
+            assert!(ctx.text_input("evidence").is_none());
+            assert_eq!(ctx.checkbox("updates"), Some(true));
+            assert_eq!(ctx.checkbox("share"), Some(false));
+            assert_eq!(ctx.checkbox("Share"), None);
+            assert_eq!(ctx.checkbox("evidence"), None);
+            assert!(ctx.attachment(Id::new(12)).is_none());
+            assert!(ctx.attachment(Id::new(13)).is_none());
+            assert!(ctx.attachment(Id::new(14)).is_none());
+            let attachment = ctx.attachment(Id::new(11)).unwrap();
+            assert_eq!(attachment.filename, "preview.png");
+            assert!(attachment.ephemeral);
+            observed.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap();
+    let hooks = crate::hooks::Hooks {
+        messages: Messages {
+            modal_accepted: None,
+            modal_failed: None,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (_, timing) = crate::timing::Pending::new((), None).begin();
+    assert!(handlers.accepts(&event));
+    handlers
+        .dispatch(
+            &twilight_http::Client::builder().build(),
+            &event,
+            timing,
+            &hooks,
+            &[],
+        )
+        .await;
+    assert!(called.load(Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn dispatches_modal_select_values_with_typed_ids_and_resolved_mentions() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let mut data: ModalInteractionData = serde_json::from_value(serde_json::json!({
+        "custom_id": "survey",
+        "components": [
+            {"type": 18, "id": 1, "component": {
+                "type": 3, "id": 2, "custom_id": "color", "values": []
+            }},
+            {"type": 18, "id": 3, "component": {
+                "type": 5, "id": 4, "custom_id": "user", "values": ["42"]
+            }},
+            {"type": 18, "id": 5, "component": {
+                "type": 6, "id": 6, "custom_id": "role", "values": ["44"]
+            }},
+            {"type": 18, "id": 7, "component": {
+                "type": 8, "id": 8, "custom_id": "channel", "values": ["45"]
+            }},
+            {"type": 18, "id": 9, "component": {
+                "type": 7, "id": 10, "custom_id": "mention", "values": ["44", "42"]
+            }}
+        ]
+    }))
+    .unwrap();
+    let mut resolved: InteractionDataResolved =
+        serde_json::from_value(serde_json::json!({})).unwrap();
+    resolved.users.insert(Id::new(42), user(42, false));
+    resolved.roles.insert(Id::new(44), role(44));
+    data.resolved = Some(resolved);
+    let event = interaction(
+        InteractionType::ModalSubmit,
+        InteractionData::ModalSubmit(Box::new(data)),
+    );
+    let called = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&called);
+    let mut handlers = InteractionHandlers::default();
+    handlers
+        .register_modal("survey", async move |ctx: &mut ModalContext<'_>| {
+            assert_eq!(ctx.string_select("color"), Some([].as_slice()));
+            assert_eq!(ctx.string_select("user"), None);
+            assert_eq!(ctx.user_select("user"), Some([Id::new(42)].as_slice()));
+            assert_eq!(ctx.role_select("role"), Some([Id::new(44)].as_slice()));
+            assert_eq!(
+                ctx.channel_select("channel"),
+                Some([Id::new(45)].as_slice())
+            );
+            assert_eq!(ctx.mentionable_select("color")?, None);
+            assert_eq!(
+                ctx.mentionable_select("mention")?.as_deref(),
+                Some(
+                    [
+                        Mentionable::Role(Id::new(44)),
+                        Mentionable::User(Id::new(42))
+                    ]
+                    .as_slice()
+                )
+            );
+            observed.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap();
+    let hooks = crate::hooks::Hooks {
+        messages: Messages {
+            modal_accepted: None,
+            modal_failed: None,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (_, timing) = crate::timing::Pending::new((), None).begin();
+    assert!(handlers.accepts(&event));
+    handlers
+        .dispatch(
+            &twilight_http::Client::builder().build(),
+            &event,
+            timing,
+            &hooks,
+            &[],
+        )
+        .await;
+    assert!(called.load(Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn dispatches_modal_checkbox_group_values_and_distinguishes_empty_fields() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let data: ModalInteractionData = serde_json::from_value(serde_json::json!({
+        "custom_id": "survey",
+        "components": [
+            {"type": 18, "id": 1, "component": {
+                "type": 22, "id": 2, "custom_id": "colors", "values": ["green", "blue"]
+            }},
+            {"type": 18, "id": 3, "component": {
+                "type": 22, "id": 4, "custom_id": "unchecked", "values": []
+            }}
+        ]
+    }))
+    .unwrap();
+    let event = interaction(
+        InteractionType::ModalSubmit,
+        InteractionData::ModalSubmit(Box::new(data)),
+    );
+    let called = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&called);
+    let mut handlers = InteractionHandlers::default();
+    handlers
+        .register_modal("survey", async move |ctx: &mut ModalContext<'_>| {
+            let values = ctx.checkbox_group("colors").unwrap();
+            assert_eq!(values, ["green", "blue"]);
+            assert_eq!(ctx.checkbox_group("unchecked"), Some([].as_slice()));
+            assert!(ctx.checkbox_group("Colors").is_none());
+            assert!(ctx.string_select("colors").is_none());
+            observed.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap();
+    let hooks = crate::hooks::Hooks {
+        messages: Messages {
+            modal_accepted: None,
+            modal_failed: None,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (_, timing) = crate::timing::Pending::new((), None).begin();
+    assert!(handlers.accepts(&event));
+    handlers
+        .dispatch(
+            &twilight_http::Client::builder().build(),
+            &event,
+            timing,
+            &hooks,
+            &[],
+        )
+        .await;
+    assert!(called.load(Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn modal_original_response_uses_the_private_submit_reply_not_the_source_message() -> Result<()>
+{
+    use crate::{Error, ResponseStateError, slash::tests::exchange_response, ui::ComponentsV2};
+    use serde_json::{Value, json};
+    use std::time::Duration;
+    use tokio::{net::TcpListener, time::timeout};
+    use twilight_model::channel::message::MessageFlags;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(Error::handler)?;
+    let http = twilight_http::Client::builder()
+        .proxy(
+            listener.local_addr().map_err(Error::handler)?.to_string(),
+            true,
+        )
+        .build();
+    let mut event = interaction(
+        InteractionType::ModalSubmit,
+        InteractionData::ModalSubmit(Box::new(ModalInteractionData {
+            components: Vec::new(),
+            custom_id: "survey".into(),
+            resolved: None,
+        })),
+    );
+    event.token = "modal-submit-token".into();
+    event.message = Some(message(99, user(4, true)));
+    let mut handlers = InteractionHandlers::default();
+    handlers.register_modal("survey", async |ctx: &mut ModalContext<'_>| -> Result<()> {
+        let ui = UiMessage::new().content("従来形式");
+        let v2 = ComponentsV2::new().text("<@123>");
+        assert!(matches!(
+            ctx.original_response().await,
+            Err(Error::ResponseState(
+                ResponseStateError::OriginalResponseUnavailable
+            ))
+        ));
+        for result in [
+            ctx.edit_original_response("本文").await,
+            ctx.edit_original_ui(&ui).await,
+            ctx.edit_original_v2(&v2).await,
+            ctx.delete_original_response().await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(Error::ResponseState(
+                    ResponseStateError::OriginalResponseUnavailable
+                ))
+            ));
+        }
+        ctx.defer_ephemeral().await?;
+        ctx.edit_original_v2(&v2).await?;
+        assert!(matches!(
+            ctx.edit_original_ui(&ui).await,
+            Err(Error::ResponseState(
+                ResponseStateError::OriginalResponseFormatMismatch
+            ))
+        ));
+        let response = ctx.original_response().await?;
+        assert_eq!(response.id, Id::new(7));
+        assert!(response.flags.unwrap().contains(MessageFlags::EPHEMERAL));
+        ctx.delete_original_response().await?;
+        assert!(matches!(
+            ctx.delete_original_response().await,
+            Err(Error::ResponseState(
+                ResponseStateError::OriginalResponseUnavailable
+            ))
+        ));
+        ctx.followup_ephemeral("deleted").await
+    })?;
+    let hooks = crate::hooks::Hooks::default();
+    let (_, timing) = crate::timing::Pending::new((), None).begin();
+    let server = async {
+        let callback: Value = serde_json::from_str(
+            &exchange_response(
+                &listener,
+                "POST",
+                Some("/interactions/1/modal-submit-token/callback"),
+                None,
+            )
+            .await?,
+        )
+        .unwrap();
+        assert_eq!(callback["type"], 5);
+        assert_eq!(callback["data"]["flags"], 64);
+        let path = Some("/webhooks/10/modal-submit-token/messages/@original");
+        let patch: Value =
+            serde_json::from_str(&exchange_response(&listener, "PATCH", path, None).await?)
+                .unwrap();
+        assert_eq!(patch["flags"], 32_768);
+        assert_eq!(patch["components"][0]["type"], 10);
+        assert_eq!(patch["components"][0]["content"], "<@123>");
+        assert_eq!(patch["allowed_mentions"]["parse"], json!([]));
+        assert!(patch.get("attachments").is_none());
+        assert!(patch.get("content").is_none());
+        let mut reply = message(7, user(4, true));
+        reply.flags = Some(MessageFlags::EPHEMERAL | MessageFlags::IS_COMPONENTS_V2);
+        let reply = serde_json::to_string(&reply).unwrap();
+        exchange_response(&listener, "GET", path, Some(&reply)).await?;
+        exchange_response(&listener, "DELETE", path, None).await?;
+        let followup: Value = serde_json::from_str(
+            &exchange_response(
+                &listener,
+                "POST",
+                Some("/webhooks/10/modal-submit-token"),
+                None,
+            )
+            .await?,
+        )
+        .unwrap();
+        assert_eq!(followup["flags"], 64);
+        assert_eq!(followup["content"], "deleted");
+        Ok::<_, std::io::Error>(())
+    };
+    let (_, server) = timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            handlers.dispatch(&http, &event, timing, &hooks, &[]),
+            server
+        )
+    })
+    .await
+    .map_err(Error::handler)?;
+    server.map_err(Error::handler)
+}
+
+fn radio_submit_event(components: serde_json::Value) -> String {
+    let event = interaction(
+        InteractionType::ModalSubmit,
+        InteractionData::ModalSubmit(Box::new(ModalInteractionData {
+            components: Vec::new(),
+            custom_id: "survey".into(),
+            resolved: None,
+        })),
+    );
+    let mut payload = serde_json::to_value(event).unwrap();
+    *payload.get_mut("data").unwrap() = serde_json::json!({
+        "custom_id": "survey",
+        "components": components,
+    });
+    serde_json::json!({"op": 0, "s": 1, "t": "INTERACTION_CREATE", "d": payload}).to_string()
+}
+
+#[tokio::test]
+async fn dispatches_radio_group_values_from_the_gateway_without_replacing_other_fields() {
+    use crate::message_events::{IncomingEvent, decode_text};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use twilight_gateway::{Event, EventTypeFlags};
+
+    let payload = radio_submit_event(serde_json::json!([
+        {"type": 18, "id": 1, "component": {
+            "type": 21, "id": 2, "custom_id": "color", "value": "blue"
+        }},
+        {"type": 18, "id": 3, "component": {
+            "type": 21, "id": 4, "custom_id": "optional", "value": null
+        }},
+        {"type": 18, "id": 5, "component": {
+            "type": 4, "id": 6, "custom_id": "text", "value": "test"
+        }},
+        {"type": 18, "id": 7, "component": {
+            "type": 23, "id": 8, "custom_id": "checkbox", "value": true
+        }}
+    ]));
+    let flags = EventTypeFlags::INTERACTION_CREATE;
+    assert!(matches!(
+        decode_text(payload.clone(), flags, false),
+        Some(Ok(IncomingEvent::Standard(Event::InteractionCreate(_))))
+    ));
+    let Some(Ok(IncomingEvent::ModalWithRadio(event, radios))) = decode_text(payload, flags, true)
+    else {
+        panic!("expected the typed Gateway interaction with radio values");
+    };
+    let event = event.0;
+    let called = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&called);
+    let mut handlers = InteractionHandlers::default();
+    handlers
+        .register_modal("survey", async move |ctx: &mut ModalContext<'_>| {
+            assert_eq!(ctx.radio_group("color"), Some(Some("blue")));
+            assert_eq!(ctx.radio_group("optional"), Some(None));
+            assert_eq!(ctx.radio_group("missing"), None);
+            assert_eq!(ctx.radio_group("text"), None);
+            assert_eq!(ctx.text_input("text"), Some("test"));
+            assert_eq!(ctx.text_input("color"), None);
+            assert_eq!(ctx.checkbox("checkbox"), Some(true));
+            observed.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap();
+    let hooks = crate::hooks::Hooks {
+        messages: Messages {
+            modal_accepted: None,
+            modal_failed: None,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (_, timing) = crate::timing::Pending::new((), None).begin();
+    assert!(handlers.accepts(&event));
+    handlers
+        .dispatch(
+            &twilight_http::Client::builder().build(),
+            &event,
+            timing,
+            &hooks,
+            &radios,
+        )
+        .await;
+    assert!(called.load(Ordering::Relaxed));
+}
+
+#[test]
+fn rejects_invalid_radio_metadata_and_preserves_standard_interaction_validation() {
+    use crate::{Error, SelectionError, message_events::decode_text};
+    use twilight_gateway::EventTypeFlags;
+
+    let flags = EventTypeFlags::INTERACTION_CREATE;
+    let malformed = radio_submit_event(serde_json::json!([{"type": 18, "id": 1, "component": {
+        "type": 21, "id": 2, "custom_id": "color"
+    }}]));
+    assert!(matches!(
+        decode_text(malformed, flags, true),
+        Some(Err(Error::Selection(SelectionError::Unreadable)))
+    ));
+    let repeated = radio_submit_event(serde_json::json!([
+        {"type": 18, "id": 1, "component": {"type": 21, "id": 2, "custom_id": "same", "value": "a"}},
+        {"type": 18, "id": 3, "component": {"type": 4, "id": 4, "custom_id": "same", "value": "b"}}
+    ]));
+    assert!(matches!(
+        decode_text(repeated, flags, true),
+        Some(Err(Error::Selection(SelectionError::Duplicate)))
+    ));
+    let invalid_other_field = radio_submit_event(serde_json::json!([
+        {"type": 18, "id": 1, "component": {"type": 21, "id": 2, "custom_id": "radio", "value": "a"}},
+        {"type": 18, "id": 3, "component": {"type": 4, "id": 4, "custom_id": "text"}}
+    ]));
+    assert!(matches!(
+        decode_text(invalid_other_field, flags, true),
+        Some(Err(Error::GatewayReceive(_)))
+    ));
 }
 
 #[test]

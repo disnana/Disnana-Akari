@@ -18,6 +18,8 @@ http-types = { package = "http", version = "1" }
 # コードでは使わないが、削らないこと。TLS の暗号プロバイダーに `ring` を選ぶための依存で、
 # 外すとプロバイダーが 1 つもなくなり、最初の TLS 接続で失敗する。
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "sync", "time"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
@@ -28,7 +30,9 @@ twilight-util = { version = "0.18", default-features = false, features = ["permi
 twilight-validate = "0.18"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "time", "test-util"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "time", "test-util"] }
+tokio-websockets = { version = "0.13", default-features = false, features = ["server", "sha1_smol"] }
 
 # 設計の規則を、機械が判定できる形にしたもの。理由は DESIGN.md を見る。
 # 例外が必要なときは、`#[allow(..., reason = "理由")]` で、理由を必ず書く。

@@ -47,9 +47,34 @@ pub enum Error {
          MESSAGE_CONTENT は特権 Intent なので、Developer Portal の Bot ページでも有効にします。"
     )]
     MissingIntents(Intents),
+    /// キャッシュを使うメッセージイベントには、保存件数の指定が必要です。
+    #[error(
+        "キャッシュ済みメッセージのイベントを使うには、Bot::cache_messages に正の保存件数を指定してください"
+    )]
+    MessageCacheRequired,
+    /// キャッシュを使うメンバーイベントには、保存件数の指定が必要です。
+    #[error(
+        "キャッシュ済みのメンバーイベントには Bot::cache_members に正の保存件数を指定してください"
+    )]
+    MemberCacheRequired,
+    /// ボイスチャンネルへの参加や退出を Gateway に要求できませんでした。
+    #[error(transparent)]
+    VoiceGateway(#[from] crate::VoiceGatewayError),
+    /// 登録した Gateway イベントに必要な Intent が設定されていません。
+    #[error(
+        "イベントハンドラーの起動には Intent {any_of:?} のうち少なくとも 1 つが必要です。\n\
+         `Bot::add_intents` で受信したいイベントの Intent を指定してください。"
+    )]
+    MissingEventIntents {
+        /// 受信する範囲に合わせて選べる Intent。
+        any_of: Intents,
+    },
     /// コマンドやハンドラーの登録内容が無効です。
     #[error(transparent)]
     Registration(#[from] RegistrationError),
+    /// 型付きハイブリッドコマンドの引数を読み取れませんでした。
+    #[error(transparent)]
+    HybridArgument(#[from] crate::HybridArgumentError),
     /// Discord が返したスラッシュコマンドの登録結果が要求と一致しません。
     #[error(transparent)]
     CommandSync(#[from] CommandSyncError),
@@ -65,6 +90,9 @@ pub enum Error {
     /// Akari に登録されていないスラッシュコマンドが実行されました。
     #[error("Akari に登録されていないスラッシュコマンドが実行されました")]
     CommandUnavailable,
+    /// ユーザー・メッセージコマンドの選択対象が Discord の応答に含まれていません。
+    #[error("選択されたユーザーまたはメッセージを取得できませんでした")]
+    CommandTargetUnavailable,
     /// メッセージやフォームの構成が無効です。
     #[error("{0}")]
     InvalidUi(&'static str),
@@ -83,12 +111,32 @@ pub enum Error {
     /// Gateway が終了し、Bot の処理が止まりました。
     #[error("Discord Gateway の接続が終了しました")]
     GatewayEnded,
+    /// Discord が返したシャード数またはセッション開始制限が無効です。
+    #[error("Discord Gateway の推奨シャード設定を利用できません")]
+    InvalidGatewayRecommendation,
+    /// 推奨されるすべてのシャードに Identify するための残数が不足しています。
+    #[error("Discord Gateway のセッション開始残数 {remaining} は必要数 {required} に足りません")]
+    InsufficientGatewaySessions {
+        /// 起動するシャードの数です。
+        required: u32,
+        /// Discord が返したセッション開始の残数です。
+        remaining: u32,
+    },
+    /// 同じ組のすべてのシャードが時間内に Ready を受信できませんでした。
+    #[error("Discord Gateway のシャード群で、接続の準備が時間内に完了しませんでした")]
+    GatewayWaveTimedOut,
     /// Gateway から接続終了の通知を受け取りました。
     #[error("{}", describe_gateway_close(*.0))]
     GatewayClose(u16),
     /// Gateway のイベントを受信できませんでした。
     #[error(transparent)]
     GatewayReceive(#[from] ReceiveMessageError),
+    /// Gateway から受信した部分的なメッセージ更新の読み取りに失敗しました。
+    #[error("Gateway のメッセージ更新を読み取れませんでした")]
+    MessageUpdateDecode(#[source] serde_json::Error),
+    /// Gateway から受信した絵文字リアクションの一括除去の読み取りに失敗しました。
+    #[error("Gateway の絵文字リアクション除去を読み取れませんでした")]
+    ReactionRemoveEmojiDecode(#[source] serde_json::Error),
     /// Discord REST API のリクエストが失敗しました。
     #[error(transparent)]
     Http(#[from] HttpError),
@@ -180,6 +228,10 @@ pub enum HandlerKind {
     TextCommand,
     /// スラッシュコマンドです。
     SlashCommand,
+    /// ユーザーのコンテキストメニューコマンドです。
+    UserCommand,
+    /// メッセージのコンテキストメニューコマンドです。
+    MessageCommand,
     /// ボタンです。
     Button,
     /// 文字列の選択メニューです。
@@ -204,6 +256,8 @@ impl HandlerKind {
         match self {
             Self::TextCommand => "テキストコマンド",
             Self::SlashCommand => "スラッシュコマンド",
+            Self::UserCommand => "ユーザーコマンド",
+            Self::MessageCommand => "メッセージコマンド",
             Self::Button => "ボタン",
             Self::Select => "セレクト",
             Self::UserSelect => "ユーザーセレクト",
@@ -232,6 +286,24 @@ pub enum RegistrationError {
     /// コマンド名が空、または空白を含みます。
     #[error("コマンド名には空白を含まない文字列を指定してください")]
     InvalidCommandName,
+    /// 型付きハイブリッドコマンドで、この引数の種類や制約を扱えません。
+    #[error("型付きハイブリッドコマンドの引数 `{name}` に未対応の種類や無効な制約があります")]
+    InvalidHybridOption {
+        /// 引数名です。
+        name: String,
+    },
+    /// ハイブリッドグループに実行できるサブコマンドがありません。
+    #[error("ハイブリッドグループ `{name}` にサブコマンドを追加してください")]
+    EmptyHybridGroup {
+        /// 空のグループまでの正式名です。
+        name: String,
+    },
+    /// アプリコマンドの表示設定に矛盾や無効な値があります。
+    #[error("アプリコマンドの設定 `{field}` が無効です")]
+    InvalidApplicationCommandSetting {
+        /// 問題がある設定の名前です。
+        field: &'static str,
+    },
     /// `custom_id` が 1 文字以上 100 文字以下ではありません。
     #[error("{kind} ID は 1 文字以上 100 文字以下で指定してください")]
     InvalidCustomId {
@@ -292,6 +364,9 @@ pub enum RegistrationError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum CheckFailure {
+    /// アプリが登録したチェックで、コマンドの実行を拒否しました。
+    #[error("コマンドのチェックに通りませんでした")]
+    Rejected,
     /// サーバーの中でしか使えないコマンドが、DM などで呼ばれました。
     #[error("このコマンドはサーバーの中でしか使えません")]
     GuildOnly,
@@ -366,6 +441,12 @@ pub enum ResponseStateError {
     /// `update_v2` には、Components V2 で作られた元メッセージが必要です。
     #[error("Components V2 で作られた元メッセージが必要です")]
     NeedsV2Message,
+    /// この応答に操作できる元メッセージがありません。
+    #[error("操作できる元の応答メッセージがありません")]
+    OriginalResponseUnavailable,
+    /// 指定した編集方法と、元の応答のコンポーネント形式が一致しません。
+    #[error("元の応答の形式に合う編集方法を使ってください")]
+    OriginalResponseFormatMismatch,
 }
 
 /// Discord が送った選択内容を、読み取れなかった理由です。
@@ -400,6 +481,8 @@ pub enum QueueKind {
     Event,
     /// テキストコマンドの処理枠です。
     TextCommand,
+    /// 動的なプレフィックスを判定する前の待ち行列です。
+    PrefixDiscovery,
     /// スラッシュコマンド、ボタン、選択メニュー、フォームの処理枠です。
     Interaction,
     /// 混雑の通知を返すための待ち行列です。
@@ -411,6 +494,9 @@ impl QueueKind {
         match self {
             Self::Event => "イベントの待ち行列がいっぱいで、処理できませんでした",
             Self::TextCommand => "処理枠がいっぱいで、コマンドを実行できませんでした",
+            Self::PrefixDiscovery => {
+                "プレフィックス判定の待ち行列がいっぱいで、処理できませんでした"
+            }
             Self::Interaction => "処理枠がいっぱいで、操作を実行できませんでした",
             Self::BusyNotice => "混雑の通知の待ち行列がいっぱいで、通知できませんでした",
         }
@@ -428,6 +514,10 @@ where
     let boxed: Box<dyn std::error::Error + Send + Sync> = error.into();
     let boxed = match boxed.downcast::<Error>() {
         Ok(error) => return *error,
+        Err(boxed) => boxed,
+    };
+    let boxed = match boxed.downcast::<CheckFailure>() {
+        Ok(error) => return Error::Check(*error),
         Err(boxed) => boxed,
     };
     let boxed = match boxed.downcast::<HttpError>() {
@@ -495,7 +585,7 @@ fn describe_gateway_close(code: u16) -> String {
 mod tests {
     use std::{error::Error as _, io};
 
-    use super::{Error, handler_error};
+    use super::{CheckFailure, Error, handler_error};
 
     #[test]
     fn boxed_handler_error_keeps_the_original_error() {
@@ -577,6 +667,10 @@ mod tests {
         assert!(matches!(error, Error::EmptyToken));
         let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(Error::MissingAuthor);
         assert!(matches!(handler_error(boxed), Error::MissingAuthor));
+        assert!(matches!(
+            handler_error(CheckFailure::Rejected),
+            Error::Check(CheckFailure::Rejected)
+        ));
 
         // 標準のエラーや、メッセージだけのエラーは、Handler で包む。
         let error = handler_error(io::Error::new(io::ErrorKind::NotFound, "missing"));
