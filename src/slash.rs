@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, btree_map::Entry},
+    collections::{BTreeMap, HashMap, btree_map::Entry, hash_map::Entry as HashEntry},
     future::Future,
     pin::Pin,
     time::Instant,
@@ -8,7 +8,10 @@ use std::{
 use twilight_http::Client;
 use twilight_model::{
     application::{
-        command::{Command, CommandOption, CommandOptionType, CommandType},
+        command::{
+            Command, CommandOption, CommandOptionChoice, CommandOptionChoiceValue,
+            CommandOptionType, CommandType,
+        },
         interaction::{
             Interaction, InteractionData, InteractionType,
             application_command::{CommandData, CommandDataOption, CommandOptionValue},
@@ -27,6 +30,7 @@ use twilight_validate::command;
 use crate::{
     CheckFailure, CommandSyncError, Error, ErrorSource, HandlerKind, InfoEvent, RegistrationError,
     ResponseStateError, Result, Timing,
+    autocomplete::{AutocompleteContext, AutocompleteHandler, choice},
     error::adapt_handler,
     hooks::{Hooks, InfoReporter},
     permissions::check_permissions,
@@ -130,6 +134,7 @@ impl SlashCommands {
                         adapt_handler!(handler, ctx: &mut SlashContext<'_>),
                     )),
                     children: BTreeMap::new(),
+                    autocompletes: HashMap::new(),
                 });
                 Ok(())
             }
@@ -139,6 +144,100 @@ impl SlashCommands {
             }
             .into()),
         }
+    }
+
+    /// 引数に、入力中の候補を返す関数（オートコンプリート）を付けます。
+    ///
+    /// `path` は、コマンド名とサブコマンド名の経路です（`&["echo"]`、`&["config", "set"]`）。
+    /// 先にコマンドを [`register`](Self::register) または [`CommandGroup::subcommand`] で登録してください。
+    /// 文字列、整数、数値の引数で、選択肢（`choices`）を持たないものだけに付けられます。
+    /// 引数の定義には、Akari が自動で `autocomplete` を有効にします。
+    ///
+    /// # エラー
+    ///
+    /// コマンドや引数が見つからない場合、付けられない種類の引数の場合、すでに付けている場合に失敗します。
+    pub fn autocomplete<E>(
+        &mut self,
+        path: &[&str],
+        option: &str,
+        handler: impl AsyncFn(&mut AutocompleteContext<'_>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let unknown = || RegistrationError::UnknownCommand {
+            name: path.join(" "),
+        };
+        let (root, rest) = path.split_first().ok_or_else(unknown)?;
+        let definition = self.entries.get_mut(*root).ok_or_else(unknown)?;
+        let options = match (rest, &mut definition.children) {
+            ([], children) if children.is_empty() => &mut definition.options,
+            ([sub], children) => match children.get_mut(*sub) {
+                Some(Child::Sub(sub)) => &mut sub.options,
+                _ => return Err(unknown().into()),
+            },
+            ([group, sub], children) => match children.get_mut(*group) {
+                Some(Child::Group { subs, .. }) => match subs.get_mut(*sub) {
+                    Some(sub) => &mut sub.options,
+                    None => return Err(unknown().into()),
+                },
+                _ => return Err(unknown().into()),
+            },
+            _ => return Err(unknown().into()),
+        };
+        let target = options
+            .iter_mut()
+            .find(|candidate| candidate.name == option)
+            .ok_or_else(|| RegistrationError::UnknownOption {
+                command: path.join(" "),
+                option: option.to_owned(),
+            })?;
+        if !matches!(
+            target.kind,
+            CommandOptionType::String | CommandOptionType::Integer | CommandOptionType::Number
+        ) || target.choices.is_some()
+        {
+            return Err(RegistrationError::AutocompleteUnsupported {
+                option: option.to_owned(),
+            }
+            .into());
+        }
+        let key = (
+            rest.iter().map(|part| (*part).to_owned()).collect(),
+            option.to_owned(),
+        );
+        match definition.autocompletes.entry(key) {
+            HashEntry::Vacant(entry) => {
+                target.autocomplete = Some(true);
+                entry.insert(Box::new(
+                    adapt_handler!(handler, ctx: &mut AutocompleteContext<'_>),
+                ));
+                Ok(())
+            }
+            HashEntry::Occupied(_) => Err(RegistrationError::Duplicate {
+                kind: HandlerKind::Autocomplete,
+                name: format!("{} {option}", path.join(" ")),
+            }
+            .into()),
+        }
+    }
+
+    /// オートコンプリートで返す、文字列の候補を作ります。
+    pub fn string_choice(name: &str, value: &str) -> CommandOptionChoice {
+        choice(name, CommandOptionChoiceValue::String(value.into()))
+    }
+
+    /// オートコンプリートで返す、整数の候補を作ります。
+    pub fn integer_choice(name: &str, value: i64) -> CommandOptionChoice {
+        choice(name, CommandOptionChoiceValue::Integer(value))
+    }
+
+    /// オートコンプリートで返す、数値の候補を作ります。
+    pub fn number_choice(name: &str, value: f64) -> CommandOptionChoice {
+        choice(name, CommandOptionChoiceValue::Number(value))
     }
 
     /// サブコマンドをまとめるコマンドを作ります。`/config set` の `config` にあたります。
@@ -161,6 +260,7 @@ impl SlashCommands {
                     default_permissions: None,
                     handler: None,
                     children: BTreeMap::new(),
+                    autocompletes: HashMap::new(),
                 });
                 Ok(CommandGroup {
                     root: definition,
@@ -520,7 +620,7 @@ fn duplicate_sub(name: &str) -> Error {
 }
 
 /// コマンド名に、呼ばれたサブコマンドとグループの名前を続けた経路。
-fn command_path(data: &CommandData) -> Vec<&str> {
+pub(crate) fn command_path(data: &CommandData) -> Vec<&str> {
     let mut path = vec![data.name.as_str()];
     let mut options = data.options.as_slice();
     while let [option] = options {
@@ -536,7 +636,7 @@ fn command_path(data: &CommandData) -> Vec<&str> {
 }
 
 /// サブコマンドの入れ子をたどった先の、実際の引数。
-fn leaf_options(mut options: &[CommandDataOption]) -> &[CommandDataOption] {
+pub(crate) fn leaf_options(mut options: &[CommandDataOption]) -> &[CommandDataOption] {
     while let [option] = options {
         match &option.value {
             CommandOptionValue::SubCommand(inner) | CommandOptionValue::SubCommandGroup(inner) => {
@@ -556,6 +656,8 @@ struct Definition {
     handler: Option<Box<dyn SlashHandler>>,
     /// サブコマンドと、そのグループ。持つ場合、`options` と `handler` は使わない。
     children: BTreeMap<String, Child>,
+    /// オートコンプリートの関数。キーは、サブコマンドの経路（コマンド名を除く）と引数名。
+    autocompletes: HashMap<(Vec<String>, String), Box<dyn AutocompleteHandler>>,
 }
 
 enum Child {
@@ -630,6 +732,7 @@ impl Definition {
         Route {
             root: self.handler,
             subs,
+            autocompletes: self.autocompletes,
         }
     }
 }
@@ -638,6 +741,7 @@ impl Definition {
 struct Route {
     root: Option<Box<dyn SlashHandler>>,
     subs: HashMap<Vec<String>, Box<dyn SlashHandler>>,
+    autocompletes: HashMap<(Vec<String>, String), Box<dyn AutocompleteHandler>>,
 }
 
 impl Route {
@@ -647,6 +751,14 @@ impl Route {
         }
         let key: Vec<String> = path.iter().map(|part| (*part).to_owned()).collect();
         self.subs.get(&key).map(AsRef::as_ref)
+    }
+
+    fn find_autocomplete(&self, path: &[&str], option: &str) -> Option<&dyn AutocompleteHandler> {
+        let key = (
+            path.iter().map(|part| (*part).to_owned()).collect(),
+            option.to_owned(),
+        );
+        self.autocompletes.get(&key).map(AsRef::as_ref)
     }
 }
 
@@ -661,7 +773,10 @@ impl ActiveSlashCommands {
     }
 
     fn command_data<'a>(&self, interaction: &'a Interaction) -> Option<&'a CommandData> {
-        if interaction.kind != InteractionType::ApplicationCommand {
+        if !matches!(
+            interaction.kind,
+            InteractionType::ApplicationCommand | InteractionType::ApplicationCommandAutocomplete
+        ) {
             return None;
         }
         let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
@@ -680,6 +795,44 @@ impl ActiveSlashCommands {
             Scope::Global => data.guild_id.is_none() && self.handlers.contains_key(&data.id),
         };
         (data.kind == CommandType::ChatInput && in_scope).then_some(data)
+    }
+
+    async fn dispatch_autocomplete(
+        &self,
+        initial: InitialResponder<'_>,
+        data: &CommandData,
+        path: &[&str],
+        hooks: &Hooks,
+    ) {
+        let mut ctx = AutocompleteContext {
+            initial,
+            data,
+            responded: false,
+        };
+        let name = path.join(" ");
+        let Some(handler) = self
+            .handlers
+            .get(&data.id)
+            .and_then(|route| route.find_autocomplete(&path[1..], ctx.focused_name()))
+        else {
+            // 関数のない引数には、候補なしを返して、入力欄を読み込み中のままにしない。
+            if let Err(error) = ctx.respond_empty_if_needed().await {
+                hooks
+                    .reporter
+                    .report(ErrorSource::Response, Some(&name), &error);
+            }
+            return;
+        };
+        if let Err(error) = handler.call(&mut ctx).await {
+            hooks
+                .reporter
+                .report(ErrorSource::SlashCommand, Some(&name), &error);
+        }
+        if let Err(error) = ctx.respond_empty_if_needed().await {
+            hooks
+                .reporter
+                .report(ErrorSource::Response, Some(&name), &error);
+        }
     }
 
     pub(crate) async fn dispatch(
@@ -701,6 +854,11 @@ impl ActiveSlashCommands {
             timing,
             info: &hooks.info,
         };
+        if interaction.kind == InteractionType::ApplicationCommandAutocomplete {
+            self.dispatch_autocomplete(initial, data, &path, hooks)
+                .await;
+            return;
+        }
         let Some(handler) = self
             .handlers
             .get(&data.id)
@@ -1300,10 +1458,11 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        ActiveSlashCommands, AllowedMentions, CommandData, CommandDataOption, CommandOptionType,
-        CommandOptionValue, CommandType, GuildMarker, Id, InitialResponse, Interaction,
-        InteractionResponseType, MessageFlags, Permissions, ReplyAction, ResponseState, Result,
-        Route, Scope, SlashCommands, SlashContext, command_path, initial_response, leaf_options,
+        ActiveSlashCommands, AllowedMentions, AutocompleteContext, CommandData, CommandDataOption,
+        CommandOptionType, CommandOptionValue, CommandType, Error, GuildMarker, Id,
+        InitialResponder, InitialResponse, Interaction, InteractionData, InteractionResponseType,
+        MessageFlags, Permissions, ReplyAction, ResponseState, ResponseStateError, Result, Route,
+        Scope, SlashCommands, SlashContext, command_path, initial_response, leaf_options,
         v2_update_response,
     };
     use crate::ui::{Button, ComponentsV2, Embed, UiMessage};
@@ -1394,6 +1553,7 @@ mod tests {
                     Ok(())
                 })),
                 subs: HashMap::new(),
+                autocompletes: HashMap::new(),
             },
         );
         ActiveSlashCommands { scope, handlers }
@@ -1546,6 +1706,101 @@ mod tests {
         assert!(ping.find(&[]).is_some());
         assert!(ping.find(&["set"]).is_none());
         Ok(())
+    }
+
+    async fn complete(_: &mut AutocompleteContext<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    #[test]
+    fn autocomplete_marks_the_option_and_rejects_unsupported_targets() -> Result<()> {
+        let mut slash = SlashCommands::for_guild(Id::new(1));
+        let mut fixed = SlashCommands::string_option("kind", "種類", true);
+        fixed.choices = Some(vec![SlashCommands::string_choice("a", "a")]);
+        slash.register(
+            "echo",
+            "説明",
+            vec![
+                SlashCommands::string_option("text", "本文", true),
+                fixed,
+                SlashCommands::boolean_option("loud", "大きく", false),
+            ],
+            handler,
+        )?;
+
+        slash.autocomplete(&["echo"], "text", complete)?;
+        assert_eq!(slash.entries["echo"].options[0].autocomplete, Some(true));
+        // 二重、存在しない引数やコマンド、真偽値、選択肢つきは拒否する。
+        assert!(slash.autocomplete(&["echo"], "text", complete).is_err());
+        assert!(slash.autocomplete(&["echo"], "missing", complete).is_err());
+        assert!(slash.autocomplete(&["nope"], "text", complete).is_err());
+        assert!(slash.autocomplete(&["echo"], "loud", complete).is_err());
+        assert!(slash.autocomplete(&["echo"], "kind", complete).is_err());
+        assert!(slash.autocomplete(&[], "text", complete).is_err());
+        assert_eq!(slash.entries["echo"].options[2].autocomplete, None);
+        Ok(())
+    }
+
+    #[test]
+    fn autocomplete_reaches_options_of_subcommands_and_routes_by_path() -> Result<()> {
+        let mut slash = SlashCommands::for_guild(Id::new(1));
+        {
+            let mut config = slash.group("config", "設定")?;
+            config.subcommand(
+                "set",
+                "設定",
+                vec![SlashCommands::string_option("key", "名前", true)],
+                handler,
+            )?;
+        }
+        // サブコマンドを持つコマンドの直下には付けられない。
+        assert!(slash.autocomplete(&["config"], "key", complete).is_err());
+        slash.autocomplete(&["config", "set"], "key", complete)?;
+        let route = slash.entries.remove("config").unwrap().into_route();
+        assert!(route.find_autocomplete(&["set"], "key").is_some());
+        assert!(route.find_autocomplete(&["set"], "other").is_none());
+        assert!(route.find_autocomplete(&[], "key").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn autocomplete_response_checks_count_and_single_use_before_sending() {
+        use twilight_model::application::interaction::InteractionType;
+        let mut interaction = command_interaction(Some(Id::new(1)), None, 5);
+        interaction.kind = InteractionType::ApplicationCommandAutocomplete;
+        let client = twilight_http::Client::new("dummy-token".to_owned());
+        let info = crate::hooks::InfoReporter::default();
+        let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
+            unreachable!();
+        };
+        let mut ctx = AutocompleteContext {
+            initial: InitialResponder {
+                http: &client,
+                interaction: &interaction,
+                timing: crate::timing::Pending::new((), None).begin().1,
+                info: &info,
+            },
+            data,
+            responded: false,
+        };
+        let many = (0..26)
+            .map(|index| SlashCommands::integer_choice("n", index))
+            .collect();
+        assert!(matches!(
+            ctx.respond(many).await,
+            Err(Error::TooManyChoices { count: 26, max: 25 })
+        ));
+        let long = SlashCommands::string_choice(&"あ".repeat(101), "v");
+        assert!(matches!(
+            ctx.respond(vec![long]).await,
+            Err(Error::CommandValidation(_))
+        ));
+        ctx.responded = true;
+        assert!(matches!(
+            ctx.respond(vec![]).await,
+            Err(Error::ResponseState(ResponseStateError::AlreadyResponded))
+        ));
+        assert_eq!(ctx.focused(), "");
     }
 
     #[test]

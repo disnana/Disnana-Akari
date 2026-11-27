@@ -10,6 +10,14 @@ use twilight_validate::{
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// オートコンプリートの候補が多すぎます。
+    #[error("オートコンプリートの候補は {max} 件までです（{count} 件ありました）")]
+    TooManyChoices {
+        /// 渡された候補の数です。
+        count: usize,
+        /// 返せる最大の数です。
+        max: usize,
+    },
     /// 実行前の確認（権限など）に通りませんでした。
     #[error(transparent)]
     Check(#[from] CheckFailure),
@@ -179,6 +187,8 @@ pub enum HandlerKind {
     MentionableSelect,
     /// 入力フォームです。
     Modal,
+    /// 引数のオートコンプリートです。
+    Autocomplete,
 }
 
 impl HandlerKind {
@@ -194,6 +204,7 @@ impl HandlerKind {
             Self::ChannelSelect => "チャンネルセレクト",
             Self::MentionableSelect => "メンショナブルセレクト",
             Self::Modal => "モーダル",
+            Self::Autocomplete => "オートコンプリート",
         }
     }
 }
@@ -225,6 +236,22 @@ pub enum RegistrationError {
     NestedGroup {
         /// 作ろうとしたグループの名前です。
         name: String,
+    },
+    /// オートコンプリートを付けようとした引数が、コマンドにありません。
+    #[error("コマンド `{command}` に引数 `{option}` はありません")]
+    UnknownOption {
+        /// コマンドの名前（サブコマンドを含む）です。
+        command: String,
+        /// 指定された引数の名前です。
+        option: String,
+    },
+    /// オートコンプリートを付けられない引数です。文字列、整数、数値の引数で、選択肢がないものだけが対象です。
+    #[error(
+        "引数 `{option}` にはオートコンプリートを付けられません（文字列、整数、数値で、選択肢のないものだけです）"
+    )]
+    AutocompleteUnsupported {
+        /// 指定された引数の名前です。
+        option: String,
     },
     /// 登録されていないコマンドの設定を変えようとしました。
     #[error("コマンド `{name}` は登録されていません")]
