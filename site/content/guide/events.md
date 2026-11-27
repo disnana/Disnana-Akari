@@ -58,7 +58,7 @@ use disnana_akari::{Bot, Context, Result};
 async fn main() -> Result<()> {
     Bot::from_env()?
         .add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
-        .run(async |ctx: Context<'_>| {
+        .run(async |ctx: Context<'_>| -> Result<()> {
             if ctx.message().content == "こんにちは" {
                 ctx.reply("こんにちは！").await?;
             }

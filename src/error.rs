@@ -92,7 +92,48 @@ impl Error {
     pub fn handler(error: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::Handler(Box::new(error))
     }
+
+    /// メッセージだけのアプリ固有のエラーを作ります。`return Err(Error::msg("使い方: !echo 文章"))` の形で使えます。
+    pub fn msg(message: impl std::fmt::Display) -> Self {
+        Self::Handler(message.to_string().into())
+    }
 }
+
+/// ハンドラーが返したエラーを、Akari の `Error` にする。
+///
+/// すでに Akari の `Error` なら、包み直さずにそのまま返す。Twilight の REST のエラーは、
+/// 対応するバリアントにする。それ以外は `Error::Handler` で包む。
+pub(crate) fn handler_error<E>(error: E) -> Error
+where
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let boxed: Box<dyn std::error::Error + Send + Sync> = error.into();
+    let boxed = match boxed.downcast::<Error>() {
+        Ok(error) => return *error,
+        Err(boxed) => boxed,
+    };
+    let boxed = match boxed.downcast::<HttpError>() {
+        Ok(error) => return Error::Http(*error),
+        Err(boxed) => boxed,
+    };
+    match boxed.downcast::<DeserializeBodyError>() {
+        Ok(error) => Error::HttpBody(*error),
+        Err(boxed) => Error::Handler(boxed),
+    }
+}
+
+/// 利用者のハンドラーを、Akari の `Error` を返す関数に包む。
+///
+/// 登録する関数は、`Result<(), E>`（`E` は `Into<Box<dyn Error + Send + Sync>>`）を返せる。
+/// 内部では、すべて `Result<(), Error>` に揃える。
+macro_rules! adapt_handler {
+    ($handler:ident, $arg:ident: $ty:ty) => {
+        async move |$arg: $ty| -> $crate::Result<()> {
+            $handler($arg).await.map_err($crate::error::handler_error)
+        }
+    };
+}
+pub(crate) use adapt_handler;
 
 /// Gateway が接続を閉じたときの理由を、利用者に分かる形にします。
 fn describe_gateway_close(code: u16) -> String {
@@ -116,7 +157,7 @@ fn describe_gateway_close(code: u16) -> String {
 mod tests {
     use std::{error::Error as _, io};
 
-    use super::Error;
+    use super::{Error, handler_error};
 
     #[test]
     fn boxed_handler_error_preserves_its_source() {
@@ -134,5 +175,32 @@ mod tests {
             Some(io::ErrorKind::PermissionDenied)
         );
         assert_eq!(error.to_string(), "test source");
+    }
+
+    #[test]
+    fn handler_errors_keep_akari_errors_and_wrap_everything_else() {
+        // Akari のエラーは、包み直さない（バリアントを保つ）。
+        let error = handler_error(Error::EmptyToken);
+        assert!(matches!(error, Error::EmptyToken));
+        let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(Error::MissingAuthor);
+        assert!(matches!(handler_error(boxed), Error::MissingAuthor));
+
+        // 標準のエラーや、メッセージだけのエラーは、Handler で包む。
+        let error = handler_error(io::Error::new(io::ErrorKind::NotFound, "missing"));
+        assert!(matches!(&error, Error::Handler(_)));
+        assert_eq!(error.to_string(), "missing");
+        let error = handler_error("plain text");
+        assert!(matches!(&error, Error::Handler(_)));
+        assert_eq!(error.to_string(), "plain text");
+        let error = handler_error("1x".parse::<i64>().unwrap_err());
+        assert!(matches!(&error, Error::Handler(_)));
+    }
+
+    #[test]
+    fn msg_builds_a_handler_error_from_any_display() {
+        let error = Error::msg("使い方: !echo 文章");
+        assert!(matches!(&error, Error::Handler(_)));
+        assert_eq!(error.to_string(), "使い方: !echo 文章");
+        assert_eq!(Error::msg(42).to_string(), "42");
     }
 }

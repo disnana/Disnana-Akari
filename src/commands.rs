@@ -2,6 +2,7 @@ use std::{collections::HashMap, future::Future, pin::Pin};
 
 use crate::{
     Context, Error, ErrorSource, Result, Timing,
+    error::adapt_handler,
     hooks::Hooks,
     ui::{ComponentsV2, UiMessage},
 };
@@ -45,12 +46,19 @@ impl Commands {
     /// # エラー
     ///
     /// 名前が空、空白を含む、または既に登録済みの場合に失敗します。
-    pub fn register(
+    pub fn register<E>(
         &mut self,
         name: &str,
-        handler: impl for<'a> AsyncFn(CommandContext<'a>) -> Result<()> + Send + Sync + 'static,
-    ) -> Result<()> {
+        handler: impl for<'a> AsyncFn(CommandContext<'a>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
         self.ensure_available(name)?;
+        let handler = adapt_handler!(handler, ctx: CommandContext<'_>);
         self.handlers.insert(name.into(), Box::new(handler));
         Ok(())
     }
