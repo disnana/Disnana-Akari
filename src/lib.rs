@@ -621,6 +621,25 @@ impl<'a> Context<'a> {
         Ok(())
     }
 
+    /// 通知する相手を指定して、受信したメッセージに返信します。
+    ///
+    /// [`reply`](Self::reply) は何も通知しませんが、こちらは `mentions` で許可した相手
+    /// （返信元の著者、ユーザー、ロールなど）にだけ通知します。
+    ///
+    /// # エラー
+    ///
+    /// 本文が Discord の制約に合わない場合や、権限不足などで送信が失敗した場合にエラーを返します。
+    pub async fn reply_with(&self, content: &str, mentions: &AllowedMentions) -> Result<()> {
+        self.http
+            .create_message(self.message.channel_id)
+            .content(content)
+            .reply(self.message.id)
+            .allowed_mentions(Some(mentions))
+            .await?;
+
+        Ok(())
+    }
+
     /// 元のメッセージに Embed やボタンを付けて返信します。
     ///
     /// # エラー
