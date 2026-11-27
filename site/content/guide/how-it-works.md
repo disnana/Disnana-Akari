@@ -49,7 +49,21 @@ async fn heavy(ctx: CommandContext<'_>) -> Result<()> {
 
 スラッシュコマンドやボタンは、Discord が **受信から 3 秒** 以内の最初の応答を求めます。キューで待っている時間も含まれるので、混雑時や遅いハンドラーがあるときは、`defer` を最初に呼ぶのが安全です。[応答のしかた](responding.md)
 
-キュー待ちの時間は、`ctx.timing().queue_wait()` で測れます。
+キュー待ちの時間は、`ctx.timing().queue_wait()` で測れます。初回応答までの所要時間は `Bot::on_info` で取得できます。
+
+```rust
+use disnana_akari::{Bot, InfoEvent, Result};
+
+fn build() -> Result<Bot> {
+    Ok(Bot::from_env()?.on_info(|event| {
+        if let InfoEvent::InteractionResponded { elapsed, rest_elapsed, .. } = event {
+            eprintln!("初回応答 {elapsed:?}（REST {rest_elapsed:?}）");
+        }
+    }))
+}
+```
+
+`elapsed` は Akari の受信から Discord の受け付けを確認するまでの時間です。`rest_elapsed` はそのうち初回応答の REST リクエストにかかった時間です。遅延応答も初回応答として通知されます。`on_info` を設定すると、Gateway の準備・セッション再開とスラッシュコマンド同期の完了も受け取れます。フックは同期的に呼ばれるため、短い処理に留めてください。
 
 ## 終了のしかた
 

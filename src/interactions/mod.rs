@@ -28,8 +28,8 @@ use crate::{
     Error, ErrorSource, Messages, Result, Timing,
     hooks::Hooks,
     slash::{
-        ResponseState, edit_ui_response, edit_v2_response, send_followup_message,
-        send_initial_message, v2_update_response,
+        InitialResponder, ResponseState, edit_ui_response, edit_v2_response, send_followup_message,
+        v2_update_response,
     },
     ui::{ComponentsV2, Modal, UiMessage},
 };
@@ -170,12 +170,18 @@ impl InteractionHandlers {
         timing: Timing,
         hooks: &Hooks,
     ) {
+        let initial = InitialResponder {
+            http,
+            interaction,
+            timing,
+            info: &hooks.info,
+        };
         match ui_input(interaction) {
             Some(UiInput::Button(id)) => {
                 let Some(handler) = self.buttons.get(id) else {
                     return;
                 };
-                let mut ctx = ButtonContext::new(http, interaction, id, timing);
+                let mut ctx = ButtonContext::new(initial, id);
                 let result = handler.call(&mut ctx).await;
                 finish_component(
                     &mut ctx,
@@ -191,7 +197,7 @@ impl InteractionHandlers {
                     return;
                 };
                 let mut ctx = SelectContext {
-                    inner: ButtonContext::new(http, interaction, &data.custom_id, timing),
+                    inner: ButtonContext::new(initial, &data.custom_id),
                     values: &data.values,
                 };
                 let result = handler.call(&mut ctx).await;
@@ -205,27 +211,19 @@ impl InteractionHandlers {
                 .await;
             }
             Some(UiInput::UserSelect(data)) => {
-                dispatch_entity(&self.user_selects, http, interaction, data, timing, hooks).await;
+                dispatch_entity(&self.user_selects, initial, data, hooks).await;
             }
             Some(UiInput::RoleSelect(data)) => {
-                dispatch_entity(&self.role_selects, http, interaction, data, timing, hooks).await;
+                dispatch_entity(&self.role_selects, initial, data, hooks).await;
             }
             Some(UiInput::ChannelSelect(data)) => {
-                dispatch_entity(
-                    &self.channel_selects,
-                    http,
-                    interaction,
-                    data,
-                    timing,
-                    hooks,
-                )
-                .await;
+                dispatch_entity(&self.channel_selects, initial, data, hooks).await;
             }
             Some(UiInput::MentionableSelect(data)) => {
                 let Some(handler) = self.mentionable_selects.get(&data.custom_id) else {
                     return;
                 };
-                let mut inner = ButtonContext::new(http, interaction, &data.custom_id, timing);
+                let mut inner = ButtonContext::new(initial, &data.custom_id);
                 let resolved = data.resolved.as_ref();
                 let Ok(values) = parse_mentionables(&data.values, resolved) else {
                     reject_selection(&mut inner, hooks).await;
@@ -251,10 +249,8 @@ impl InteractionHandlers {
                     return;
                 };
                 let mut ctx = ModalContext {
-                    http,
-                    interaction,
+                    initial,
                     data,
-                    timing,
                     response: ResponseState::Pending,
                 };
                 let result = handler.call(&mut ctx).await;
@@ -264,10 +260,7 @@ impl InteractionHandlers {
                 }
                 if let Some((content, ephemeral)) =
                     modal_fallback(ctx.response, result.is_ok(), &hooks.messages)
-                    && let Err(error) = ctx
-                        .response
-                        .reply(http, interaction, content, ephemeral)
-                        .await
+                    && let Err(error) = ctx.response.reply(initial, content, ephemeral).await
                 {
                     hooks.reporter.report(ErrorSource::Response, name, &error);
                 }
@@ -279,16 +272,14 @@ impl InteractionHandlers {
 
 async fn dispatch_entity<M>(
     handlers: &HashMap<String, Box<dyn EntitySelectHandler<M>>>,
-    http: &Client,
-    interaction: &Interaction,
+    initial: InitialResponder<'_>,
     data: &MessageComponentInteractionData,
-    timing: Timing,
     hooks: &Hooks,
 ) {
     let Some(handler) = handlers.get(&data.custom_id) else {
         return;
     };
-    let mut inner = ButtonContext::new(http, interaction, &data.custom_id, timing);
+    let mut inner = ButtonContext::new(initial, &data.custom_id);
     let Ok(values) = parse_entity_ids(&data.values) else {
         reject_selection(&mut inner, hooks).await;
         return;
@@ -484,18 +475,16 @@ fn ui_input(interaction: &Interaction) -> Option<UiInput<'_>> {
 
 /// ボタンが一回押されたときにハンドラーへ渡す情報です。
 pub struct ButtonContext<'a> {
-    http: &'a Client,
-    interaction: &'a Interaction,
+    initial: InitialResponder<'a>,
     custom_id: &'a str,
-    timing: Timing,
     response: ButtonResponse,
 }
 
 impl std::fmt::Debug for ButtonContext<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ButtonContext")
-            .field("interaction_id", &self.interaction.id)
-            .field("timing", &self.timing)
+            .field("interaction_id", &self.initial.interaction.id)
+            .field("timing", &self.initial.timing)
             .field("custom_id", &self.custom_id)
             .field("response", &self.response)
             .finish_non_exhaustive()
@@ -503,24 +492,17 @@ impl std::fmt::Debug for ButtonContext<'_> {
 }
 
 impl<'a> ButtonContext<'a> {
-    fn new(
-        http: &'a Client,
-        interaction: &'a Interaction,
-        custom_id: &'a str,
-        timing: Timing,
-    ) -> Self {
+    fn new(initial: InitialResponder<'a>, custom_id: &'a str) -> Self {
         Self {
-            http,
-            interaction,
+            initial,
             custom_id,
-            timing,
             response: ButtonResponse::Pending,
         }
     }
 
     /// Akari が使用している Twilight の REST クライアントを借ります。
     pub fn http(&self) -> &'a Client {
-        self.http
+        self.initial.http
     }
 
     /// ボタン作成時に設定した ID を返します。
@@ -530,7 +512,7 @@ impl<'a> ButtonContext<'a> {
 
     /// ボタンを押したユーザーの ID を返します。
     pub fn author_id(&self) -> Option<Id<UserMarker>> {
-        self.interaction.author_id()
+        self.initial.interaction.author_id()
     }
 
     /// 元メッセージを作るきっかけになったユーザーの ID を返します。
@@ -550,22 +532,22 @@ impl<'a> ButtonContext<'a> {
         let Some(message) = self.message() else {
             return Ok(None);
         };
-        owner::resolve_owner(self.http, message).await
+        owner::resolve_owner(self.initial.http, message).await
     }
 
     /// ボタンが押されたサーバーの ID を返します。DM では `None` です。
     pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
-        self.interaction.guild_id
+        self.initial.interaction.guild_id
     }
 
     /// ボタンが付いた Discord メッセージを借ります。
     pub fn message(&self) -> Option<&'a Message> {
-        self.interaction.message.as_ref()
+        self.initial.interaction.message.as_ref()
     }
 
     /// Gateway の往復時間と、ボタン操作を処理するまでの時間を返します。
     pub fn timing(&self) -> Timing {
-        self.timing
+        self.initial.timing
     }
 
     /// ボタンを押した本人にだけ表示する初回応答を送ります。
@@ -575,7 +557,7 @@ impl<'a> ButtonContext<'a> {
     /// 応答済み、または Discord が受け付けなかった場合に失敗します。
     pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
         self.response.require_pending()?;
-        send_initial_message(self.http, self.interaction, content, true).await?;
+        self.initial.message(content, true).await?;
         self.response = ButtonResponse::Sent;
         Ok(())
     }
@@ -600,10 +582,7 @@ impl<'a> ButtonContext<'a> {
             kind: InteractionResponseType::DeferredUpdateMessage,
             data: None,
         };
-        self.http
-            .interaction(self.interaction.application_id)
-            .create_response(self.interaction.id, &self.interaction.token, &response)
-            .await?;
+        self.initial.send(&response).await?;
         self.response = ButtonResponse::DeferredUpdate;
         Ok(())
     }
@@ -623,16 +602,11 @@ impl<'a> ButtonContext<'a> {
         message.validate()?;
         match action {
             UpdateAction::Initial => {
-                self.http
-                    .interaction(self.interaction.application_id)
-                    .create_response(
-                        self.interaction.id,
-                        &self.interaction.token,
-                        &update_response(message),
-                    )
-                    .await?;
+                self.initial.send(&update_response(message)).await?;
             }
-            UpdateAction::Edit => edit_ui_response(self.http, self.interaction, message).await?,
+            UpdateAction::Edit => {
+                edit_ui_response(self.initial.http, self.initial.interaction, message).await?
+            }
         }
         self.response = ButtonResponse::Sent;
         Ok(())
@@ -653,16 +627,11 @@ impl<'a> ButtonContext<'a> {
         message.validate()?;
         match action {
             UpdateAction::Initial => {
-                self.http
-                    .interaction(self.interaction.application_id)
-                    .create_response(
-                        self.interaction.id,
-                        &self.interaction.token,
-                        &v2_update_response(message),
-                    )
-                    .await?;
+                self.initial.send(&v2_update_response(message)).await?;
             }
-            UpdateAction::Edit => edit_v2_response(self.http, self.interaction, message).await?,
+            UpdateAction::Edit => {
+                edit_v2_response(self.initial.http, self.initial.interaction, message).await?
+            }
         }
         self.response = ButtonResponse::Sent;
         Ok(())
@@ -675,10 +644,7 @@ impl<'a> ButtonContext<'a> {
     pub async fn show_modal(&mut self, modal: &Modal) -> Result<()> {
         self.response.require_pending()?;
         let response = modal.response()?;
-        self.http
-            .interaction(self.interaction.application_id)
-            .create_response(self.interaction.id, &self.interaction.token, &response)
-            .await?;
+        self.initial.send(&response).await?;
         self.response = ButtonResponse::Sent;
         Ok(())
     }
@@ -711,7 +677,13 @@ impl<'a> ButtonContext<'a> {
                 "追加メッセージを送る前にボタン操作に応答してください",
             ));
         }
-        send_followup_message(self.http, self.interaction, content, ephemeral).await
+        send_followup_message(
+            self.initial.http,
+            self.initial.interaction,
+            content,
+            ephemeral,
+        )
+        .await
     }
 }
 
@@ -961,18 +933,16 @@ impl<'a> MentionableSelectContext<'a> {
 
 /// モーダルを一回送信したときにハンドラーへ渡す情報です。
 pub struct ModalContext<'a> {
-    http: &'a Client,
-    interaction: &'a Interaction,
+    initial: InitialResponder<'a>,
     data: &'a ModalInteractionData,
-    timing: Timing,
     response: ResponseState,
 }
 
 impl std::fmt::Debug for ModalContext<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ModalContext")
-            .field("interaction_id", &self.interaction.id)
-            .field("timing", &self.timing)
+            .field("interaction_id", &self.initial.interaction.id)
+            .field("timing", &self.initial.timing)
             .field("custom_id", &self.data.custom_id)
             .field("response", &self.response)
             .finish_non_exhaustive()
@@ -995,22 +965,22 @@ impl<'a> ModalContext<'a> {
 
     /// モーダルを送信したユーザーの ID を返します。
     pub fn author_id(&self) -> Option<Id<UserMarker>> {
-        self.interaction.author_id()
+        self.initial.interaction.author_id()
     }
 
     /// モーダルが送信されたサーバーの ID を返します。DM では `None` です。
     pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
-        self.interaction.guild_id
+        self.initial.interaction.guild_id
     }
 
     /// Gateway の往復時間と、モーダル送信を処理するまでの時間を返します。
     pub fn timing(&self) -> Timing {
-        self.timing
+        self.initial.timing
     }
 
     /// Akari が使用している Twilight の REST クライアントを借ります。
     pub fn http(&self) -> &'a Client {
-        self.http
+        self.initial.http
     }
 
     /// チャンネルに初回応答を送るか、遅延応答を元の公開範囲のまま完成させます。
@@ -1018,9 +988,7 @@ impl<'a> ModalContext<'a> {
     /// # エラー
     /// 応答済み、または Discord が受け付けなかった場合に失敗します。
     pub async fn reply(&mut self, content: &str) -> Result<()> {
-        self.response
-            .reply(self.http, self.interaction, content, false)
-            .await
+        self.response.reply(self.initial, content, false).await
     }
 
     /// モーダルを送信した本人にだけ応答するか、非公開の遅延応答を完成させます。
@@ -1028,9 +996,7 @@ impl<'a> ModalContext<'a> {
     /// # エラー
     /// 応答済み、公開の遅延応答済み、または Discord が受け付けなかった場合に失敗します。
     pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
-        self.response
-            .reply(self.http, self.interaction, content, true)
-            .await
+        self.response.reply(self.initial, content, true).await
     }
 
     /// チャンネルに処理中の表示を出します。作業が終わったら [`Self::reply`] で完成させます。
@@ -1038,9 +1004,7 @@ impl<'a> ModalContext<'a> {
     /// # エラー
     /// 初回応答済み、または Discord が受け付けなかった場合に失敗します。
     pub async fn defer(&mut self) -> Result<()> {
-        self.response
-            .defer(self.http, self.interaction, false)
-            .await
+        self.response.defer(self.initial, false).await
     }
 
     /// 送信した本人にだけ処理中の表示を出します。
@@ -1048,7 +1012,7 @@ impl<'a> ModalContext<'a> {
     /// # エラー
     /// 初回応答済み、または Discord が受け付けなかった場合に失敗します。
     pub async fn defer_ephemeral(&mut self) -> Result<()> {
-        self.response.defer(self.http, self.interaction, true).await
+        self.response.defer(self.initial, true).await
     }
 
     /// 初回メッセージを完成させた後、チャンネルに追加メッセージを送ります。
@@ -1057,7 +1021,7 @@ impl<'a> ModalContext<'a> {
     /// 初回メッセージが未完成、または Discord が受け付けなかった場合に失敗します。
     pub async fn followup(&self, content: &str) -> Result<()> {
         self.response
-            .followup(self.http, self.interaction, content, false)
+            .followup(self.initial.http, self.initial.interaction, content, false)
             .await
     }
 
@@ -1067,7 +1031,7 @@ impl<'a> ModalContext<'a> {
     /// 初回メッセージが未完成、または Discord が受け付けなかった場合に失敗します。
     pub async fn followup_ephemeral(&self, content: &str) -> Result<()> {
         self.response
-            .followup(self.http, self.interaction, content, true)
+            .followup(self.initial.http, self.initial.interaction, content, true)
             .await
     }
 }

@@ -11,6 +11,7 @@
 | `bot.with_intents(intents) -> Bot` | 要求する Gateway Intent を、渡された `Intents` の集合にします。既定は空です。 |
 | `bot.add_intents(intents) -> Bot` | 要求する Intent に、渡された `Intents` を追加します。 |
 | `bot.intents() -> Intents` | 起動時に Discord へ要求する Intent を返します。 |
+| `bot.on_info(hook) -> Bot` | 実行時の情報を受け取る関数を設定します。[実行時の情報](#実行時の情報) |
 | `bot.on_error(hook) -> Bot` | エラーを一件ずつ受け取る関数を設定します。[エラーと自動で送る文言](#エラーと自動で送る文言) |
 | `bot.with_messages(messages) -> Bot` | Akari が利用者へ自動で送る文言を設定します。 |
 | `bot.start().await -> Result<()>` | 設定したイベントとスラッシュコマンドで Bot を起動します。 |
@@ -299,6 +300,31 @@ async fn submit(ctx: &mut ModalContext<'_>) -> Result<()> {
     // ここでフォーム送信後の処理を待ちます。
     ctx.reply("入力を受け付けました。").await?;
     ctx.followup_ephemeral("受け取り番号は 1234 です。").await
+}
+```
+
+## 実行時の情報
+
+`Bot::on_info` を設定すると、`InfoEvent` を同期的に受け取れます。既定では情報の通知はありません。関数の中では短い処理を行い、必要ならログや計測システムに渡してください。
+
+| バリアント | 通知されるとき |
+| --- | --- |
+| `GatewayReady` | Gateway で新しいセッションが準備できたとき |
+| `GatewayResumed` | 既存の Gateway セッションを再開したとき |
+| `SlashCommandsSynced` | Discord への同期が成功したとき。サーバー ID と今回同期したコマンド数を渡します |
+| `InteractionResponded` | Akari 経由の初回応答を Discord が受け付けたとき。遅延応答、フォーム表示、混雑時の初回返信も含みます |
+
+`InteractionResponded` の `elapsed` は、Akari が Gateway イベントを受信してから REST 応答を受け取るまでの時間です。`rest_elapsed` はそのうち初回応答の REST リクエストにかかった時間で、レート制限による待ち時間を含みます。後続の更新や追加メッセージ、`ctx.http()` から直接送った応答は計測の対象外です。
+
+```rust
+use disnana_akari::{Bot, InfoEvent, Result};
+
+fn build() -> Result<Bot> {
+    Ok(Bot::from_env()?.on_info(|event| {
+        if let InfoEvent::InteractionResponded { elapsed, rest_elapsed, .. } = event {
+            eprintln!("初回応答 {elapsed:?}（REST {rest_elapsed:?}）");
+        }
+    }))
 }
 ```
 

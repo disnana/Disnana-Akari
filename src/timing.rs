@@ -20,6 +20,10 @@ impl Timing {
         self.queue_wait
     }
 
+    pub(crate) fn elapsed_since_receive(&self, completed_at: Instant) -> Duration {
+        self.queue_wait + completed_at.saturating_duration_since(self.started_at)
+    }
+
     /// 処理開始から呼び出し時点までに経過した時間です。
     pub fn handler_elapsed(&self) -> Duration {
         self.started_at.elapsed()
@@ -33,10 +37,6 @@ pub(crate) struct Pending<T> {
 }
 
 impl<T> Pending<T> {
-    pub(crate) fn into_event(self) -> T {
-        self.event
-    }
-
     pub(crate) fn new(event: T, gateway_rtt: Option<Duration>) -> Self {
         Self {
             event,

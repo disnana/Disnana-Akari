@@ -1,6 +1,12 @@
-//! エラーの通知先と、Akari が自動で送る文言の設定です。
+//! 実行時の通知先と、Akari が自動で送る文言の設定です。
 
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
+
+use twilight_model::{
+    application::interaction::InteractionType,
+    http::interaction::InteractionResponseType,
+    id::{Id, marker::GuildMarker},
+};
 
 use crate::Error;
 
@@ -164,10 +170,62 @@ impl Reporter {
     }
 }
 
-/// 実行中の各処理に渡す、エラーの報告先と文言です。
+/// [`Bot::on_info`](crate::Bot::on_info) が通知する実行時の情報です。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum InfoEvent {
+    /// Gateway で新しいセッションが準備できました。
+    GatewayReady,
+    /// Gateway で既存のセッションを再開しました。
+    GatewayResumed,
+    /// サーバー向けスラッシュコマンドの同期が完了しました。
+    #[non_exhaustive]
+    SlashCommandsSynced {
+        /// 同期先のサーバーです。
+        guild_id: Id<GuildMarker>,
+        /// 今回の同期で確認したコマンド数です。
+        count: usize,
+    },
+    /// Discord が Interaction の初回応答を受け付けました。
+    #[non_exhaustive]
+    InteractionResponded {
+        /// スラッシュコマンド、コンポーネント、フォームなどの種類です。
+        interaction_type: InteractionType,
+        /// 初回メッセージ、遅延応答、更新、フォーム表示などの種類です。
+        response_type: InteractionResponseType,
+        /// Akari が Gateway イベントを受け取ってから、REST 応答を受け取るまでの時間です。
+        elapsed: Duration,
+        /// 初回応答の REST リクエストにかかった時間です。レート制限の待ち時間を含みます。
+        rest_elapsed: Duration,
+    },
+}
+
+type InfoHook = dyn Fn(&InfoEvent) + Send + Sync;
+
+#[derive(Clone, Default)]
+pub(crate) struct InfoReporter(Option<Arc<InfoHook>>);
+
+impl InfoReporter {
+    pub(crate) fn new(hook: impl Fn(&InfoEvent) + Send + Sync + 'static) -> Self {
+        Self(Some(Arc::new(hook)))
+    }
+
+    pub(crate) fn has_hook(&self) -> bool {
+        self.0.is_some()
+    }
+
+    pub(crate) fn report(&self, event: InfoEvent) {
+        if let Some(hook) = &self.0 {
+            hook(&event);
+        }
+    }
+}
+
+/// 実行中の各処理に渡す通知先と文言です。
 #[derive(Clone, Default)]
 pub(crate) struct Hooks {
     pub(crate) reporter: Reporter,
+    pub(crate) info: InfoReporter,
     pub(crate) messages: Messages,
 }
 

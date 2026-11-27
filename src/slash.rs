@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap, btree_map::Entry},
     future::Future,
     pin::Pin,
+    time::Instant,
 };
 
 use twilight_http::Client;
@@ -23,8 +24,8 @@ use twilight_model::{
 use twilight_validate::command;
 
 use crate::{
-    Error, ErrorSource, Result, Timing,
-    hooks::Hooks,
+    Error, ErrorSource, InfoEvent, Result, Timing,
+    hooks::{Hooks, InfoReporter},
     ui::{ComponentsV2, Modal, UiMessage},
 };
 
@@ -115,40 +116,50 @@ impl SlashCommands {
         }
     }
 
-    pub(crate) async fn sync(self, http: &Client) -> Result<ActiveSlashCommands> {
+    pub(crate) async fn sync(
+        self,
+        http: &Client,
+        info: &InfoReporter,
+    ) -> Result<ActiveSlashCommands> {
         if self.entries.is_empty() && !self.replace {
             return self.bind(Vec::new());
         }
 
         let application = http.current_user_application().await?.model().await?;
         let client = http.interaction(application.id);
-        if self.replace {
+        let registered = if self.replace {
             let commands = self.replacement_commands()?;
-            let registered = client
+            client
                 .set_guild_commands(self.guild_id, &commands)
                 .await?
                 .models()
-                .await?;
-            return self.bind(registered);
-        }
+                .await?
+        } else {
+            let mut registered = Vec::with_capacity(self.entries.len());
+            for (name, definition) in &self.entries {
+                let command = client
+                    .create_guild_command(self.guild_id)
+                    .chat_input(name, &definition.description)
+                    .command_options(&definition.options)
+                    .await
+                    .map_err(|source| Error::CommandRegistration {
+                        name: name.clone(),
+                        source,
+                    })?
+                    .model()
+                    .await?;
+                registered.push(command);
+            }
+            registered
+        };
 
-        let mut registered = Vec::with_capacity(self.entries.len());
-        for (name, definition) in &self.entries {
-            let command = client
-                .create_guild_command(self.guild_id)
-                .chat_input(name, &definition.description)
-                .command_options(&definition.options)
-                .await
-                .map_err(|source| Error::CommandRegistration {
-                    name: name.clone(),
-                    source,
-                })?
-                .model()
-                .await?;
-            registered.push(command);
-        }
-
-        self.bind(registered)
+        let count = registered.len();
+        let active = self.bind(registered)?;
+        info.report(InfoEvent::SlashCommandsSynced {
+            guild_id: active.guild_id,
+            count,
+        });
+        Ok(active)
     }
 
     #[allow(deprecated)] // Twilight の Command モデルに含まれる dm_permission は送信しない。
@@ -261,12 +272,18 @@ impl ActiveSlashCommands {
             return;
         };
         let name = Some(data.name.as_str());
+        let initial = InitialResponder {
+            http,
+            interaction,
+            timing,
+            info: &hooks.info,
+        };
         let Some(handler) = self.handlers.get(&data.id) else {
             hooks
                 .reporter
                 .report(ErrorSource::SlashCommand, name, &Error::CommandUnavailable);
             if let Some(text) = &hooks.messages.slash_command_unavailable
-                && let Err(error) = send_initial_message(http, interaction, text, true).await
+                && let Err(error) = initial.message(text, true).await
             {
                 hooks.reporter.report(ErrorSource::Response, name, &error);
             }
@@ -275,11 +292,9 @@ impl ActiveSlashCommands {
 
         let mut response_state = ResponseState::Pending;
         let mut ctx = SlashContext {
-            http,
-            interaction,
+            initial,
             data,
             response_state: &mut response_state,
-            timing,
         };
         if let Err(error) = handler.call(&mut ctx).await {
             hooks
@@ -303,18 +318,16 @@ impl ActiveSlashCommands {
 
 /// 一回のスラッシュコマンド呼び出しを扱います。
 pub struct SlashContext<'a> {
-    http: &'a Client,
-    interaction: &'a Interaction,
+    initial: InitialResponder<'a>,
     data: &'a CommandData,
     response_state: &'a mut ResponseState,
-    timing: Timing,
 }
 
 impl std::fmt::Debug for SlashContext<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SlashContext")
-            .field("interaction_id", &self.interaction.id)
-            .field("timing", &self.timing)
+            .field("interaction_id", &self.initial.interaction.id)
+            .field("timing", &self.initial.timing)
             .field("command", &self.data.name)
             .field("response_state", &self.response_state)
             .finish_non_exhaustive()
@@ -324,37 +337,36 @@ impl std::fmt::Debug for SlashContext<'_> {
 impl<'a> SlashContext<'a> {
     /// コマンドを呼び出したユーザーの ID を返します。
     pub fn author_id(&self) -> Option<Id<UserMarker>> {
-        self.interaction.author_id()
+        self.initial.interaction.author_id()
     }
 
     /// コマンドが呼ばれたチャンネルの ID を返します。
     /// 古い形式のペイロードでは、チャンネルオブジェクトに代わって送られる ID を使います。
     #[allow(deprecated)]
     pub fn channel_id(&self) -> Option<Id<ChannelMarker>> {
-        self.interaction
+        self.initial
+            .interaction
             .channel
             .as_ref()
             .map(|channel| channel.id)
-            .or(self.interaction.channel_id)
+            .or(self.initial.interaction.channel_id)
     }
 
     /// Discord の REST API を直接使うために、Bot の Twilight クライアントを借ります。
     pub fn http(&self) -> &'a Client {
-        self.http
+        self.initial.http
     }
 
     /// Gateway の往復時間と、このコマンドの処理時間を確認します。
     pub fn timing(&self) -> Timing {
-        self.timing
+        self.initial.timing
     }
 
     pub(crate) fn reborrow(&mut self) -> SlashContext<'_> {
         SlashContext {
-            http: self.http,
-            interaction: self.interaction,
+            initial: self.initial,
             data: self.data,
             response_state: self.response_state,
-            timing: self.timing,
         }
     }
 
@@ -443,10 +455,7 @@ impl<'a> SlashContext<'a> {
             ));
         }
         let response = modal.response()?;
-        self.http
-            .interaction(self.interaction.application_id)
-            .create_response(self.interaction.id, &self.interaction.token, &response)
-            .await?;
+        self.initial.send(&response).await?;
         *self.response_state = ResponseState::ModalOpened;
         Ok(())
     }
@@ -488,14 +497,12 @@ impl<'a> SlashContext<'a> {
     }
 
     async fn defer_with_visibility(&mut self, ephemeral: bool) -> Result<()> {
-        self.response_state
-            .defer(self.http, self.interaction, ephemeral)
-            .await
+        self.response_state.defer(self.initial, ephemeral).await
     }
 
     async fn respond(&mut self, content: &str, ephemeral: bool) -> Result<()> {
         self.response_state
-            .reply(self.http, self.interaction, content, ephemeral)
+            .reply(self.initial, content, ephemeral)
             .await
     }
 
@@ -504,13 +511,10 @@ impl<'a> SlashContext<'a> {
         match self.response_state.reply_action(ephemeral)? {
             ReplyAction::Initial => {
                 let response = initial_response(InitialResponse::Ui(message), ephemeral);
-                self.http
-                    .interaction(self.interaction.application_id)
-                    .create_response(self.interaction.id, &self.interaction.token, &response)
-                    .await?;
+                self.initial.send(&response).await?;
             }
             ReplyAction::EditDeferred => {
-                edit_ui_response(self.http, self.interaction, message).await?;
+                edit_ui_response(self.initial.http, self.initial.interaction, message).await?;
             }
         }
         *self.response_state = ResponseState::Replied;
@@ -519,7 +523,12 @@ impl<'a> SlashContext<'a> {
 
     async fn send_followup(&self, content: &str, ephemeral: bool) -> Result<()> {
         self.response_state
-            .followup(self.http, self.interaction, content, ephemeral)
+            .followup(
+                self.initial.http,
+                self.initial.interaction,
+                content,
+                ephemeral,
+            )
             .await
     }
 
@@ -528,13 +537,10 @@ impl<'a> SlashContext<'a> {
         match self.response_state.reply_action(ephemeral)? {
             ReplyAction::Initial => {
                 let response = initial_response(InitialResponse::V2(message), ephemeral);
-                self.http
-                    .interaction(self.interaction.application_id)
-                    .create_response(self.interaction.id, &self.interaction.token, &response)
-                    .await?;
+                self.initial.send(&response).await?;
             }
             ReplyAction::EditDeferred => {
-                edit_v2_response(self.http, self.interaction, message).await?
+                edit_v2_response(self.initial.http, self.initial.interaction, message).await?
             }
         }
         *self.response_state = ResponseState::Replied;
@@ -566,8 +572,7 @@ impl ResponseState {
 
     pub(crate) async fn defer(
         &mut self,
-        http: &Client,
-        interaction: &Interaction,
+        initial: InitialResponder<'_>,
         ephemeral: bool,
     ) -> Result<()> {
         if *self != Self::Pending {
@@ -575,23 +580,24 @@ impl ResponseState {
                 "この操作にはすでに初回応答を送りました",
             ));
         }
-        send_deferred_message(http, interaction, ephemeral).await?;
+        initial
+            .send(&initial_response(InitialResponse::Deferred, ephemeral))
+            .await?;
         *self = Self::Deferred { ephemeral };
         Ok(())
     }
 
     pub(crate) async fn reply(
         &mut self,
-        http: &Client,
-        interaction: &Interaction,
+        initial: InitialResponder<'_>,
         content: &str,
         ephemeral: bool,
     ) -> Result<()> {
         match self.reply_action(ephemeral)? {
-            ReplyAction::Initial => {
-                send_initial_message(http, interaction, content, ephemeral).await?
+            ReplyAction::Initial => initial.message(content, ephemeral).await?,
+            ReplyAction::EditDeferred => {
+                edit_text_response(initial.http, initial.interaction, content).await?
             }
-            ReplyAction::EditDeferred => edit_text_response(http, interaction, content).await?,
         }
         *self = Self::Replied;
         Ok(())
@@ -690,29 +696,37 @@ pub(crate) async fn edit_v2_response(
     Ok(())
 }
 
-pub(crate) async fn send_initial_message(
-    http: &Client,
-    interaction: &Interaction,
-    content: &str,
-    ephemeral: bool,
-) -> Result<()> {
-    let response = initial_response(InitialResponse::Message(content), ephemeral);
-    http.interaction(interaction.application_id)
-        .create_response(interaction.id, &interaction.token, &response)
-        .await?;
-    Ok(())
+#[derive(Clone, Copy)]
+pub(crate) struct InitialResponder<'a> {
+    pub(crate) http: &'a Client,
+    pub(crate) interaction: &'a Interaction,
+    pub(crate) timing: Timing,
+    pub(crate) info: &'a InfoReporter,
 }
 
-async fn send_deferred_message(
-    http: &Client,
-    interaction: &Interaction,
-    ephemeral: bool,
-) -> Result<()> {
-    let response = initial_response(InitialResponse::Deferred, ephemeral);
-    http.interaction(interaction.application_id)
-        .create_response(interaction.id, &interaction.token, &response)
-        .await?;
-    Ok(())
+impl InitialResponder<'_> {
+    pub(crate) async fn message(self, content: &str, ephemeral: bool) -> Result<()> {
+        let response = initial_response(InitialResponse::Message(content), ephemeral);
+        self.send(&response).await
+    }
+
+    pub(crate) async fn send(self, response: &InteractionResponse) -> Result<()> {
+        let started_at = self.info.has_hook().then(Instant::now);
+        self.http
+            .interaction(self.interaction.application_id)
+            .create_response(self.interaction.id, &self.interaction.token, response)
+            .await?;
+        if let Some(started_at) = started_at {
+            let completed_at = Instant::now();
+            self.info.report(InfoEvent::InteractionResponded {
+                interaction_type: self.interaction.kind,
+                response_type: response.kind,
+                elapsed: self.timing.elapsed_since_receive(completed_at),
+                rest_elapsed: completed_at.saturating_duration_since(started_at),
+            });
+        }
+        Ok(())
+    }
 }
 
 async fn edit_text_response(http: &Client, interaction: &Interaction, content: &str) -> Result<()> {

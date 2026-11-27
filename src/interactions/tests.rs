@@ -76,11 +76,109 @@ async fn button_context_debug_omits_credentials() {
     );
     event.token = interaction_token.to_owned();
     let (_, timing) = crate::timing::Pending::new((), None).begin();
-    let ctx = ButtonContext::new(&client, &event, "akari:test", timing);
+    let info = crate::hooks::InfoReporter::default();
+    let initial = super::InitialResponder {
+        http: &client,
+        interaction: &event,
+        timing,
+        info: &info,
+    };
+    let ctx = ButtonContext::new(initial, "akari:test");
     let debug = format!("{ctx:?}");
     assert!(debug.contains("akari:test"));
     assert!(!debug.contains(bot_token));
     assert!(!debug.contains(interaction_token));
+}
+
+#[tokio::test]
+async fn initial_response_reports_only_after_discord_accepts_it() -> Result<()> {
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+        net::TcpListener,
+        time::timeout,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(crate::Error::handler)?;
+    let client = twilight_http::Client::builder()
+        .proxy(
+            listener
+                .local_addr()
+                .map_err(crate::Error::handler)?
+                .to_string(),
+            true,
+        )
+        .build();
+    let mut event = interaction(
+        InteractionType::MessageComponent,
+        component_payload(ComponentType::Button, "akari:test"),
+    );
+    event.token = "dummy-interaction-credential".to_owned();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let info = crate::hooks::InfoReporter::new(move |event| sink.lock().unwrap().push(*event));
+    let (_, timing) = crate::timing::Pending::new((), None).begin();
+    let initial = super::InitialResponder {
+        http: &client,
+        interaction: &event,
+        timing,
+        info: &info,
+    };
+    let mut ctx = ButtonContext::new(initial, "akari:test");
+
+    let request = async {
+        assert!(ctx.defer_update().await.is_err());
+        assert!(seen.lock().unwrap().is_empty());
+        ctx.defer_update().await
+    };
+    let server = async {
+        for response in [
+            "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
+        ] {
+            let (stream, _) = listener.accept().await?;
+            let mut stream = BufReader::new(stream);
+            let mut header = String::new();
+            let mut content_length = 0;
+            loop {
+                header.clear();
+                if stream.read_line(&mut header).await? == 0 || header == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = header.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    content_length = value.trim().parse().unwrap();
+                }
+            }
+            stream.read_exact(&mut vec![0; content_length]).await?;
+            stream.get_mut().write_all(response.as_bytes()).await?;
+        }
+        Ok::<_, std::io::Error>(())
+    };
+    let (request, server) = timeout(Duration::from_secs(5), async {
+        tokio::join!(request, server)
+    })
+    .await
+    .map_err(crate::Error::handler)?;
+    server.map_err(crate::Error::handler)?;
+    request?;
+    assert_eq!(ctx.response, ButtonResponse::DeferredUpdate);
+    assert!(matches!(
+        seen.lock().unwrap().as_slice(),
+        [crate::InfoEvent::InteractionResponded {
+            interaction_type: InteractionType::MessageComponent,
+            response_type: InteractionResponseType::DeferredUpdateMessage,
+            elapsed,
+            rest_elapsed,
+        }] if elapsed >= rest_elapsed
+    ));
+    Ok(())
 }
 
 fn component_payload(component_type: ComponentType, id: &str) -> InteractionData {
