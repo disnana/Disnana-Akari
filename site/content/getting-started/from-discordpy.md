@@ -22,6 +22,7 @@ discord.py を使ったことがある人向けに、よく使う操作の対応
 | `on_ready` | `async def on_ready()` | [`events.on_ready(関数)`](../guide/events.md) |
 | `on_message` | `async def on_message(m)` | `events.on_message(関数)` |
 | クールダウン | `@commands.cooldown(1, 5)` | [`Cooldown`](../guide/cooldowns.md) |
+| ステータスの変更 | `await bot.change_presence(...)` | [`PresenceHandle::set`](../guide/presence.md)（待たずに戻り、最新の値を送ります） |
 | Cog（機能のまとまり） | `class MyCog(commands.Cog)` | [`Module`](../guide/modules.md)（登録のしかたをまとめるだけの trait） |
 | 権限チェック | `@commands.has_permissions(...)` | [`ctx.require_permissions(..)?`](../guide/permissions.md)（呼んだときだけ確認） |
 | サブコマンド | `app_commands.Group` | [`slash.group(..)`](../guide/slash-commands.md) |

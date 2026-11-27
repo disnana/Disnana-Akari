@@ -259,6 +259,15 @@ pub enum RegistrationError {
         /// 指定された名前です。
         name: String,
     },
+    /// 権限付きコマンドをグローバル登録しようとしました。
+    #[error("権限付きコマンドには SlashCommands::for_guild を使ってください")]
+    RestrictedCommandRequiresGuild,
+    /// 表示条件と実行時の権限が一緒に設定されています。
+    #[error("権限付きコマンド `{name}` の表示条件は登録時に指定してください")]
+    CommandPermissionsAlreadyRequired {
+        /// 登録済みのコマンドの名前です。
+        name: String,
+    },
     /// 同じ名前、または同じ `custom_id` が、すでに登録されています。
     #[error("{kind} `{name}` は登録済みです")]
     Duplicate {

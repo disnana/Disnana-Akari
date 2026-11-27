@@ -13,6 +13,7 @@ mod module;
 #[cfg(test)]
 mod permission_cache_tests;
 mod permissions;
+mod presence;
 mod slash;
 mod timing;
 pub mod ui;
@@ -21,7 +22,10 @@ mod work_queue;
 use std::{env, fmt, sync::Arc, time::Duration};
 
 use tokio::sync::mpsc;
-use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
+use twilight_gateway::{
+    ConfigBuilder, Event, EventTypeFlags, Intents, Shard, ShardId, ShardState, StreamExt as _,
+    error::ReceiveMessageError,
+};
 use twilight_http::Client;
 use twilight_model::{
     application::interaction::{Interaction, InteractionType},
@@ -52,6 +56,7 @@ pub use interactions::{
 };
 pub use limits::Limits;
 pub use module::{Module, Registry};
+pub use presence::{Presence, PresenceHandle};
 pub use slash::{CommandGroup, SlashCommands, SlashContext};
 pub use timing::Timing;
 pub use twilight_http as http;
@@ -79,6 +84,7 @@ pub struct Bot {
     include_bots: bool,
     limits: Limits,
     permission_cache: Option<Duration>,
+    presence: Option<PresenceHandle>,
 }
 
 impl fmt::Debug for Bot {
@@ -122,6 +128,7 @@ impl Bot {
             include_bots: false,
             limits: Limits::default(),
             permission_cache: None,
+            presence: None,
         })
     }
 
@@ -138,6 +145,12 @@ impl Bot {
     /// Gateway イベントを受け取るハンドラー一覧を設定します。
     pub fn with_events(mut self, events: Events) -> Self {
         self.events = events;
+        self
+    }
+
+    /// Gateway 接続時と実行中のステータスを、共有ハンドルから設定します。
+    pub fn with_presence(mut self, presence: PresenceHandle) -> Self {
+        self.presence = Some(presence);
         self
     }
 
@@ -288,6 +301,10 @@ impl Bot {
         .await
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "接続の組み立てと、受信と処理の並行実行を、1 か所に集めている。#23 と #24 のマージ後に分割する。"
+    )]
     async fn connect(
         self,
         on_message: Option<impl for<'a> AsyncFn(Context<'a>) -> Result<()>>,
@@ -305,6 +322,7 @@ impl Bot {
             include_bots,
             limits,
             permission_cache,
+            presence,
         } = self;
         let hooks = Hooks {
             reporter,
@@ -325,7 +343,7 @@ impl Bot {
         let event_types = gateway_event_types(
             needs_messages,
             slash.is_some() || events.interaction_handlers.has_handlers(),
-            hooks.info.has_hook(),
+            hooks.info.has_hook() || presence.is_some(),
             permission_cache_events(needs_messages && permissions.cache_enabled(), intents),
         );
 
@@ -334,7 +352,12 @@ impl Bot {
             None => None,
         };
 
-        let mut shard = Shard::new(ShardId::ONE, token, intents);
+        let mut presence_updates = presence.as_ref().map(PresenceHandle::subscribe);
+        let mut config = ConfigBuilder::new(token, intents);
+        if let Some(updates) = &mut presence_updates {
+            config = config.presence(updates.initial());
+        }
+        let mut shard = Shard::with_config(ShardId::ONE, config.build());
         let (event_tx, mut event_queue) = mpsc::channel(limits.queue_capacity);
         let (text_tx, text_queue) = mpsc::channel::<Pending<Arc<Message>>>(limits.queue_capacity);
         let (text_busy_tx, text_busy_queue) = mpsc::channel(limits.queue_capacity);
@@ -453,7 +476,9 @@ impl Bot {
 
         let receive = async {
             let mut own_id = None;
-            while let Some(event) = shard.next_event(event_types).await {
+            while let Some(event) =
+                next_gateway_event(&mut shard, &mut presence_updates, event_types).await
+            {
                 let gateway_rtt = shard.latency().recent().first().copied();
                 if permissions.cache_enabled()
                     && let Ok(event) = &event
@@ -462,6 +487,11 @@ impl Bot {
                 }
                 match event {
                     Ok(Event::Ready(ready)) => {
+                        if own_id.is_some()
+                            && let Some(updates) = &mut presence_updates
+                        {
+                            updates.replay();
+                        }
                         own_id = Some(ready.user.id);
                         hooks.info.report(InfoEvent::GatewayReady);
                         if event_tx
@@ -475,7 +505,12 @@ impl Bot {
                             );
                         }
                     }
-                    Ok(Event::Resumed) => hooks.info.report(InfoEvent::GatewayResumed),
+                    Ok(Event::Resumed) => {
+                        if let Some(updates) = &mut presence_updates {
+                            updates.replay();
+                        }
+                        hooks.info.report(InfoEvent::GatewayResumed);
+                    }
                     Ok(Event::MessageCreate(message))
                         if accepts_message(
                             include_bots,
@@ -549,6 +584,25 @@ impl Bot {
         }
 
         Err(Error::GatewayEnded)
+    }
+}
+
+async fn next_gateway_event(
+    shard: &mut Shard,
+    presence: &mut Option<presence::PresenceUpdates>,
+    event_types: EventTypeFlags,
+) -> Option<Result<Event, ReceiveMessageError>> {
+    loop {
+        let Some(updates) = presence.as_mut() else {
+            return shard.next_event(event_types).await;
+        };
+        if shard.state() != ShardState::Active {
+            return shard.next_event(event_types).await;
+        }
+        tokio::select! {
+            event = shard.next_event(event_types) => return event,
+            update = updates.next() => shard.command(&update),
+        }
     }
 }
 
