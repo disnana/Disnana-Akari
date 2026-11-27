@@ -120,6 +120,9 @@ pub struct Messages {
     pub slash_command_failed: Option<String>,
     /// Akari に登録していないスラッシュコマンドが実行されたときに、本人にだけ送る文言です。
     pub slash_command_unavailable: Option<String>,
+    /// 実行前の確認（権限など）に通らなかったときに、本人にだけ送る文言です。
+    /// 現在は、スラッシュコマンドの `require_*` が返す [`CheckFailure`](crate::CheckFailure) に使います。
+    pub check_failed: Option<String>,
     /// ボタンの関数がエラーを返したときに、本人にだけ送る文言です。
     pub button_failed: Option<String>,
     /// 選択メニューの関数がエラーを返したときや、選択内容を読み取れなかったときに、本人にだけ送る文言です。
@@ -139,6 +142,7 @@ impl Default for Messages {
             interaction_busy: text("現在混雑しています。少し待ってからもう一度お試しください。"),
             slash_command_failed: text("コマンドを処理できませんでした。"),
             slash_command_unavailable: text("このコマンドは現在利用できません。"),
+            check_failed: text("このコマンドを使う権限がありません。"),
             button_failed: text("ボタンを処理できませんでした。"),
             select_failed: text("選択内容を処理できませんでした。"),
             modal_failed: text("入力内容を処理できませんでした。"),

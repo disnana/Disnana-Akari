@@ -15,6 +15,7 @@ use twilight_model::{
         },
     },
     channel::message::{AllowedMentions, MessageFlags},
+    guild::Permissions,
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
         Id,
@@ -24,7 +25,7 @@ use twilight_model::{
 use twilight_validate::command;
 
 use crate::{
-    CommandSyncError, Error, ErrorSource, HandlerKind, InfoEvent, RegistrationError,
+    CheckFailure, CommandSyncError, Error, ErrorSource, HandlerKind, InfoEvent, RegistrationError,
     ResponseStateError, Result, Timing,
     error::adapt_handler,
     hooks::{Hooks, InfoReporter},
@@ -123,12 +124,40 @@ impl SlashCommands {
                 entry.insert(Definition {
                     description: description.into(),
                     options,
+                    default_permissions: None,
                     handler: Box::new(adapt_handler!(handler, ctx: &mut SlashContext<'_>)),
                 });
                 Ok(())
             }
             Entry::Occupied(_) => Err(RegistrationError::Duplicate {
                 kind: HandlerKind::SlashCommand,
+                name: name.to_owned(),
+            }
+            .into()),
+        }
+    }
+
+    /// 登録済みのコマンドを、既定で使える人の権限を絞って Discord に登録します。
+    ///
+    /// 指定した権限を持たない人には、コマンドが Discord の画面に出ません。ただし、サーバーの管理者は
+    /// この既定を変えられるため、安全のための確認は、ハンドラーで
+    /// [`SlashContext::require_permissions`] も呼んでください。
+    /// [`register`](Self::register) のあとに呼びます。
+    ///
+    /// # エラー
+    ///
+    /// 登録されていない名前を指定した場合に失敗します。
+    pub fn default_member_permissions(
+        &mut self,
+        name: &str,
+        permissions: Permissions,
+    ) -> Result<()> {
+        match self.entries.get_mut(name) {
+            Some(definition) => {
+                definition.default_permissions = Some(permissions);
+                Ok(())
+            }
+            None => Err(RegistrationError::UnknownCommand {
                 name: name.to_owned(),
             }
             .into()),
@@ -219,18 +248,24 @@ impl SlashCommands {
                 };
                 let command = match self.scope {
                     Scope::Guild(guild_id) => {
-                        client
+                        let mut request = client
                             .create_guild_command(guild_id)
                             .chat_input(name, &definition.description)
-                            .command_options(&definition.options)
-                            .await
+                            .command_options(&definition.options);
+                        if let Some(permissions) = definition.default_permissions {
+                            request = request.default_member_permissions(permissions);
+                        }
+                        request.await
                     }
                     Scope::Global => {
-                        client
+                        let mut request = client
                             .create_global_command()
                             .chat_input(name, &definition.description)
-                            .command_options(&definition.options)
-                            .await
+                            .command_options(&definition.options);
+                        if let Some(permissions) = definition.default_permissions {
+                            request = request.default_member_permissions(permissions);
+                        }
+                        request.await
                     }
                 }
                 .map_err(registration)?
@@ -258,7 +293,7 @@ impl SlashCommands {
                 let command = Command {
                     application_id: None,
                     contexts: None,
-                    default_member_permissions: None,
+                    default_member_permissions: definition.default_permissions,
                     description: definition.description.clone(),
                     description_localizations: None,
                     dm_permission: None,
@@ -314,9 +349,28 @@ impl SlashCommands {
     }
 }
 
+/// 権限の確認。サーバー外、権限が不明、不足の順に失敗する。
+fn check_permissions(
+    guild_id: Option<Id<GuildMarker>>,
+    held: Option<Permissions>,
+    required: Permissions,
+) -> std::result::Result<(), CheckFailure> {
+    if guild_id.is_none() {
+        return Err(CheckFailure::GuildOnly);
+    }
+    let held = held.ok_or(CheckFailure::PermissionsUnavailable)?;
+    let missing = required - held;
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(CheckFailure::MissingPermissions(missing))
+    }
+}
+
 struct Definition {
     description: String,
     options: Vec<CommandOption>,
+    default_permissions: Option<Permissions>,
     handler: Box<dyn SlashHandler>,
 }
 
@@ -387,13 +441,17 @@ impl ActiveSlashCommands {
             data,
             response_state: &mut response_state,
         };
+        let mut failed_text = &hooks.messages.slash_command_failed;
         if let Err(error) = handler.call(&mut ctx).await {
             hooks
                 .reporter
                 .report(ErrorSource::SlashCommand, name, &error);
+            if matches!(error, Error::Check(_)) {
+                failed_text = &hooks.messages.check_failed;
+            }
         }
         // 応答が済んでいない（エラー、または応答の忘れ）ときは、文言が設定されていれば知らせる。
-        let Some(text) = &hooks.messages.slash_command_failed else {
+        let Some(text) = failed_text else {
             return;
         };
         let fallback = match *ctx.response_state {
@@ -429,6 +487,44 @@ impl<'a> SlashContext<'a> {
     /// コマンドを呼び出したユーザーの ID を返します。
     pub fn author_id(&self) -> Option<Id<UserMarker>> {
         self.initial.interaction.author_id()
+    }
+
+    /// コマンドが呼ばれたサーバーの ID を返します。DM では `None` です。
+    pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
+        self.initial.interaction.guild_id
+    }
+
+    /// 呼び出した人の、このチャンネルでの権限を返します。DM などで届かないときは `None` です。
+    ///
+    /// Discord が、ロールとチャンネルごとの上書きを反映して計算した値です。
+    /// 管理者は、すべての権限を持つものとして返ります。
+    pub fn permissions(&self) -> Option<Permissions> {
+        self.initial
+            .interaction
+            .member
+            .as_ref()
+            .and_then(|member| member.permissions)
+    }
+
+    /// サーバーの中で呼ばれたことを確認し、その ID を返します。
+    ///
+    /// # エラー
+    ///
+    /// DM などで呼ばれた場合は、[`CheckFailure::GuildOnly`] を返します。
+    pub fn require_guild(&self) -> Result<Id<GuildMarker>> {
+        self.guild_id()
+            .ok_or_else(|| CheckFailure::GuildOnly.into())
+    }
+
+    /// 呼び出した人が、指定した権限をすべて持っていることを確認します。
+    ///
+    /// # エラー
+    ///
+    /// DM などでは [`CheckFailure::GuildOnly`]、権限が届かないときは
+    /// [`CheckFailure::PermissionsUnavailable`]、足りないときは不足分を入れた
+    /// [`CheckFailure::MissingPermissions`] を返します。
+    pub fn require_permissions(&self, required: Permissions) -> Result<()> {
+        check_permissions(self.guild_id(), self.permissions(), required).map_err(Error::from)
     }
 
     /// コマンドが呼ばれたチャンネルの ID を返します。
@@ -914,10 +1010,10 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        ActiveSlashCommands, AllowedMentions, CommandOptionType, CommandType, GuildMarker, Id,
-        InitialResponse, Interaction, InteractionResponseType, MessageFlags, ReplyAction,
-        ResponseState, Result, Scope, SlashCommands, SlashContext, SlashHandler, initial_response,
-        v2_update_response,
+        ActiveSlashCommands, AllowedMentions, CheckFailure, CommandOptionType, CommandType,
+        GuildMarker, Id, InitialResponse, Interaction, InteractionResponseType, MessageFlags,
+        Permissions, ReplyAction, ResponseState, Result, Scope, SlashCommands, SlashContext,
+        SlashHandler, check_permissions, initial_response, v2_update_response,
     };
     use crate::ui::{Button, ComponentsV2, Embed, UiMessage};
 
@@ -1026,6 +1122,52 @@ mod tests {
         assert!(!scoped.accepts(&command_interaction(None, None, 5)));
         assert!(!scoped.accepts(&command_interaction(Some(Id::new(2)), None, 5)));
         assert!(!scoped.accepts(&command_interaction(Some(guild), Some(Id::new(2)), 6)));
+    }
+
+    #[test]
+    fn permission_check_fails_closed_and_reports_what_is_missing() {
+        let guild = Some(Id::new(1));
+        let ban = Permissions::BAN_MEMBERS;
+        let both = Permissions::BAN_MEMBERS | Permissions::KICK_MEMBERS;
+        assert_eq!(check_permissions(guild, Some(both), ban), Ok(()));
+        assert_eq!(
+            check_permissions(guild, Some(both), Permissions::empty()),
+            Ok(())
+        );
+        assert_eq!(
+            check_permissions(guild, Some(ban), both),
+            Err(CheckFailure::MissingPermissions(Permissions::KICK_MEMBERS))
+        );
+        assert_eq!(
+            check_permissions(guild, None, ban),
+            Err(CheckFailure::PermissionsUnavailable)
+        );
+        assert_eq!(
+            check_permissions(None, Some(both), ban),
+            Err(CheckFailure::GuildOnly)
+        );
+    }
+
+    #[test]
+    fn default_member_permissions_needs_a_registered_command() -> Result<()> {
+        let mut slash = SlashCommands::for_guild(Id::new(1));
+        assert!(
+            slash
+                .default_member_permissions("ban", Permissions::BAN_MEMBERS)
+                .is_err()
+        );
+        slash.register("ban", "説明", vec![], handler)?;
+        slash.default_member_permissions("ban", Permissions::BAN_MEMBERS)?;
+        let commands = {
+            let mut slash = slash;
+            slash.replace = true;
+            slash.replacement_commands()?
+        };
+        assert_eq!(
+            commands[0].default_member_permissions,
+            Some(Permissions::BAN_MEMBERS)
+        );
+        Ok(())
     }
 
     #[test]
