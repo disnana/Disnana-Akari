@@ -1,0 +1,18 @@
+# Akari が直接依存してよいクレートの一覧。CI（.github/scripts/check-dependencies.py）が照合する。
+# 新しい依存を足すときは、ここに理由つきで追加する。レビューで、必ず目に入るようにするため。
+# 方針: 安定していて、セキュリティの保守が続いていて、速いものだけを使う。
+
+# Cargo.lock に載るクレートの総数の上限。依存の木が、気づかないうちに太らないようにする。
+max_total_packages = 140
+
+[allowed]
+futures-util = "並行処理の Future と Stream の補助。タスクの待ち合わせに使う。"
+http = "HTTP の型。Twilight のクライアントを、テストで別の宛先に向けるために使う。"
+rustls = "TLS。暗号プロバイダー（ring）の選択に必要で、外すと最初の TLS 接続で失敗する。"
+thiserror = "エラー型の Display と From を、手書きせずに導く。"
+tokio = "非同期ランタイム。Twilight が前提にしている。"
+twilight-gateway = "Discord の Gateway。"
+twilight-http = "Discord の REST。"
+twilight-model = "Discord の型。"
+twilight-util = "権限の計算（permission-calculator のみ）。"
+twilight-validate = "コマンドやメッセージの制約の検証。"

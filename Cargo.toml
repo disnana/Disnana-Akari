@@ -28,3 +28,23 @@ twilight-validate = "0.18"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "time"] }
+
+# 設計の規則を、機械が判定できる形にしたもの。理由は DESIGN.md を見る。
+# 例外が必要なときは、`#[allow(..., reason = "理由")]` で、理由を必ず書く。
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+indexing_slicing = "deny"
+allow_attributes_without_reason = "deny"
+too_many_lines = "deny"

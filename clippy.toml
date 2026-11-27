@@ -1,0 +1,11 @@
+# テストの中では、unwrap などを許す（失敗したら、その場でテストが落ちるのが望ましいため）。
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-print-in-tests = true
+allow-dbg-in-tests = true
+
+# 関数の長さと引数の数の上限。長さは現状の最大（約 250 行）に合わせてあり、整理のたびに下げていく。
+too-many-lines-threshold = 250
+too-many-arguments-threshold = 7

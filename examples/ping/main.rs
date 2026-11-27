@@ -1,3 +1,10 @@
+//! 動作確認用の Bot のサンプル。接続の様子を、標準出力と標準エラー出力に書く。
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "サンプルなので、結果を画面に出す。ライブラリ本体は何も出力しない。"
+)]
+
 // use は、クレート（Rust のライブラリ）が公開している名前を、このファイルで使えるようにします。
 use disnana_akari::model::gateway::Intents;
 use disnana_akari::{InfoEvent, Result};

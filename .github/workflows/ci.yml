@@ -109,6 +109,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Check the dependency allowlist
+        run: python3 .github/scripts/check-dependencies.py
       # 脆弱性は audit.yml が検査するので、ここではライセンス、重複、取得元だけを見る。
       - name: Check dependency policy
         uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4
