@@ -23,6 +23,8 @@ use crate::{
 
 use super::lost_gateway_session;
 
+mod voice_handshake;
+
 const FIXTURE_TOKEN: &str = "local-gateway-fixture";
 const HELLO: &str = r#"{"op":10,"d":{"heartbeat_interval":60000}}"#;
 const ACK: &str = r#"{"op":11,"d":null}"#;

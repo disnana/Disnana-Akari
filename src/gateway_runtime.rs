@@ -1,7 +1,10 @@
 use std::{future::pending, sync::atomic::Ordering, time::Duration};
 
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use tokio::{sync::mpsc, time::timeout};
+use tokio::{
+    sync::mpsc,
+    time::{sleep_until, timeout},
+};
 use twilight_gateway::{ConfigBuilder, Event, EventTypeFlags, Shard, ShardId, ShardState};
 use twilight_model::id::{Id, marker::UserMarker};
 
@@ -138,12 +141,15 @@ impl GatewaySession {
     ) -> Option<Result<IncomingEvent>> {
         let had_session = self.own_id.is_some();
         let id = self.id();
-        let (mut voice_rx, voice_generation) = self.voice.as_mut().map(VoiceIngress::parts).unzip();
+        let (mut voice_rx, voice) = self.voice.as_mut().map(VoiceIngress::parts).unzip();
         let observe_state = |previous, state| {
             if lost_gateway_session(previous, state) {
                 invalidate_permissions(id);
-                if let Some(generation) = voice_generation {
-                    VoiceIngress::transition(generation, false);
+                if let Some(voice) = voice {
+                    VoiceIngress::transition(voice.generation, false);
+                    if let Ok(mut managed) = voice.managed.lock() {
+                        managed.lost_gateway();
+                    }
                 }
             }
             if let Some(status) = &self.status {
@@ -165,6 +171,7 @@ impl GatewaySession {
         loop {
             let active = self.shard.state() == ShardState::Active;
             let presence_ready = active && self.presence.is_some();
+            let deadline = voice.and_then(|voice| voice.managed.lock().ok()?.next_deadline());
             if !presence_ready && voice_rx.is_none() {
                 return message_events::next_event(
                     &mut self.shard,
@@ -192,19 +199,34 @@ impl GatewaySession {
                         voice_rx = None;
                         continue;
                     };
-                    if request.acknowledge.is_closed() {
+                    let Some(voice) = voice else {
+                        request.reply.fail(VoiceGatewayError::Closed);
                         continue;
-                    }
-                    let current = voice_generation.map(|generation| generation.load(Ordering::Acquire));
-                    let result = if self.shard.state() == ShardState::Active
-                        && current == Some(request.generation)
-                    {
-                        self.shard.command(&request.update);
-                        Ok(())
-                    } else {
-                        Err(VoiceGatewayError::NotReady)
                     };
-                    let _ = request.acknowledge.send(result);
+                    let current = voice.generation.load(Ordering::Acquire);
+                    if self.shard.state() != ShardState::Active || current != request.generation {
+                        request.reply.fail(VoiceGatewayError::NotReady);
+                    } else if let Ok(mut managed) = voice.managed.lock() {
+                        managed.request(request, |update| self.shard.command(update));
+                    } else {
+                        request.reply.fail(VoiceGatewayError::Closed);
+                    }
+                }
+                () = async {
+                    match (voice, deadline) {
+                        (Some(voice), Some(deadline)) => tokio::select! {
+                            () = voice.cancellation.notified() => {},
+                            () = sleep_until(deadline) => {},
+                        },
+                        (Some(voice), None) => voice.cancellation.notified().await,
+                        (None, _) => pending().await,
+                    }
+                }, if voice.is_some() => {
+                    if let Some(voice) = voice
+                        && let Ok(mut managed) = voice.managed.lock()
+                    {
+                        managed.expire();
+                    }
                 }
             }
         }
@@ -222,18 +244,23 @@ impl GatewaySession {
             status.transition(self.id(), GatewayShardState::Connecting);
             event_types |= EventTypeFlags::GATEWAY_HEARTBEAT_ACK;
         }
+        if self.voice.is_some() {
+            event_types |= EventTypeFlags::VOICE_STATE_UPDATE | EventTypeFlags::VOICE_SERVER_UPDATE;
+        }
         while let Some(event) = self
             .next_event(event_types, decode, invalidate_permissions)
             .await
         {
             let is_ready = matches!(&event, Ok(IncomingEvent::Standard(Event::Ready(_))));
             if let Some(voice) = &self.voice
-                && matches!(
-                    &event,
-                    Ok(IncomingEvent::Standard(Event::Ready(_) | Event::Resumed))
-                )
+                && let Ok(IncomingEvent::Standard(event)) = &event
             {
-                voice.set_ready(true);
+                if let Ok(mut managed) = voice.managed.lock() {
+                    managed.observe(event, self.own_id);
+                }
+                if matches!(event, Event::Ready(_) | Event::Resumed) {
+                    voice.set_ready(true);
+                }
             }
             if let Some(status) = &self.status {
                 self.observe_event(status, &event);

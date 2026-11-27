@@ -121,6 +121,26 @@ async fn move_bot(
 
 退出を要求するときは `VoiceStateChange::leave()` を渡します。要求を受け付けた後、Bot 自身の `VoiceStateUpdate` で実際の参加先を確認できます。音声の送受信には別途音声ドライバーが必要です。ドライバーの接続には `VoiceServerUpdate` も受け取り、エンドポイントが無い間は接続を待ちます。イベントに含まれるトークンはログや返信に残さないでください。[Discord の音声接続仕様](https://docs.discord.com/developers/topics/voice-connections#connecting-to-voice)
 
+### 音声サーバーの割り当てを待つ
+
+`join` は、参加先が一致する Bot 自身の音声状態と、サーバーの音声サーバー割り当てが揃うまで待ちます。`leave` は Bot 自身の退出通知を待ちます。
+
+```rust
+use std::time::Duration;
+use disnana_akari::{Result, VoiceConnection, VoiceGateway};
+use disnana_akari::model::id::{Id, marker::{ChannelMarker, GuildMarker}};
+
+async fn join_channel(
+    voice: &VoiceGateway,
+    guild: Id<GuildMarker>,
+    channel: Id<ChannelMarker>,
+) -> Result<VoiceConnection> {
+    Ok(voice.join(guild, channel, Duration::from_secs(30)).await?)
+}
+```
+
+`connection.status()` で割り当てを確認し、`connection.changed().await` で再割り当てや切断を待てます。接続情報は音声ドライバーに渡します。送信キューへ渡した後に参加がタイムアウトした場合、遅れて届く通知との混同を避けるため、次の新規 Gateway セッションまで同じサーバーの参加を再試行できません。その場合も `leave` は使えます。トークンとセッション ID は明示的に取得し、保存やログ出力を避けてください。[Discord の音声サーバー割り当て](https://docs.discord.com/developers/topics/voice-connections#retrieving-voice-server-information)
+
 ## シャード別の状態と RTT を監視する
 
 `let (bot, status) = bot.with_gateway_status();` で監視を設定します。`status.shards()` は、起動待ち、初回接続中、準備済み、再接続中、終了のいずれかと、計測した RTT をシャード番号順に返します。シャード数が決まるまでは空の一覧です。切断したシャードの RTT は、新しい接続でハートビートの応答を受けるまで `None` です。 起動に失敗して状態が更新されない場合に備え、監視は Bot の起動処理と並行し、その処理が終了した時点でも打ち切ります。

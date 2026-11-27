@@ -95,7 +95,10 @@ pub use slash::{
 pub use timing::Timing;
 pub use twilight_http as http;
 pub use twilight_model as model;
-pub use voice_gateway::{VoiceGateway, VoiceGatewayError, VoiceStateChange};
+pub use voice_gateway::{
+    VoiceConnection, VoiceConnectionInfo, VoiceConnectionStatus, VoiceGateway, VoiceGatewayError,
+    VoiceStateChange,
+};
 
 use hooks::{Hooks, InfoReporter, Reporter};
 use interactions::RadioSubmission;
