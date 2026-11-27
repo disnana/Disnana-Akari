@@ -164,6 +164,19 @@ impl<'a> CommandContext<'a> {
         self.ctx.reply(content).await
     }
 
+    /// 通知する相手を指定して返信します。詳細は [`Context::reply_with`] を参照してください。
+    ///
+    /// # エラー
+    ///
+    /// 返信を送信できなかった場合に失敗します。
+    pub async fn reply_with(
+        &self,
+        content: &str,
+        mentions: &twilight_model::channel::message::AllowedMentions,
+    ) -> Result<()> {
+        self.ctx.reply_with(content, mentions).await
+    }
+
     /// 元のコマンドに Embed やボタンを付けて返信します。
     ///
     /// # エラー

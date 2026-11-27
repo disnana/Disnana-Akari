@@ -73,6 +73,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.context() -> &Context<'_>` | 元のメッセージを扱うコンテキストを借ります。 |
 | `ctx.timing() -> Timing` | このテキストコマンド呼び出しの測定値を取得します。 |
 | `ctx.reply(content).await -> Result<()>` | コマンドのメッセージに返信し、返信先の投稿者や本文中のメンションへの通知を抑止します。 |
+| `ctx.reply_with(content, &mentions).await -> Result<()>` | 通知する相手を `AllowedMentions` で指定して返信します（`reply` は何も通知しません）。メッセージ返信の `Context` と `CommandContext` で使えます。 |
 | `ctx.reply_ui(&message).await -> Result<()>` | `UiMessage` を元のメッセージに返信します。 |
 | `ctx.reply_v2(&message).await -> Result<()>` | `ComponentsV2` を元のメッセージに返信します。 |
 

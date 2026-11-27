@@ -103,6 +103,7 @@ fn register(commands: &mut Commands) -> Result<()> {
 | メソッド | 動作 |
 | --- | --- |
 | `ctx.reply(text)` | テキストで返信します。返信先への通知やメンションは飛びません。 |
+| `ctx.reply_with(text, &mentions)` | 通知する相手を指定して返信します。`mentions` は `disnana_akari::model::channel::message::AllowedMentions` です。 |
 | `ctx.reply_ui(&message)` | [Embed やボタン](buttons.md)付きで返信します。 |
 | `ctx.reply_v2(&message)` | [Components V2](components-v2.md) で返信します。 |
 
