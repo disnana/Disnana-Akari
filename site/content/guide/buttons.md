@@ -147,6 +147,51 @@ async fn on_count(ctx: &mut ButtonContext<'_>) -> Result<()> {
 }
 ```
 
+## 画面の状態の持たせ方
+
+Akari にはボタンごとのオブジェクト（d.py の View）がありません。画面を変えるときは、今の状態を取り出して、新しい `UiMessage` を組み立て直します。状態の置き場所は、次の 3 つから選びます。
+
+| 状態の種類 | 置き場所 | 取り出し方 |
+| --- | --- | --- |
+| ページ番号や対象 ID など、短い値 | ボタンの ID（`DynamicId`、100 文字まで） | `ctx.dynamic_id()` |
+| すでに画面に出ている内容 | 押されたメッセージ | `ctx.message()` |
+| 画面に出さない状態、大きな状態 | アプリの DB など | 対象の ID から検索する |
+
+`ctx.message()` は、Discord が操作と一緒に送ってきた内容を借りるだけなので、追加の API リクエストはありません。`update_message` も、その操作への応答です。
+
+次の例は、ページ番号をボタンの ID に載せて、ページ送りをします。表示から読み取らないので、画面の文言を変えても壊れません。
+
+```rust
+use disnana_akari::ui::{Button, DynamicId, Embed, UiMessage};
+use disnana_akari::{ButtonContext, Events, Result};
+
+const PAGES: [&str; 3] = ["1 ページ目", "2 ページ目", "3 ページ目"];
+
+fn page(index: usize) -> Result<UiMessage> {
+    let previous = DynamicId::new("page", &index.saturating_sub(1).to_string())?;
+    let next = DynamicId::new("page", &(index + 1).min(PAGES.len() - 1).to_string())?;
+    Ok(UiMessage::new()
+        .embed(Embed::new("ページ").description(PAGES[index]))
+        .buttons(vec![
+            Button::secondary(previous, "前へ").disabled(index == 0),
+            Button::primary(next, "次へ").disabled(index + 1 == PAGES.len()),
+        ]))
+}
+
+fn register_pages(events: &mut Events) -> Result<()> {
+    events.on_dynamic_button("page", async |ctx: &mut ButtonContext<'_>| -> Result<()> {
+        let Some(id) = ctx.dynamic_id() else {
+            return Ok(());
+        };
+        let index: usize = id.value().parse().map_err(disnana_akari::Error::handler)?;
+        let index = index.min(PAGES.len() - 1);
+        ctx.update_message(&page(index)?).await
+    })
+}
+```
+
+押した人だけに操作させたいときは、`ctx.author_id()` と、メッセージを作った人（スラッシュコマンドの実行者など）の ID を比べます。作った人の ID は、`DynamicId` に載せるか、DB に保存します。
+
 ## 時間のかかる処理
 
 ボタンも 3 秒以内の応答が必要です。長くかかるときは、先に `defer_update` で受け付けて、あとで `update_message` や `followup_ephemeral` を呼びます。作業結果をファイル付きの追加メッセージとして送る場合は、`followup_files` または `followup_files_ephemeral` を使います。[追加のメッセージにファイルを添付する](responding.md#追加のメッセージにファイルを添付する)

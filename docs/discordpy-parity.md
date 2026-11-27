@@ -46,3 +46,7 @@ discord.py 2.7.1 は pytest、pytest-asyncio、pytest-mock とカバレッジを
 1. **確認済み。** 単一シャードの受信処理を分離した。ローカル WebSocket に Bot の起動経路から接続し、Identify、Ready、ハートビートと RTT、部分編集通知、Resume、Presence の再送、正常切断を確認した。
 2. `with_recommended_shards` で推奨数とセッション開始枠を起動時に検証する。REST クライアント、コマンド同期、処理キューは共有し、最初の Ready を待ってから次の組の Identify を開始する。[Discord のシャーディング仕様](https://docs.discord.com/developers/events/gateway#sharding)
 3. ローカル WebSocket で片方だけの再接続と全シャードの停止を検証する。切断したシャードでは、`RESUMED` より前に再送されたメッセージでも新しい権限が使われることを確認する。正常なシャードの権限はキャッシュから読み、追加の REST リクエストを送らない。権限キャッシュの単体テストでは、切断前に始めた取得から古い値が再登録されないことも確認する。
+
+## d.py の View との違い
+
+Akari にボタンごとのオブジェクト（View）はありません。ボタンは `custom_id` で識別し、`Events` に登録した関数が処理します。再起動しても、同じ `custom_id` のボタンは動き続けます。画面の状態は、`DynamicId`、押されたメッセージ（`ctx.message()`）、アプリの DB のいずれかに置きます。使い分けは[ボタンのガイド](../site/content/guide/buttons.md#画面の状態の持たせ方)を参照してください。
