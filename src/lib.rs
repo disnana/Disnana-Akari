@@ -29,7 +29,7 @@ pub use commands::{CommandContext, Commands};
 pub use cooldown::Cooldown;
 pub use error::Error;
 pub use events::{Events, Ready};
-pub use hooks::{ErrorReport, ErrorSource, Messages};
+pub use hooks::{ErrorReport, ErrorSource, InfoEvent, Messages};
 pub use hybrid::{CommandSource, HybridContext, register_hybrid};
 pub use interactions::{
     ButtonContext, ChannelSelectContext, EntitySelectContext, Mentionable,
@@ -40,7 +40,7 @@ pub use timing::Timing;
 pub use twilight_http as http;
 pub use twilight_model as model;
 
-use hooks::{Hooks, Reporter};
+use hooks::{Hooks, InfoReporter, Reporter};
 use timing::Pending;
 
 const INTERACTION_WORKERS: usize = 8;
@@ -61,6 +61,7 @@ pub struct Bot {
     intents: Option<Intents>,
     additional_intents: Intents,
     reporter: Reporter,
+    info: InfoReporter,
     messages: Messages,
 }
 
@@ -72,6 +73,7 @@ impl fmt::Debug for Bot {
             .field("slash", &self.slash)
             .field("intents", &self.intents())
             .field("has_error_hook", &self.reporter.has_hook())
+            .field("has_info_hook", &self.info.has_hook())
             .field("messages", &self.messages)
             .finish()
     }
@@ -96,6 +98,7 @@ impl Bot {
             intents: None,
             additional_intents: Intents::empty(),
             reporter: Reporter::default(),
+            info: InfoReporter::default(),
             messages: Messages::default(),
         })
     }
@@ -155,6 +158,15 @@ impl Bot {
     /// 重い処理や非同期の処理は、チャンネルへ送るなどして、別のタスクで行います。
     pub fn on_error(mut self, hook: impl Fn(&ErrorReport<'_>) + Send + Sync + 'static) -> Self {
         self.reporter = Reporter::new(hook);
+        self
+    }
+
+    /// 実行時の情報を受け取る関数を設定します。
+    ///
+    /// 設定した場合に限り、Gateway の準備や再開、スラッシュコマンドの同期、
+    /// Interaction の初回応答を同期的に通知します。関数内では短い処理だけを行ってください。
+    pub fn on_info(mut self, hook: impl Fn(&InfoEvent) + Send + Sync + 'static) -> Self {
+        self.info = InfoReporter::new(hook);
         self
     }
 
@@ -228,9 +240,14 @@ impl Bot {
             intents,
             additional_intents,
             reporter,
+            info,
             messages,
         } = self;
-        let hooks = Hooks { reporter, messages };
+        let hooks = Hooks {
+            reporter,
+            info,
+            messages,
+        };
 
         // Intent は自動では足さない。足りないときは、通信する前にエラーにする。
         let observe_messages = on_message.is_some() || events.has_message_handlers();
@@ -241,11 +258,14 @@ impl Bot {
 
         let http = Client::new(token.clone());
         let mut event_types = EventTypeFlags::READY;
+        if hooks.info.has_hook() {
+            event_types |= EventTypeFlags::RESUMED;
+        }
 
         let slash = match slash {
             Some(commands) => {
                 event_types |= EventTypeFlags::INTERACTION_CREATE;
-                Some(commands.sync(&http).await?)
+                Some(commands.sync(&http, &hooks.info).await?)
             }
             None => None,
         };
@@ -345,28 +365,36 @@ impl Bot {
                     commands.dispatch(&http, &interaction, timing, &hooks).await;
                 }
             },
-            |pending| queue_busy_response(&busy, pending.into_event(), &hooks),
+            |pending| queue_busy_response(&busy, pending, &hooks),
         );
-        let handle_busy = work_queue::respond(busy_queue, BUSY_WORKERS, |interaction| {
-            let http = &http;
-            let hooks = &hooks;
-            async move {
-                if let Some(text) = &hooks.messages.interaction_busy
-                    && let Err(error) =
-                        slash::send_initial_message(http, &interaction, text, true).await
-                {
-                    hooks
-                        .reporter
-                        .report(ErrorSource::Response, Some("混雑の通知"), &error);
+        let handle_busy =
+            work_queue::respond(busy_queue, BUSY_WORKERS, |pending: Pending<Interaction>| {
+                let http = &http;
+                let hooks = &hooks;
+                async move {
+                    let (interaction, timing) = pending.begin();
+                    let initial = slash::InitialResponder {
+                        http,
+                        interaction: &interaction,
+                        timing,
+                        info: &hooks.info,
+                    };
+                    if let Some(text) = &hooks.messages.interaction_busy
+                        && let Err(error) = initial.message(text, true).await
+                    {
+                        hooks
+                            .reporter
+                            .report(ErrorSource::Response, Some("混雑の通知"), &error);
+                    }
                 }
-            }
-        });
+            });
 
         let receive = async {
             while let Some(event) = shard.next_event(event_types).await {
                 let gateway_rtt = shard.latency().recent().first().copied();
                 match event {
                     Ok(Event::Ready(ready)) => {
+                        hooks.info.report(InfoEvent::GatewayReady);
                         if event_tx
                             .try_send(MessageEvent::Ready(Box::new(ready)))
                             .is_err()
@@ -380,6 +408,7 @@ impl Bot {
                             );
                         }
                     }
+                    Ok(Event::Resumed) => hooks.info.report(InfoEvent::GatewayResumed),
                     Ok(Event::MessageCreate(message))
                         if !message.author.bot && message.webhook_id.is_none() =>
                     {
@@ -418,7 +447,7 @@ impl Bot {
                         if let Err(error) =
                             interactions.try_send(Pending::new(interaction.0, gateway_rtt))
                         {
-                            queue_busy_response(&busy, error.into_inner().into_event(), &hooks);
+                            queue_busy_response(&busy, error.into_inner(), &hooks);
                         }
                     }
                     Ok(Event::GatewayClose(Some(frame))) => {
@@ -478,7 +507,11 @@ fn queue_text_busy(
 }
 
 /// Interaction を処理できなかったことを報告し、文言が設定されていれば混雑を返す。
-fn queue_busy_response(queue: &mpsc::Sender<Interaction>, interaction: Interaction, hooks: &Hooks) {
+fn queue_busy_response(
+    queue: &mpsc::Sender<Pending<Interaction>>,
+    interaction: Pending<Interaction>,
+    hooks: &Hooks,
+) {
     hooks.reporter.report(
         ErrorSource::QueueFull,
         Some("Interaction"),

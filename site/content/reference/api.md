@@ -23,6 +23,7 @@ rustdoc には、次の内容があります。
 | `ui::{UiMessage, Embed, Button, ...}` | メッセージの部品 | [Embed とボタン](../guide/buttons.md) |
 | `ui::ComponentsV2` | Components V2 のメッセージ | [Components V2](../guide/components-v2.md) |
 | `Cooldown` | ユーザーごとの実行間隔 | [クールダウン](../guide/cooldowns.md) |
+| `InfoEvent` | Gateway や初回応答に関する実行時の通知 | [Akari の動き方](../guide/how-it-works.md) |
 | `Error` / `ErrorReport` | 型付きエラーと発生箇所の通知 | [エラーと自動で送る文言](../guide/errors.md) |
 | `Timing` | 受信から処理までの測定値 | [Akari の動き方](../guide/how-it-works.md) |
 

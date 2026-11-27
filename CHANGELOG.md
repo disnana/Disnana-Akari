@@ -4,6 +4,7 @@
 
 勝手な動作を減らし、エラーと文言を呼び出し側が決められるようにしました。**互換性のない変更を含みます。**
 
+- `Bot::on_info` を追加しました。Gateway のセッション、スラッシュコマンドの同期、Interaction の初回応答の計測値をオプトインで受け取れます。
 - **`Result<T>` と `ErrorReport::error` が型付きの `Error` を使うようになりました。** Intent の不足や Discord API の失敗は列挙型の各バリアントで判別できます。アプリ固有のエラーは `Error::handler` で包めます。
 - `CommandSource` と `Mentionable` は `#[non_exhaustive]` になりました。外部クレートの `match` には `_` の分岐を付けてください。
 - `Bot` や各コンテキストなどに `Debug` を追加しました。`Bot` のトークンは `<redacted>` と表示されます。

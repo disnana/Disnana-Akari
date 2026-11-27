@@ -48,6 +48,8 @@ cargo run --locked --manifest-path playground/Cargo.toml --target-dir target
 
 遅延はミリ秒（ms）で表示されます。接続直後など、Gateway からハートビートの応答をまだ受け取っていない場合は、Gateway RTT が「未計測」と表示されます。[測定値の定義](api.md#timing)
 
+Playground は `Bot::on_info` で初回応答の所要時間を端末に表示します。操作を受信してからの時間と、REST リクエストにかかった時間を確認できます。
+
 スラッシュコマンドは `DISCORD_GUILD_ID` で指定したサーバーで使えます。ID を省略するとテキストコマンドとイベント処理で起動します。Bot を止めるには、RustRover の停止ボタンか `Ctrl+C` を使います。
 
 既定の起動では、コードにある同名のスラッシュコマンドを追加または更新します。**テストサーバー内で、この Bot に登録済みの全アプリケーションコマンドを現在の定義に置き換える**場合は `DISCORD_REPLACE_GUILD_COMMANDS=true` を設定します。コードから削除したコマンドに加え、同じ Bot の別名コマンドや、ユーザー・メッセージの右クリックメニューにあるアプリコマンドも、同期する一覧に含まれなければ削除されます。[Discord のサーバー単位の一括上書き](https://docs.discord.com/developers/interactions/application-commands#bulk-overwrite-guild-application-commands)

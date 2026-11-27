@@ -1,6 +1,6 @@
 // use は、クレート（Rust のライブラリ）が公開している名前を、このファイルで使えるようにします。
-use disnana_akari::Result;
 use disnana_akari::model::gateway::Intents;
+use disnana_akari::{InfoEvent, Result};
 
 // mod は、別ファイルに分けたコードをこのプログラムの一部として読み込みます。
 mod commands;
@@ -30,6 +30,17 @@ async fn main() -> Result<()> {
     // on_error は、ハンドラーのエラーや Gateway のエラーを一件ずつ受け取ります。
     // 設定しない場合、Akari は同じ内容を標準エラー出力に書きます。
     let bot = bot.on_error(|report| eprintln!("エラー: {report}"));
+    // on_info は指定したときだけ動きます。ここでは初回応答の所要時間を表示します。
+    let bot = bot.on_info(|event| {
+        if let InfoEvent::InteractionResponded {
+            elapsed,
+            rest_elapsed,
+            ..
+        } = event
+        {
+            eprintln!("初回応答 {elapsed:?}（REST {rest_elapsed:?}）");
+        }
+    });
     // with_events はイベント登録を持たせた Bot を返します。
     let bot = bot.with_events(events::register()?);
     // Some は値があること、None は値がないことを表します。
