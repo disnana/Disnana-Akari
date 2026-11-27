@@ -26,6 +26,51 @@ async fn ban(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 `ctx.permissions()` は、Discord がロールとチャンネルごとの上書きを反映して計算した値です。管理者はすべての権限を持つものとして返ります。
 
+## 権限を名前で調べる
+
+数値やビットを書かずに、権限を名前で調べられます。`use disnana_akari::prelude::*;` で取り込みます。
+
+```rust
+use disnana_akari::model::guild::Permissions;
+use disnana_akari::prelude::*;
+use disnana_akari::{Result, SlashContext};
+
+async fn info(ctx: &mut SlashContext<'_>) -> Result<()> {
+    let held = ctx.permissions().unwrap_or_else(Permissions::empty);
+    let mut text = String::new();
+    if held.manage_messages() {
+        text.push_str("メッセージを管理できます。\n");
+    }
+    // 足りない権限を、日本語の名前で並べる
+    let missing: Vec<_> = (Permissions::moderator() - held).labels().collect();
+    if !missing.is_empty() {
+        text.push_str(&format!("足りない権限: {}", missing.join("、")));
+    }
+    ctx.reply_ephemeral(&text).await
+}
+```
+
+| メソッド | 動作 |
+| --- | --- |
+| `perms.manage_messages()` など | 権限の定数名を小文字にした名前で、持っているかを返します |
+| `perms.names()` | 持っている権限の定数名（`MANAGE_MESSAGES` など）を返します |
+| `perms.labels()` | 持っている権限の日本語名を返します |
+| `perms.unknown_bits()` | 名前の表にないビットです。Discord が権限を追加したとき、黙って捨てずに確認できます |
+| `Permissions::text()`、`voice()`、`moderator()` | 目的ごとの権限のまとまりです |
+
+追加や削除には、ビットフラグ標準の `insert`、`remove`、`set` を使います。
+
+同じ方法が、メッセージ（`MessageFlagsExt`）、ユーザーのバッジ（`UserFlagsExt`）、システムチャンネル（`SystemChannelFlagsExt`）、チャンネル（`ChannelFlagsExt`）のフラグにも使えます。チャンネルの種類や認証レベルなどの設定は、`label()` で日本語の名前にできます。
+
+```rust
+use disnana_akari::model::{channel::ChannelType, guild::VerificationLevel};
+use disnana_akari::prelude::*;
+
+fn describe(kind: ChannelType, level: VerificationLevel) -> String {
+    format!("{} / 認証レベル: {}", kind.label(), level.label())
+}
+```
+
 ## テキストコマンドで確認する
 
 メッセージには権限が付いていないため、Akari が Discord からサーバーとチャンネルの情報を取得して計算します（Twilight 公式の `twilight-util` の計算を使います）。ロールやチャンネルごとの上書きを反映し、サーバーのオーナーと管理者はすべての権限を持つものとして扱います。

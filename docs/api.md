@@ -582,6 +582,10 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 | `SoundboardSound`、`SoundboardSoundId`、`SoundboardSoundMarker`、`SoundboardSounds`、`VoiceEffectAnimation` | Discord のサウンドボード音とその一覧、再生時の演出です。 |
 | `GuildSoundboardSoundCreate`、`GuildSoundboardSoundUpdate`、`GuildSoundboardSoundDelete`、`GuildSoundboardSoundsUpdate` | サウンドボード音の追加、更新、削除、一括更新の通知です。 |
 
+## 権限やフラグを名前で扱う
+
+`use disnana_akari::prelude::*;` で、`PermissionsExt`、`PermissionPresets`、`MessageFlagsExt`、`UserFlagsExt`、`SystemChannelFlagsExt`、`ChannelFlagsExt`、`Label` を取り込みます。Twilight の型に、名前で調べるメソッド（`perms.manage_messages()`）、`names()`、`labels()`、`unknown_bits()` を足します。`Permissions::text()`、`voice()`、`moderator()` は、目的ごとの権限のまとまりです。`Label::label()` は、`ChannelType`、`VerificationLevel`、`DefaultMessageNotificationLevel`、`ExplicitContentFilter`、`MfaLevel`、`NSFWLevel`、`PremiumTier` を日本語の名前にします。トレイトは封印されていて、ほかの型には実装できません。
+
 ## コマンドの共通チェック
 
 `CommandCheck::new` には `async fn(CommandCheckContext<'_>) -> Result<()>` または同等のクロージャを渡します。同じチェックを `Commands::add_check` と `SlashCommands::add_check` の両方に渡せます。`command_path()` はグループを含めた正式なコマンド名を親から順に返します。`source()`、`author_id()`、`guild_id()`、`channel_id()` で呼び出し元を確認できます。

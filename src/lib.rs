@@ -8,6 +8,7 @@ mod concurrency;
 mod cooldown;
 mod error;
 mod events;
+mod flags;
 mod gateway_runtime;
 mod gateway_status;
 mod hooks;
@@ -107,6 +108,17 @@ pub use voice_gateway::{
     VoiceConnection, VoiceConnectionInfo, VoiceConnectionStatus, VoiceGateway, VoiceGatewayError,
     VoiceStateChange,
 };
+
+/// 権限やフラグを名前で調べる拡張トレイトと、設定の日本語名をまとめて取り込みます。
+///
+/// `use disnana_akari::prelude::*;` と書くと、`perms.manage_messages()`、
+/// `Permissions::text()`、`perms.labels()`、`channel_kind.label()` などが使えます。
+pub mod prelude {
+    pub use crate::flags::{
+        ChannelFlagsExt, Label, MessageFlagsExt, PermissionPresets, PermissionsExt,
+        SystemChannelFlagsExt, UserFlagsExt,
+    };
+}
 
 use hooks::{Hooks, InfoReporter, Reporter};
 use interactions::RadioSubmission;
