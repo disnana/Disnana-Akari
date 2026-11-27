@@ -1,8 +1,8 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     num::NonZeroUsize,
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use twilight_gateway::{Event, EventTypeFlags, Intents, ShardId, error::ReceiveMessageErrorType};
@@ -42,14 +42,77 @@ pub struct CachedMemberRemove {
     pub member: Arc<Member>,
 }
 
+/// Gateway で受信したサーバーメンバーを参照する、読み取り専用ハンドルです。
+///
+/// [`crate::Bot::with_member_cache`] で取得します。保存対象は受信済みの一部で、
+/// 容量超過、未受信、退出などで見つからないことがあります。Discord への問い合わせは行いません。
+/// Gateway の再接続中は、そのシャードの項目を一時的に取得できません。
+#[derive(Clone)]
+pub struct MemberCacheHandle(Arc<RwLock<Option<MemberCache>>>);
+
+impl std::fmt::Debug for MemberCacheHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemberCacheHandle").finish_non_exhaustive()
+    }
+}
+
+impl MemberCacheHandle {
+    pub(crate) fn new() -> Self {
+        Self(Arc::default())
+    }
+
+    /// 指定したメンバーの最新の保存スナップショットを返します。
+    ///
+    /// 取得したスナップショットは、後からキャッシュが更新されても変化しません。
+    pub fn get(&self, guild: Id<GuildMarker>, user: Id<UserMarker>) -> Option<Arc<Member>> {
+        self.read(|cache| {
+            let entry = cache.entries.get(&guild)?.get(&user)?;
+            (!cache.suspended.contains(&entry.shard)).then(|| Arc::clone(&entry.member))
+        })?
+    }
+
+    /// 指定したサーバーの、現在参照できる保存済みメンバーを返します。順序は任意です。
+    pub fn guild_members(&self, guild: Id<GuildMarker>) -> Vec<Arc<Member>> {
+        self.read(|cache| {
+            cache.entries.get(&guild).map_or_else(Vec::new, |members| {
+                members
+                    .values()
+                    .filter(|entry| !cache.suspended.contains(&entry.shard))
+                    .map(|entry| Arc::clone(&entry.member))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+    }
+
+    fn read<T>(&self, read: impl FnOnce(&MemberCache) -> T) -> Option<T> {
+        let cache = self.0.read().ok()?;
+        cache.as_ref().map(read)
+    }
+}
+
 pub(crate) enum CachedMemberEvent {
     Update(CachedMemberUpdate),
     Remove(CachedMemberRemove),
 }
 
 pub(crate) struct MemberCacheRuntime {
-    cache: RefCell<MemberCache>,
+    cache: MemberStore,
     events: EventTypeFlags,
+}
+
+enum MemberStore {
+    Local(RefCell<MemberCache>),
+    Shared(MemberCacheHandle),
+}
+
+impl MemberStore {
+    fn write<T>(&self, write: impl FnOnce(&mut MemberCache) -> T) -> Option<T> {
+        match self {
+            Self::Local(cache) => Some(write(&mut cache.borrow_mut())),
+            Self::Shared(handle) => handle.0.write().ok()?.as_mut().map(write),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -63,9 +126,10 @@ impl MemberCacheRuntime {
         capacity: usize,
         events: &Events,
         intents: Intents,
+        handle: Option<MemberCacheHandle>,
     ) -> Result<Option<Self>> {
         let events = events.cached_member_types();
-        if events.is_empty() {
+        if events.is_empty() && handle.is_none() {
             return Ok(None);
         }
         let capacity = NonZeroUsize::new(capacity).ok_or(Error::MemberCacheRequired)?;
@@ -74,10 +138,17 @@ impl MemberCacheRuntime {
                 return Err(Error::MissingEventIntents { any_of: intent });
             }
         }
-        Ok(Some(Self {
-            cache: RefCell::new(MemberCache::new(capacity)),
-            events,
-        }))
+        let cache = MemberCache::new(capacity);
+        let cache = match handle {
+            Some(handle) => {
+                if let Ok(mut shared) = handle.0.write() {
+                    *shared = Some(cache);
+                }
+                MemberStore::Shared(handle)
+            }
+            None => MemberStore::Local(RefCell::new(cache)),
+        };
+        Ok(Some(Self { cache, events }))
     }
 
     pub(crate) fn event_types(&self) -> EventTypeFlags {
@@ -95,18 +166,53 @@ impl MemberCacheRuntime {
             shard,
         }
     }
+
+    pub(crate) fn suspend_shard(&self, shard: ShardId) {
+        if let MemberStore::Shared(handle) = &self.cache
+            && let Ok(mut cache) = handle.0.write()
+            && let Some(cache) = cache.as_mut()
+        {
+            cache.suspended.insert(shard);
+        }
+    }
+
+    pub(crate) fn suspend_all(&self) {
+        if let MemberStore::Shared(handle) = &self.cache
+            && let Ok(mut cache) = handle.0.write()
+        {
+            *cache = None;
+        }
+    }
+}
+
+impl Drop for MemberCacheRuntime {
+    fn drop(&mut self) {
+        self.suspend_all();
+    }
 }
 
 impl MemberCacheRoute<'_> {
     pub(crate) fn observe(self, event: &Event) -> Option<CachedMemberEvent> {
-        if !self.runtime.event_types().intersects(event.kind().into())
-            && !matches!(event, Event::Ready(_))
+        if !matches!(event, Event::Ready(_) | Event::Resumed)
+            && !self.runtime.event_types().intersects(event.kind().into())
         {
             return None;
         }
-        let mut cache = self.runtime.cache.borrow_mut();
+        self.runtime
+            .cache
+            .write(|cache| self.observe_cached(cache, event))
+            .flatten()
+    }
+
+    fn observe_cached(self, cache: &mut MemberCache, event: &Event) -> Option<CachedMemberEvent> {
         match event {
-            Event::Ready(_) => cache.reset(self.shard),
+            Event::Ready(_) => {
+                cache.reset(self.shard);
+                cache.suspended.remove(&self.shard);
+            }
+            Event::Resumed => {
+                cache.suspended.remove(&self.shard);
+            }
             Event::GuildCreate(guild) => {
                 cache.clear_guild(self.shard, guild.id());
                 if let GuildCreate::Available(guild) = guild.as_ref() {
@@ -137,15 +243,19 @@ impl MemberCacheRoute<'_> {
         event: &MemberUpdate,
         fields: Option<MemberUpdateFields>,
     ) -> Option<CachedMemberEvent> {
-        let mut cache = self.runtime.cache.borrow_mut();
-        let Some(fields) = fields else {
-            cache.reset(self.shard);
-            return None;
-        };
         let notify = self.runtime.events.contains(EventTypeFlags::MEMBER_UPDATE);
-        cache
-            .update(self.shard, event, fields, notify)
-            .map(CachedMemberEvent::Update)
+        self.runtime
+            .cache
+            .write(|cache| {
+                let Some(fields) = fields else {
+                    cache.reset(self.shard);
+                    return None;
+                };
+                cache
+                    .update(self.shard, event, fields, notify)
+                    .map(CachedMemberEvent::Update)
+            })
+            .flatten()
     }
 
     pub(crate) fn invalidate_on_decode_error(self, error: &Error) {
@@ -166,7 +276,7 @@ impl MemberCacheRoute<'_> {
                 )
             })
         {
-            self.runtime.cache.borrow_mut().reset(self.shard);
+            self.runtime.cache.write(|cache| cache.reset(self.shard));
         }
     }
 }
@@ -178,9 +288,10 @@ type Key = (Id<GuildMarker>, Id<UserMarker>);
 
 struct MemberCache {
     capacity: NonZeroUsize,
-    entries: HashMap<Key, Entry>,
+    entries: HashMap<Id<GuildMarker>, HashMap<Id<UserMarker>, Entry>>,
     order: BTreeMap<u64, Key>,
     next: u64,
+    suspended: HashSet<ShardId>,
 }
 
 struct Entry {
@@ -196,20 +307,21 @@ impl MemberCache {
             entries: HashMap::new(),
             order: BTreeMap::new(),
             next: 0,
+            suspended: HashSet::new(),
         }
     }
 
     fn insert(&mut self, shard: ShardId, guild: Id<GuildMarker>, member: &Member) {
         let key = (guild, member.user.id);
-        if let Some(entry) = self.entries.get_mut(&key) {
+        if let Some(entry) = self.entry_mut(key) {
             entry.shard = shard;
             entry.member = Arc::new(member.clone());
             return;
         }
-        if self.entries.len() == self.capacity.get()
+        if self.order.len() == self.capacity.get()
             && let Some((_, oldest)) = self.order.pop_first()
         {
-            self.entries.remove(&oldest);
+            self.remove_entry(oldest);
         }
         if self.next == u64::MAX {
             self.reindex();
@@ -217,8 +329,8 @@ impl MemberCache {
         let order = self.next;
         self.next += 1;
         self.order.insert(order, key);
-        self.entries.insert(
-            key,
+        self.entries.entry(guild).or_default().insert(
+            member.user.id,
             Entry {
                 shard,
                 order,
@@ -230,21 +342,35 @@ impl MemberCache {
     fn reindex(&mut self) {
         self.next = 0;
         for key in std::mem::take(&mut self.order).into_values() {
-            if let Some(entry) = self.entries.get_mut(&key) {
-                entry.order = self.next;
-                self.order.insert(self.next, key);
+            let order = self.next;
+            if let Some(entry) = self.entry_mut(key) {
+                entry.order = order;
+                self.order.insert(order, key);
                 self.next += 1;
             }
         }
     }
 
     fn remove(&mut self, shard: ShardId, key: Key) -> Option<Arc<Member>> {
-        if self.entries.get(&key)?.shard != shard {
+        if self.entries.get(&key.0)?.get(&key.1)?.shard != shard {
             return None;
         }
-        let entry = self.entries.remove(&key)?;
+        let entry = self.remove_entry(key)?;
         self.order.remove(&entry.order);
         Some(entry.member)
+    }
+
+    fn entry_mut(&mut self, key: Key) -> Option<&mut Entry> {
+        self.entries.get_mut(&key.0)?.get_mut(&key.1)
+    }
+
+    fn remove_entry(&mut self, (guild, user): Key) -> Option<Entry> {
+        let members = self.entries.get_mut(&guild)?;
+        let entry = members.remove(&user)?;
+        if members.is_empty() {
+            self.entries.remove(&guild);
+        }
+        Some(entry)
     }
 
     fn reset(&mut self, shard: ShardId) {
@@ -252,22 +378,40 @@ impl MemberCache {
     }
 
     fn clear_guild(&mut self, shard: ShardId, guild: Id<GuildMarker>) {
-        self.clear_matching(|key, entry| key.0 == guild && entry.shard == shard);
+        if let Some(members) = self.entries.get_mut(&guild) {
+            members.retain(|_, entry| {
+                if entry.shard == shard {
+                    self.order.remove(&entry.order);
+                    false
+                } else {
+                    true
+                }
+            });
+            if members.is_empty() {
+                self.entries.remove(&guild);
+            }
+        }
     }
 
     fn clear_matching(&mut self, matches: impl Fn(&Key, &Entry) -> bool) {
-        self.entries.retain(|key, entry| {
-            let keep = !matches(key, entry);
-            if !keep {
-                self.order.remove(&entry.order);
-            }
-            keep
+        self.entries.retain(|guild, members| {
+            members.retain(|user, entry| {
+                let keep = !matches(&(*guild, *user), entry);
+                if !keep {
+                    self.order.remove(&entry.order);
+                }
+                keep
+            });
+            !members.is_empty()
         });
     }
 
     fn remove_role(&mut self, shard: ShardId, guild: Id<GuildMarker>, role: Id<RoleMarker>) {
-        for ((entry_guild, _), entry) in &mut self.entries {
-            if *entry_guild == guild && entry.shard == shard && entry.member.roles.contains(&role) {
+        let Some(members) = self.entries.get_mut(&guild) else {
+            return;
+        };
+        for entry in members.values_mut() {
+            if entry.shard == shard && entry.member.roles.contains(&role) {
                 Arc::make_mut(&mut entry.member)
                     .roles
                     .retain(|id| *id != role);
@@ -282,7 +426,7 @@ impl MemberCache {
         fields: MemberUpdateFields,
         notify: bool,
     ) -> Option<CachedMemberUpdate> {
-        let entry = self.entries.get_mut(&(event.guild_id, event.user.id))?;
+        let entry = self.entry_mut((event.guild_id, event.user.id))?;
         if entry.shard != shard {
             return None;
         }

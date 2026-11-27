@@ -190,6 +190,32 @@ fn bot_with_members(token: &str) -> Result<Bot> {
 
 初期状態や加入通知で受信したメンバーを保存します。更新時に Discord が省略した項目は現在の値を保ちます。保存前や上限による削除後の通知も取りたい場合は、`Events::on_gateway` で `MemberUpdate` や `MemberRemove` を登録します。キャッシュ保存のために全メンバーを API から取得する処理は行いません。権限チェックは従来どおり、実行時の権限情報を使います。
 
+### 保存済みのメンバーを参照する
+
+通知を受ける代わりに現在の保存内容を読みたいときは、`with_member_cache` が返すハンドルを使います。コマンドに共有する場合は、ハンドルを `clone()` して渡せます。
+
+```rust
+use disnana_akari::{Bot, MemberCacheHandle, Result, model::gateway::Intents};
+use disnana_akari::model::id::{Id, marker::{GuildMarker, UserMarker}};
+
+fn enable_cache(token: &str) -> Result<(Bot, MemberCacheHandle)> {
+    Ok(Bot::new(token)?
+        .add_intents(Intents::GUILDS | Intents::GUILD_MEMBERS)
+        .with_member_cache(1_000))
+}
+
+fn display_name(
+    cache: &MemberCacheHandle,
+    guild: Id<GuildMarker>,
+    user: Id<UserMarker>,
+) -> Option<String> {
+    let member = cache.get(guild, user)?;
+    Some(member.nick.clone().unwrap_or_else(|| member.user.name.clone()))
+}
+```
+
+`guild_members(guild)` は、そのサーバーで現在参照できるスナップショットを返します。シャードが切断された場合は、そのシャードの値を隠し、再送が完了した時点で参照を再開します。取得済みのスナップショットは保持できます。権限確認ではコマンドコンテキストの `require_permissions` を使います。
+
 ### 管理・予定・有料機能の通知
 
 下表の型は `model::gateway::payload::incoming` から読み込み、`events.on_gateway` で登録します。

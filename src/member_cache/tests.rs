@@ -26,13 +26,13 @@ fn requires_capacity_and_both_explicit_intents_only_for_cached_handlers() {
     let mut events = Events::new();
     events.on_gateway(async |_: &MemberUpdate| -> Result<()> { Ok(()) });
     assert!(
-        MemberCacheRuntime::prepare(10, &events, Intents::empty())
+        MemberCacheRuntime::prepare(10, &events, Intents::empty(), None)
             .unwrap()
             .is_none()
     );
     let events = subscribed();
     assert!(matches!(
-        MemberCacheRuntime::prepare(0, &events, INTENTS),
+        MemberCacheRuntime::prepare(0, &events, INTENTS, None),
         Err(Error::MemberCacheRequired)
     ));
     for (configured, missing) in [
@@ -40,10 +40,10 @@ fn requires_capacity_and_both_explicit_intents_only_for_cached_handlers() {
         (Intents::GUILD_MEMBERS, Intents::GUILDS),
     ] {
         assert!(
-            matches!(MemberCacheRuntime::prepare(2, &events, configured), Err(Error::MissingEventIntents { any_of }) if any_of == missing)
+            matches!(MemberCacheRuntime::prepare(2, &events, configured, None), Err(Error::MissingEventIntents { any_of }) if any_of == missing)
         );
     }
-    let runtime = MemberCacheRuntime::prepare(2, &events, INTENTS)
+    let runtime = MemberCacheRuntime::prepare(2, &events, INTENTS, None)
         .unwrap()
         .unwrap();
     assert!(runtime.event_types().contains(
@@ -52,6 +52,193 @@ fn requires_capacity_and_both_explicit_intents_only_for_cached_handlers() {
             | EventTypeFlags::MEMBER_REMOVE
     ));
     assert!(!runtime.event_types().contains(EventTypeFlags::MEMBER_CHUNK));
+}
+
+#[test]
+fn shared_lookup_works_without_event_listeners_and_hides_replayed_changes_until_resume() {
+    let handle = MemberCacheHandle::new();
+    let events = Events::new();
+    let guild = Id::new(2);
+    let user_id = Id::new(6);
+    let other_guild = Id::new(4_194_304);
+    assert!(handle.get(guild, user_id).is_none());
+    assert!(matches!(
+        MemberCacheRuntime::prepare(0, &events, INTENTS, Some(handle.clone())),
+        Err(Error::MemberCacheRequired)
+    ));
+    assert!(
+        matches!(MemberCacheRuntime::prepare(2, &events, Intents::GUILDS, Some(handle.clone())), Err(Error::MissingEventIntents { any_of }) if any_of == Intents::GUILD_MEMBERS)
+    );
+    let runtime = MemberCacheRuntime::prepare(2, &events, INTENTS, Some(handle.clone()))
+        .unwrap()
+        .unwrap();
+    let first = runtime.shard(ShardId::new(0, 2));
+    let second = runtime.shard(ShardId::new(1, 2));
+    add(first, "2", "6");
+    add(second, "4194304", "6");
+
+    let reader = handle.clone();
+    let before = std::thread::spawn(move || reader.get(guild, user_id).unwrap())
+        .join()
+        .unwrap();
+    assert_eq!(before.nick.as_deref(), Some("before"));
+    assert_eq!(before.roles, [Id::new(10)]);
+    assert!(Arc::ptr_eq(&before, &handle.guild_members(guild)[0]));
+
+    runtime.suspend_shard(ShardId::new(0, 2));
+    assert!(handle.get(guild, user_id).is_none());
+    assert!(handle.guild_members(guild).is_empty());
+    assert!(handle.get(other_guild, user_id).is_some());
+    assert!(
+        update(
+            first,
+            json!({"guild_id":"2", "user":user("6"), "roles": [], "nick":"replayed"})
+        )
+        .is_none()
+    );
+    assert!(handle.get(guild, user_id).is_none());
+    first.observe(&Event::Resumed);
+    let after = handle.get(guild, user_id).unwrap();
+    assert_eq!(after.nick.as_deref(), Some("replayed"));
+    assert!(after.roles.is_empty());
+    assert_eq!(before.nick.as_deref(), Some("before"));
+
+    observe(first, "GUILD_DELETE", json!({"id":"2", "unavailable":true}));
+    assert!(handle.get(guild, user_id).is_none());
+    assert!(handle.get(other_guild, user_id).is_some());
+    drop(runtime);
+    assert!(handle.get(other_guild, user_id).is_none());
+}
+
+#[test]
+fn shared_snapshot_is_bounded_and_the_replacement_session_does_not_publish_old_members() {
+    let handle = MemberCacheHandle::new();
+    let runtime = MemberCacheRuntime::prepare(2, &Events::new(), INTENTS, Some(handle.clone()))
+        .unwrap()
+        .unwrap();
+    let guild = Id::new(2);
+    let route = runtime.shard(ShardId::ONE);
+    for id in ["6", "7", "8"] {
+        add(route, "2", id);
+    }
+    assert!(handle.get(guild, Id::new(6)).is_none());
+    assert_eq!(handle.guild_members(guild).len(), 2);
+
+    runtime.suspend_shard(ShardId::ONE);
+    let IncomingEvent::Standard(ready) = raw(
+        "READY",
+        json!({
+            "application": {"id":"1", "flags":0}, "guilds": [],
+            "resume_gateway_url":"wss://gateway.discord.gg", "session_id":"replacement", "v":10,
+            "user":{"id":"1","username":"bot","discriminator":"0","bot":true,"mfa_enabled":false}
+        }),
+        EventTypeFlags::READY,
+        false,
+    ) else {
+        panic!("expected ready");
+    };
+    route.observe(&ready);
+    assert!(handle.guild_members(guild).is_empty());
+    add(route, "2", "9");
+    assert!(handle.get(guild, Id::new(9)).is_some());
+    runtime.suspend_all();
+    assert!(handle.guild_members(guild).is_empty());
+}
+
+#[tokio::test]
+async fn public_handle_clears_before_shutdown_drains_event_handlers() {
+    use futures_util::{SinkExt, StreamExt};
+    use std::time::Duration;
+    use tokio::{net::TcpListener, sync::Notify, time::timeout};
+    use tokio_websockets::{Message as Frame, ServerBuilder};
+    use twilight_model::gateway::payload::incoming::MemberAdd;
+
+    let listen = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listen.local_addr().unwrap();
+    let (enter, mut entered) = mpsc::channel(1);
+    let wait_for_release = Arc::new(Notify::new());
+    let release = Arc::clone(&wait_for_release);
+    let mut events = Events::new();
+    events.on_gateway(async move |_: &MemberAdd| -> Result<()> {
+        enter.send(()).await.unwrap();
+        wait_for_release.notified().await;
+        Ok(())
+    });
+    let (bot, shutdown) = crate::Bot::new("local-member-cache-fixture")
+        .unwrap()
+        .with_events(events)
+        .add_intents(INTENTS)
+        .with_shutdown();
+    let (mut bot, handle) = bot.with_member_cache(2);
+    bot.gateway_test_port = Some(address.port());
+    let guild = Id::new(2);
+    let user_id = Id::new(6);
+    assert!(handle.get(guild, user_id).is_none());
+
+    let mock = async {
+        let (socket, _) = listen.accept().await.unwrap();
+        let (_, mut websocket) = ServerBuilder::new().accept(socket).await.unwrap();
+        websocket
+            .send(Frame::text(r#"{"op":10,"d":{"heartbeat_interval":60000}}"#))
+            .await
+            .unwrap();
+        loop {
+            let frame = websocket.next().await.unwrap().unwrap();
+            let data: Value = serde_json::from_str(frame.as_text().unwrap()).unwrap();
+            if data["op"] == 2 {
+                break;
+            }
+            assert_eq!(data["op"], 1);
+            websocket
+                .send(Frame::text(r#"{"op":11,"d":null}"#))
+                .await
+                .unwrap();
+        }
+        let ready = json!({"op":0,"s":1,"t":"READY","d":{
+            "application": {"id":"1","flags":0}, "guilds":[], "resume_gateway_url":format!("ws://{address}"),
+            "session_id":"cache-fixture", "v":10,
+            "user":{"id":"1","username":"bot","discriminator":"0","bot":true,"mfa_enabled":false}
+        }});
+        websocket
+            .send(Frame::text(ready.to_string()))
+            .await
+            .unwrap();
+        let joined = json!({"op":0,"s":2,"t":"GUILD_MEMBER_ADD","d":{
+            "guild_id":"2","user": user("6"),"deaf":false,"mute":false,"roles":[],"flags":0
+        }});
+        websocket
+            .send(Frame::text(joined.to_string()))
+            .await
+            .unwrap();
+        entered.recv().await.unwrap();
+        assert!(handle.get(guild, user_id).is_some());
+        shutdown.request();
+        loop {
+            let frame = websocket.next().await.unwrap().unwrap();
+            if let Some((code, _)) = frame.as_close() {
+                assert_eq!(u16::from(code), 1000);
+                websocket.flush().await.unwrap();
+                break;
+            }
+            let data: Value = serde_json::from_str(frame.as_text().unwrap()).unwrap();
+            assert_eq!(data["op"], 1);
+            websocket
+                .send(Frame::text(r#"{"op":11,"d":null}"#))
+                .await
+                .unwrap();
+        }
+        assert!(handle.get(guild, user_id).is_none());
+        drop(websocket);
+        release.notify_one();
+    };
+
+    let (result, ()) = timeout(Duration::from_secs(10), async {
+        tokio::join!(bot.start(), mock)
+    })
+    .await
+    .expect("loopback Gateway fixture completes");
+    result.unwrap();
+    assert!(handle.guild_members(guild).is_empty());
 }
 
 fn raw(
@@ -119,7 +306,7 @@ fn update(route: MemberCacheRoute<'_>, payload: Value) -> Option<CachedMemberUpd
 
 #[test]
 fn partial_updates_keep_omitted_fields_and_clear_explicit_null_or_false() {
-    let runtime = MemberCacheRuntime::prepare(2, &subscribed(), INTENTS)
+    let runtime = MemberCacheRuntime::prepare(2, &subscribed(), INTENTS, None)
         .unwrap()
         .unwrap();
     let route = runtime.shard(ShardId::ONE);
@@ -162,7 +349,7 @@ fn partial_updates_keep_omitted_fields_and_clear_explicit_null_or_false() {
 
 #[test]
 fn guild_create_seeds_no_more_than_the_configured_capacity() {
-    let runtime = MemberCacheRuntime::prepare(1, &subscribed(), INTENTS)
+    let runtime = MemberCacheRuntime::prepare(1, &subscribed(), INTENTS, None)
         .unwrap()
         .unwrap();
     let route = runtime.shard(ShardId::ONE);
@@ -181,7 +368,7 @@ fn guild_create_seeds_no_more_than_the_configured_capacity() {
 
 #[test]
 fn bounds_members_and_discards_only_matching_guild_and_shard() {
-    let runtime = MemberCacheRuntime::prepare(2, &subscribed(), INTENTS)
+    let runtime = MemberCacheRuntime::prepare(2, &subscribed(), INTENTS, None)
         .unwrap()
         .unwrap();
     let first = runtime.shard(ShardId::new(0, 2));
@@ -247,7 +434,7 @@ fn bounds_members_and_discards_only_matching_guild_and_shard() {
 
 #[test]
 fn replacement_ready_and_missing_updates_reset_only_the_affected_shard() {
-    let runtime = MemberCacheRuntime::prepare(3, &subscribed(), INTENTS)
+    let runtime = MemberCacheRuntime::prepare(3, &subscribed(), INTENTS, None)
         .unwrap()
         .unwrap();
     let first = runtime.shard(ShardId::new(0, 2));
@@ -311,7 +498,7 @@ async fn dispatches_raw_then_cached_in_fifo_and_keeps_raw_cache_misses() {
             .push(("cached", update.after.user.id.get()));
         Ok(())
     });
-    let runtime = MemberCacheRuntime::prepare(1, &events, INTENTS)
+    let runtime = MemberCacheRuntime::prepare(1, &events, INTENTS, None)
         .unwrap()
         .unwrap();
     let route = runtime.shard(ShardId::ONE);

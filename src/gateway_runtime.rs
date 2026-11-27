@@ -27,17 +27,22 @@ pub(crate) struct GatewaySet {
 }
 
 impl GatewaySet {
-    pub(crate) fn observe(&mut self, status: &GatewayStatusHandle) {
-        status.initialize(self.sessions.iter().map(GatewaySession::id));
-        for session in &mut self.sessions {
-            session.status = Some(status.clone());
+    pub(crate) fn install_handles(
+        &mut self,
+        status: Option<&GatewayStatusHandle>,
+        voice: Option<&VoiceGateway>,
+    ) {
+        if let Some(status) = status {
+            status.initialize(self.sessions.iter().map(GatewaySession::id));
+            for session in &mut self.sessions {
+                session.status = Some(status.clone());
+            }
         }
-    }
-
-    pub(crate) fn install_voice(&mut self, handle: &VoiceGateway) {
-        let receivers = handle.initialize(self.sessions.len());
-        for (session, ingress) in self.sessions.iter_mut().zip(receivers) {
-            session.voice = Some(ingress);
+        if let Some(voice) = voice {
+            let receivers = voice.initialize(self.sessions.len());
+            for (session, ingress) in self.sessions.iter_mut().zip(receivers) {
+                session.voice = Some(ingress);
+            }
         }
     }
 

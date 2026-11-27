@@ -83,7 +83,7 @@ pub use interactions::{
     MentionableSelectContext, ModalContext, RoleSelectContext, SelectContext, UserSelectContext,
 };
 pub use limits::Limits;
-pub use member_cache::{CachedMemberRemove, CachedMemberUpdate};
+pub use member_cache::{CachedMemberRemove, CachedMemberUpdate, MemberCacheHandle};
 pub use message_cache::CachedMessageEdit;
 pub use message_events::MessageUpdate;
 pub use module::{Module, Registry};
@@ -126,6 +126,7 @@ pub struct Bot {
     permission_cache: Option<Duration>,
     message_cache_capacity: usize,
     member_cache_capacity: usize,
+    member_cache_handle: Option<MemberCacheHandle>,
     presence: Option<PresenceHandle>,
     shutdown: Option<ShutdownHandle>,
     recommended_shards: bool,
@@ -184,6 +185,7 @@ impl Bot {
             permission_cache: None,
             message_cache_capacity: 0,
             member_cache_capacity: 0,
+            member_cache_handle: None,
             presence: None,
             shutdown: None,
             recommended_shards: false,
@@ -351,6 +353,18 @@ impl Bot {
         self
     }
 
+    /// 保存済みのメンバーを読み取れるハンドルを取得します。
+    ///
+    /// `GUILDS` と `GUILD_MEMBERS` Intent、および正の容量が必要です。
+    /// メンバーの通知を登録しなくても保存し、Discord から届いた情報だけを参照できます。
+    #[must_use]
+    pub fn with_member_cache(mut self, capacity: usize) -> (Self, MemberCacheHandle) {
+        let handle = MemberCacheHandle::new();
+        self.member_cache_capacity = capacity;
+        self.member_cache_handle = Some(handle.clone());
+        (self, handle)
+    }
+
     /// ボイスチャンネルの参加や退出を要求できるハンドルを取得します。
     ///
     /// `GUILD_VOICE_STATES` Intent を明示的に追加してください。
@@ -453,6 +467,7 @@ impl Bot {
             permission_cache,
             message_cache_capacity,
             member_cache_capacity,
+            member_cache_handle,
             presence,
             shutdown,
             recommended_shards,
@@ -481,7 +496,12 @@ impl Bot {
         check_intents(intents, needs_messages)?;
         let handler_events = handler_event_types(&events, intents)?;
         let message_cache = MessageCacheRuntime::prepare(message_cache_capacity, &events, intents)?;
-        let member_cache = MemberCacheRuntime::prepare(member_cache_capacity, &events, intents)?;
+        let member_cache = MemberCacheRuntime::prepare(
+            member_cache_capacity,
+            &events,
+            intents,
+            member_cache_handle,
+        )?;
         if voice_gateway.is_some() && !intents.contains(Intents::GUILD_VOICE_STATES) {
             return Err(Error::MissingEventIntents {
                 any_of: Intents::GUILD_VOICE_STATES,
@@ -532,12 +552,7 @@ impl Bot {
             None => config,
         };
         let mut gateways = plan.prepare(config, presence.as_ref())?;
-        if let Some(status) = &gateway_status {
-            gateways.observe(status);
-        }
-        if let Some(voice) = &voice_gateway {
-            gateways.install_voice(voice);
-        }
+        gateways.install_handles(gateway_status.as_ref(), voice_gateway.as_ref());
         let (event_tx, event_queue) = mpsc::channel(limits.queue_capacity);
         let (text_ingress, handle_text) =
             commands::text_workers(text_commands, limits, &http, &permissions, &hooks);
@@ -586,7 +601,7 @@ impl Bot {
                 capture_modal_radios: events.interaction_handlers.has_modals(),
                 capture_member_fields: member_cache.is_some(),
             },
-            |shard| permissions.clear_shard(shard),
+            |shard| gateway_lost(shard, &permissions, member_cache.as_ref()),
             |gateway, event| {
                 let shard = gateway.id();
                 let cache = message_cache.as_ref().map(|cache| cache.shard(shard));
@@ -681,7 +696,9 @@ impl Bot {
             tokio::join!(handle_events, handle_text, handle_interactions, handle_busy);
         };
         tokio::pin!(workers);
-        if let Err(error) = shutdown::drive(receive, workers.as_mut(), &mut shutdown).await {
+        let stopped = shutdown::drive(receive, workers.as_mut(), &mut shutdown).await;
+        suspend_member_reads(member_cache.as_ref());
+        if let Err(error) = stopped {
             if recommended_shards {
                 shutdown::finish(gateways.close(), std::future::ready(())).await;
             }
@@ -734,6 +751,23 @@ fn gateway_event_types(
         events |= EventTypeFlags::INTERACTION_CREATE;
     }
     events
+}
+
+fn gateway_lost(
+    shard: ShardId,
+    permissions: &PermissionResolver,
+    members: Option<&MemberCacheRuntime>,
+) {
+    if let Some(members) = members {
+        members.suspend_shard(shard);
+    }
+    permissions.clear_shard(shard);
+}
+
+fn suspend_member_reads(members: Option<&MemberCacheRuntime>) {
+    if let Some(members) = members {
+        members.suspend_all();
+    }
 }
 
 fn permission_cache_events(enabled: bool, intents: Intents) -> EventTypeFlags {
