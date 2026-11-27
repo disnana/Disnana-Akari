@@ -51,6 +51,7 @@ fn component_initial<'a>(
         interaction: event,
         timing,
         info: &hooks.info,
+        permissions: &hooks.permissions,
     }
 }
 

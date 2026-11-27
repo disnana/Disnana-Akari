@@ -179,6 +179,7 @@ impl InteractionHandlers {
             interaction,
             timing,
             info: &hooks.info,
+            permissions: &hooks.permissions,
         };
         match ui_input(interaction) {
             Some(UiInput::Button(id)) => {

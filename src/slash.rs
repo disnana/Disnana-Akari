@@ -1421,6 +1421,7 @@ impl ActiveSlashCommands {
             interaction,
             timing,
             info: &hooks.info,
+            permissions: &hooks.permissions,
         };
         if interaction.kind == InteractionType::ApplicationCommandAutocomplete {
             self.dispatch_autocomplete(initial, data, path, hooks).await;
@@ -1541,6 +1542,17 @@ impl<'a> SlashContext<'a> {
     /// Discord が通知したサーバーのロケールを返します。
     pub fn guild_locale(&self) -> Option<&str> {
         self.initial.interaction.guild_locale.as_deref()
+    }
+
+    /// 権限の確認や、Bot とほかのメンバーの権限の取得に使う [`Access`](crate::Access) を返します。
+    ///
+    /// 実行者と Bot の権限は Discord が送るので、通信は要りません。
+    pub fn access(&self) -> crate::Access<'a> {
+        crate::Access::for_interaction(
+            self.initial.http,
+            self.initial.permissions,
+            self.initial.interaction,
+        )
     }
 
     /// 呼び出した人の、このチャンネルでの権限を返します。DM などで届かないときは `None` です。
@@ -1975,6 +1987,7 @@ pub(crate) struct InitialResponder<'a> {
     pub(crate) interaction: &'a Interaction,
     pub(crate) timing: Timing,
     pub(crate) info: &'a InfoReporter,
+    pub(crate) permissions: &'a crate::permissions::PermissionResolver,
 }
 
 impl InitialResponder<'_> {
@@ -2756,6 +2769,7 @@ pub(crate) mod tests {
             interaction: &interaction,
             timing,
             info: &hooks.info,
+            permissions: &hooks.permissions,
         };
         let invalid = "あ".repeat(2001);
         let rejected = tokio::time::timeout(
@@ -3110,6 +3124,7 @@ pub(crate) mod tests {
                 interaction: &interaction,
                 timing: crate::timing::Pending::new((), None).begin().1,
                 info: &info,
+                permissions: &crate::permissions::PermissionResolver::default(),
             },
             data,
             response_finished: false,

@@ -85,6 +85,7 @@ async fn button_context_debug_omits_credentials() {
         interaction: &event,
         timing,
         info: &info,
+        permissions: &crate::permissions::PermissionResolver::default(),
     };
     let ctx = ButtonContext::new(initial, "akari:test", None);
     let debug = format!("{ctx:?}");
@@ -131,6 +132,7 @@ async fn initial_response_reports_the_failed_attempt_and_successful_retry() -> R
         interaction: &event,
         timing,
         info: &info,
+        permissions: &crate::permissions::PermissionResolver::default(),
     };
     let mut ctx = ButtonContext::new(initial, "akari:test", None);
 

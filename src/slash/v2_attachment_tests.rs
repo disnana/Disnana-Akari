@@ -101,6 +101,7 @@ async fn channel_and_private_initial_v2_reply_upload_files() -> Result<()> {
             interaction: &interaction,
             timing,
             info: &hooks.info,
+            permissions: &hooks.permissions,
         },
         data,
         response_state: &mut state,
@@ -150,6 +151,7 @@ async fn deferred_v2_reply_uploads_file_when_completing_private_original() -> Re
             interaction: &interaction,
             timing,
             info: &hooks.info,
+            permissions: &hooks.permissions,
         },
         data,
         response_state: &mut state,
@@ -320,6 +322,7 @@ async fn invalid_v2_upload_limits_are_rejected_before_http() -> Result<()> {
         interaction: &interaction,
         timing,
         info: &hooks.info,
+        permissions: &hooks.permissions,
     };
     let tiny = InitialResponder {
         interaction: &tiny_limit,
@@ -461,6 +464,7 @@ async fn app_limit_rejects_before_lookup_or_send() -> Result<()> {
         interaction: &interaction,
         timing,
         info: &hooks.info,
+        permissions: &hooks.permissions,
     };
     let message = upload().attachment_limits(AttachmentLimits::default().max_file_bytes(Some(2)));
     let check = async {
