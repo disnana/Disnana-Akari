@@ -10,6 +10,8 @@ mod hybrid;
 mod interactions;
 mod limits;
 mod module;
+#[cfg(test)]
+mod permission_cache_tests;
 mod permissions;
 mod presence;
 mod slash;
@@ -22,6 +24,7 @@ use std::{env, fmt, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use twilight_gateway::{
     ConfigBuilder, Event, EventTypeFlags, Intents, Shard, ShardId, ShardState, StreamExt as _,
+    error::ReceiveMessageError,
 };
 use twilight_http::Client;
 use twilight_model::{
@@ -218,7 +221,8 @@ impl Bot {
     /// テキストコマンドの権限確認（[`Context::require_permissions`] など）は、メッセージに権限が
     /// 付いていないため、確認のたびに Discord へ問い合わせます。既定では保存しないので、
     /// 呼び出しが多い Bot は、期間（数十秒〜数分）を指定すると問い合わせを減らせます。
-    /// 保存中にロールやチャンネルの権限を変えると、期間が過ぎるまで反映されません。
+    /// `Intents::GUILDS` を指定すると、ロールやチャンネルの変更イベントを受けた時点で該当する保存を破棄します。
+    /// 次の権限確認で Discord から取り直します。イベントを受け取れない場合には保存期間が適用されます。
     /// スラッシュコマンドは Discord が権限を送るため、この設定の影響を受けません。
     pub fn cache_permissions(mut self, ttl: Duration) -> Self {
         self.permission_cache = Some(ttl);
@@ -337,24 +341,16 @@ impl Bot {
 
         let http = Client::new(token.clone());
         let permissions = PermissionResolver::new(permission_cache);
-        // 再開は、ログ（`tracing`）にも出すので、フックの有無にかかわらず受け取る。
-        let mut event_types = EventTypeFlags::READY | EventTypeFlags::RESUMED;
+        let event_types = gateway_event_types(
+            needs_messages,
+            slash.is_some() || events.interaction_handlers.has_handlers(),
+            permission_cache_events(needs_messages && permissions.cache_enabled(), intents),
+        );
 
         let slash = match slash {
-            Some(commands) => {
-                event_types |= EventTypeFlags::INTERACTION_CREATE;
-                Some(commands.sync(&http, &hooks.info).await?)
-            }
+            Some(commands) => Some(commands.sync(&http, &hooks.info).await?),
             None => None,
         };
-
-        if events.interaction_handlers.has_handlers() {
-            event_types |= EventTypeFlags::INTERACTION_CREATE;
-        }
-
-        if needs_messages {
-            event_types |= EventTypeFlags::MESSAGE_CREATE;
-        }
 
         let mut presence_updates = presence.as_ref().map(PresenceHandle::subscribe);
         let mut config = ConfigBuilder::new(token, intents);
@@ -480,22 +476,15 @@ impl Bot {
 
         let receive = async {
             let mut own_id = None;
-            loop {
-                let event = if let Some(updates) = &mut presence_updates
-                    && shard.state() == ShardState::Active
-                {
-                    tokio::select! {
-                        event = shard.next_event(event_types) => event,
-                        update = updates.next() => {
-                            shard.command(&update);
-                            continue;
-                        }
-                    }
-                } else {
-                    shard.next_event(event_types).await
-                };
-                let Some(event) = event else { break };
+            while let Some(event) =
+                next_gateway_event(&mut shard, &mut presence_updates, event_types).await
+            {
                 let gateway_rtt = shard.latency().recent().first().copied();
+                if permissions.cache_enabled()
+                    && let Ok(event) = &event
+                {
+                    update_permission_cache(&permissions, event);
+                }
                 match event {
                     Ok(Event::Ready(ready)) => {
                         if own_id.is_some()
@@ -595,6 +584,76 @@ impl Bot {
         }
 
         Err(Error::GatewayEnded)
+    }
+}
+
+async fn next_gateway_event(
+    shard: &mut Shard,
+    presence: &mut Option<presence::PresenceUpdates>,
+    event_types: EventTypeFlags,
+) -> Option<Result<Event, ReceiveMessageError>> {
+    loop {
+        let Some(updates) = presence.as_mut() else {
+            return shard.next_event(event_types).await;
+        };
+        if shard.state() != ShardState::Active {
+            return shard.next_event(event_types).await;
+        }
+        tokio::select! {
+            event = shard.next_event(event_types) => return event,
+            update = updates.next() => shard.command(&update),
+        }
+    }
+}
+
+fn gateway_event_types(
+    needs_messages: bool,
+    needs_interactions: bool,
+    cache_events: EventTypeFlags,
+) -> EventTypeFlags {
+    // 再開は、ログ（`tracing`）にも出すので、フックの有無にかかわらず受け取る。
+    let mut events = EventTypeFlags::READY | EventTypeFlags::RESUMED | cache_events;
+    if needs_messages {
+        events |= EventTypeFlags::MESSAGE_CREATE;
+    }
+    if needs_interactions {
+        events |= EventTypeFlags::INTERACTION_CREATE;
+    }
+    events
+}
+
+fn permission_cache_events(enabled: bool, intents: Intents) -> EventTypeFlags {
+    if !enabled {
+        return EventTypeFlags::empty();
+    }
+    let mut events = EventTypeFlags::RESUMED;
+    if intents.contains(Intents::GUILDS) {
+        events |= EventTypeFlags::GUILD_UPDATE
+            | EventTypeFlags::GUILD_DELETE
+            | EventTypeFlags::ROLE_CREATE
+            | EventTypeFlags::ROLE_UPDATE
+            | EventTypeFlags::ROLE_DELETE
+            | EventTypeFlags::CHANNEL_UPDATE
+            | EventTypeFlags::CHANNEL_DELETE
+            | EventTypeFlags::THREAD_UPDATE
+            | EventTypeFlags::THREAD_DELETE;
+    }
+    events
+}
+
+fn update_permission_cache(permissions: &PermissionResolver, event: &Event) {
+    match event {
+        Event::Ready(_) | Event::Resumed | Event::GatewayClose(_) => permissions.clear_cache(),
+        Event::GuildUpdate(guild) => permissions.invalidate_guild(guild.0.id),
+        Event::GuildDelete(guild) => permissions.remove_guild(guild.id),
+        Event::RoleCreate(role) => permissions.invalidate_guild(role.guild_id),
+        Event::RoleUpdate(role) => permissions.invalidate_guild(role.guild_id),
+        Event::RoleDelete(role) => permissions.invalidate_guild(role.guild_id),
+        Event::ChannelUpdate(channel) => permissions.invalidate_channel(channel.0.id),
+        Event::ChannelDelete(channel) => permissions.invalidate_channel(channel.0.id),
+        Event::ThreadUpdate(thread) => permissions.invalidate_channel(thread.0.id),
+        Event::ThreadDelete(thread) => permissions.invalidate_channel(thread.id),
+        _ => {}
     }
 }
 

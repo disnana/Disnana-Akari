@@ -18,7 +18,9 @@ on:
       - 'site/**'
       - 'src/**'
       - 'docs/**'
+      - 'examples/**'
       - 'Cargo.toml'
+      - 'Cargo.lock'
       - 'CHANGELOG.md'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
