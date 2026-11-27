@@ -817,9 +817,14 @@ impl Modal {
         self
     }
 
-    pub(crate) fn validate(&self) -> Result<()> {
+    /// フォームの構成を Discord に送る前に検証します。
+    ///
+    /// # エラー
+    ///
+    /// タイトル、入力項目、識別子などが Discord の制約に合わない場合は失敗します。
+    pub fn validate(&self) -> Result<()> {
         validate_custom_id(&self.custom_id)?;
-        if self.title.trim().is_empty() || self.title.chars().count() > 45 {
+        if self.title.chars().nth(45).is_some() || self.title.trim().is_empty() {
             return Err(Error::InvalidUi(
                 "モーダルのタイトルは空白以外を含む 1〜45 文字にしてください。",
             ));
@@ -1038,15 +1043,20 @@ impl UiMessage {
         self
     }
 
-    pub(crate) fn validate(&self) -> Result<()> {
+    /// メッセージの本文、Embed、操作部品を Discord に送る前に検証します。
+    ///
+    /// # エラー
+    ///
+    /// メッセージが空か、文字数や配置などが Discord の制約に合わない場合は失敗します。
+    pub fn validate(&self) -> Result<()> {
         let content = self.content.as_deref().unwrap_or_default();
+        crate::validation::message_content(content)?;
         if content.trim().is_empty() && self.embeds.is_empty() && self.components.is_empty() {
             return Err(Error::InvalidUi(
                 "本文、埋め込み、ボタン、選択メニューのいずれかを追加してください。",
             ));
         }
-        message::content(content)?;
-        message::embeds(&self.embeds)?;
+        crate::validation::embeds(&self.embeds)?;
         message::components(&self.components, false)?;
 
         for embed in &self.embeds {

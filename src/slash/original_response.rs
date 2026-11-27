@@ -107,6 +107,7 @@ impl ResponseState {
     ) -> Result<()> {
         self.require_original_format(true)?;
         message.validate()?;
+        message.validate_attachment_sizes(initial.interaction.attachment_size_limit)?;
         let previous = if !message.attachments.is_empty() && *self == Self::RepliedV2 {
             Some(self.original_response(initial).await?)
         } else {

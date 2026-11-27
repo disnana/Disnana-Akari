@@ -173,7 +173,8 @@ impl ComponentsV2 {
 
     /// メッセージと同じリクエストでアップロードするファイルを追加します。
     ///
-    /// 一つのメッセージ内でファイル名と添付 ID が重複しないようにしてください。
+    /// 一つのメッセージに添付できるファイルは最大 10 個です。
+    /// ファイル名と添付 ID が重複しないようにしてください。
     /// メッセージを更新する場合は、元の添付ファイルを残して追加します。
     /// 表示位置は [`Self::file`] や [`Self::media_gallery`] で指定できます。
     pub fn attachment(mut self, attachment: Attachment) -> Self {
@@ -271,7 +272,13 @@ impl ComponentsV2 {
         self
     }
 
-    pub(crate) fn validate(&self) -> Result<()> {
+    /// 部品の配置、テキスト、追加する添付ファイルの上限やメタデータを送信前に検証します。
+    ///
+    /// 編集前のメッセージや操作が持つ情報が必要な検証は、実際に送信・編集するときに行います。
+    ///
+    /// # エラー
+    /// 空のメッセージ、無効な部品や添付、Discord の上限を超える内容で失敗します。
+    pub fn validate(&self) -> Result<()> {
         if self.components.is_empty() {
             return Err(Error::InvalidUi(
                 "Components V2 には部品が一つ以上必要です。",
@@ -286,6 +293,7 @@ impl ComponentsV2 {
     }
 
     fn validate_attachments(&self) -> Result<()> {
+        crate::validation::attachment_count(0, self.attachments.len())?;
         let mut ids = HashSet::new();
         let mut names = HashSet::new();
         for attachment in &self.attachments {
@@ -307,6 +315,7 @@ impl ComponentsV2 {
         &self,
         retained: &[ReceivedAttachment],
     ) -> Result<()> {
+        crate::validation::attachment_count(retained.len(), self.attachments.len())?;
         let check = |url: &str| {
             if let Some(filename) = attachment_filename(url)
                 && !self
@@ -325,6 +334,10 @@ impl ComponentsV2 {
             check_component_file_references(component, &check)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn validate_attachment_sizes(&self, limit: u64) -> Result<()> {
+        crate::validation::attachment_sizes(&self.attachments, limit)
     }
 }
 
@@ -396,15 +409,16 @@ impl<'a> Limits<'a> {
                 check_row(row, &mut self.custom_ids)?;
             }
             Component::TextDisplay(text) => {
-                if text.content.trim().is_empty() {
-                    return Err(Error::InvalidUi(
-                        "テキスト表示には空白以外の内容が必要です。",
-                    ));
-                }
-                self.text_length += text.content.chars().count();
+                let remaining = TOTAL_TEXT_LENGTH - self.text_length;
+                self.text_length += text.content.chars().take(remaining + 1).count();
                 if self.text_length > TOTAL_TEXT_LENGTH {
                     return Err(Error::InvalidUi(
                         "テキスト表示の合計は 4000 文字以下にしてください。",
+                    ));
+                }
+                if text.content.trim().is_empty() {
+                    return Err(Error::InvalidUi(
+                        "テキスト表示には空白以外の内容が必要です。",
                     ));
                 }
             }
@@ -581,6 +595,23 @@ mod tests {
             ComponentsV2::new()
                 .section_with_thumbnail(["photo"], Media::new("attachment://absent.png"))
                 .validate_attachment_references(&[])
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn attachments_are_limited_to_ten_per_message_and_bytes_per_file() -> crate::Result<()> {
+        let message = (0..10).fold(ComponentsV2::new().text("Files"), |message, id| {
+            message.attachment(Attachment::from_bytes(format!("{id}.txt"), vec![1, 2], id))
+        });
+        message.validate()?;
+        message.validate_attachment_sizes(2)?;
+        assert!(message.validate_attachment_sizes(1).is_err());
+        assert!(
+            message
+                .attachment(Attachment::from_bytes("extra.txt".into(), vec![3], 10))
+                .validate()
                 .is_err()
         );
         Ok(())

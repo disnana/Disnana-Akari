@@ -44,7 +44,8 @@ struct CallbackData<'a> {
 }
 
 impl InitialResponder<'_> {
-    pub(super) async fn v2_reply(self, message: &ComponentsV2, ephemeral: bool) -> Result<()> {
+    pub(crate) async fn v2_reply(self, message: &ComponentsV2, ephemeral: bool) -> Result<()> {
+        message.validate_attachment_sizes(self.interaction.attachment_size_limit)?;
         message.validate_attachment_references(&[])?;
         if message.attachments.is_empty() {
             return self
@@ -63,6 +64,7 @@ impl InitialResponder<'_> {
     }
 
     pub(crate) async fn v2_update(self, message: &ComponentsV2) -> Result<()> {
+        message.validate_attachment_sizes(self.interaction.attachment_size_limit)?;
         let retained = self
             .interaction
             .message
@@ -123,6 +125,7 @@ pub(crate) async fn edit_v2_response(
     message: &ComponentsV2,
     retained: Option<&[Attachment]>,
 ) -> Result<()> {
+    message.validate_attachment_sizes(interaction.attachment_size_limit)?;
     if let Some(retained) = retained {
         message.validate_attachment_references(retained)?;
     }

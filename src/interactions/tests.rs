@@ -41,7 +41,7 @@ async fn submit(_: &mut ModalContext<'_>) -> Result<()> {
     deprecated,
     reason = "テスト用の値を組み立てるために、非推奨のフィールドを埋める。"
 )]
-fn interaction(kind: InteractionType, data: InteractionData) -> Interaction {
+pub(super) fn interaction(kind: InteractionType, data: InteractionData) -> Interaction {
     Interaction {
         app_permissions: None,
         application_id: Id::new(10),
@@ -184,7 +184,7 @@ async fn initial_response_reports_only_after_discord_accepts_it() -> Result<()> 
     Ok(())
 }
 
-fn component_payload(component_type: ComponentType, id: &str) -> InteractionData {
+pub(super) fn component_payload(component_type: ComponentType, id: &str) -> InteractionData {
     InteractionData::MessageComponent(Box::new(MessageComponentInteractionData {
         component_type,
         custom_id: id.into(),
@@ -1112,7 +1112,7 @@ fn invoker_from_reply_requires_a_matching_embedded_human_message() {
     assert_eq!(message_owner(&response), None);
 }
 
-fn user(id: u64, bot: bool) -> User {
+pub(super) fn user(id: u64, bot: bool) -> User {
     User {
         accent_color: None,
         avatar: None,
@@ -1140,7 +1140,7 @@ fn user(id: u64, bot: bool) -> User {
     deprecated,
     reason = "テスト用の値を組み立てるために、非推奨のフィールドを埋める。"
 )]
-fn message(id: u64, author: User) -> Message {
+pub(super) fn message(id: u64, author: User) -> Message {
     Message {
         activity: None,
         application: None,

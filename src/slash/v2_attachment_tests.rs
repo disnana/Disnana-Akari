@@ -81,6 +81,7 @@ async fn channel_and_private_initial_v2_reply_upload_files() -> Result<()> {
         permissions: &permissions,
     };
     let mut interaction = command_interaction(None, None, 5);
+    interaction.attachment_size_limit = 100;
     interaction.token = "token".into();
     let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
         return Err(Error::msg(
@@ -128,6 +129,7 @@ async fn channel_and_private_initial_v2_reply_upload_files() -> Result<()> {
 async fn deferred_v2_reply_uploads_file_when_completing_private_original() -> Result<()> {
     let (listener, http) = local_http().await?;
     let mut interaction = command_interaction(None, None, 5);
+    interaction.attachment_size_limit = 100;
     interaction.token = "token".into();
     let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
         return Err(Error::msg(
@@ -185,6 +187,7 @@ async fn deferred_v2_reply_uploads_file_when_completing_private_original() -> Re
 async fn component_v2_updates_keep_existing_files_for_callback_and_patch() -> Result<()> {
     let (listener, http) = local_http().await?;
     let mut interaction = command_interaction(None, None, 5);
+    interaction.attachment_size_limit = 100;
     interaction.kind = InteractionType::MessageComponent;
     interaction.token = "token".into();
     let mut source = test_command_message("")?;
@@ -252,4 +255,60 @@ async fn component_v2_updates_keep_existing_files_for_callback_and_patch() -> Re
     .await
     .map_err(Error::handler)?;
     server
+}
+
+#[tokio::test]
+async fn invalid_v2_upload_limits_are_rejected_before_http() -> Result<()> {
+    let (listener, http) = local_http().await?;
+    let mut interaction = command_interaction(None, None, 5);
+    interaction.attachment_size_limit = 100;
+    let mut source = test_command_message("")?;
+    let stub: Attachment = serde_json::from_value(json!({
+        "id": "900", "filename": "old.pdf", "size": 500, "url": "https://cdn.example/old.pdf",
+        "proxy_url": "https://cdn.example/old.pdf"
+    }))
+    .map_err(Error::handler)?;
+    for id in 900..910 {
+        let mut old = stub.clone();
+        old.id = Id::new(id);
+        old.filename = format!("{id}.pdf");
+        source.attachments.push(old);
+    }
+    interaction.message = Some(source);
+    let mut tiny_limit = command_interaction(None, None, 5);
+    tiny_limit.attachment_size_limit = 10;
+    let message = upload();
+    let hooks = Hooks::default();
+    let (_, timing) = Pending::new((), None).begin();
+    let initial = InitialResponder {
+        http: &http,
+        interaction: &interaction,
+        timing,
+        info: &hooks.info,
+    };
+    let tiny = InitialResponder {
+        interaction: &tiny_limit,
+        ..initial
+    };
+    let retained = &interaction.message.as_ref().unwrap().attachments;
+    message.validate_attachment_references(retained.get(..9).unwrap())?;
+    let check = async {
+        for result in [
+            initial.v2_update(&message).await,
+            edit_v2_response(&http, &interaction, &message, Some(retained)).await,
+            tiny.v2_reply(&message, true).await,
+            edit_v2_response(&http, &tiny_limit, &message, Some(&[])).await,
+            ResponseState::RepliedV2
+                .edit_original_v2(tiny, &message)
+                .await,
+        ] {
+            assert!(matches!(result, Err(Error::InvalidUi(_))));
+        }
+        Ok(())
+    };
+    tokio::select! {
+        biased;
+        connection = listener.accept() => panic!("invalid upload attempted HTTP: {connection:?}"),
+        result = check => result,
+    }
 }

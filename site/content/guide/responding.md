@@ -79,6 +79,12 @@ async fn report(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 応答を取り除く場合は `delete_original_response().await` を使います。フォームを開く操作は元の応答メッセージを作りません。応答がない状態や削除済みの状態では、取得・編集・削除がエラーになります。遅延応答だけを削除した場合は追加応答もできません。追加応答を送る場合は、先に遅延応答を完成させてください。[Discord の応答メッセージ API](https://docs.discord.com/developers/interactions/receiving-and-responding#get-original-interaction-response)
 
+## 送る前に制限を確認する
+
+Akari の返信メソッドは、通常の本文が2,000文字以内か、HTTP リクエストを送る前に確認します。自分で確認したいときは `validation::message_content` を使います。`UiMessage::validate`、`ComponentsV2::validate`、`Modal::validate` は、本文や部品の配置、個数などをまとめて確認できます。
+
+添付付きの V2 応答は、保持する分と新しいアップロードの合計が10件を超える場合に失敗します。Discord が Interaction に通知した1ファイルのサイズ上限も、ファイル本体を読み直さずに確認します。通常のチャンネル投稿でサイズ上限が分からない場合は、Discord の送信結果を確認します。[Discord のメッセージ仕様](https://docs.discord.com/developers/resources/message#create-message) · [ファイルの送信仕様](https://docs.discord.com/developers/reference#uploading-files)
+
 ## 何も応答しなかったら
 
 Akari が、種類ごとに補います。文言は [`Messages`](errors.md) で変えたり、送らないようにしたりできます。どの場合も、エラーは `Bot::on_error` に報告されます。

@@ -149,6 +149,21 @@ async fn slow(ctx: &mut ButtonContext<'_>) -> Result<()> {
 }
 ```
 
+## 操作への非公開返信を編集する
+
+ボタンや選択メニューへの `reply_ephemeral` の後は、`original_response` で返信を取得し、`edit_original_response`、`edit_original_ui`、`delete_original_response` で編集や削除ができます。
+
+```rust
+use disnana_akari::{ButtonContext, Result};
+
+async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
+    ctx.reply_ephemeral("この操作を受け付けました。").await?;
+    ctx.edit_original_response("操作が完了しました。").await
+}
+```
+
+Components V2 を非公開で返すときは `reply_v2_ephemeral`、その返信を編集するときは `edit_original_v2` を使います。ボタンが付いた元の投稿を編集する場合は、引き続き `update_message` や `update_v2` を使います。`defer_update` は元の投稿を更新するための応答です。
+
 ## ボタンの操作者を確認する
 
 > [!WARNING]

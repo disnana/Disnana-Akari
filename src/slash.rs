@@ -1863,6 +1863,7 @@ pub(crate) struct InitialResponder<'a> {
 
 impl InitialResponder<'_> {
     pub(crate) async fn message(self, content: &str, ephemeral: bool) -> Result<()> {
+        crate::validation::message_content(content)?;
         let response = initial_response(InitialResponse::Message(content), ephemeral);
         self.send(&response).await
     }
@@ -1895,6 +1896,7 @@ impl InitialResponder<'_> {
 }
 
 async fn edit_text_response(http: &Client, interaction: &Interaction, content: &str) -> Result<()> {
+    crate::validation::message_content(content)?;
     http.interaction(interaction.application_id)
         .update_response(&interaction.token)
         .content(Some(content))
@@ -1924,6 +1926,7 @@ pub(crate) async fn send_followup_message(
     content: &str,
     ephemeral: bool,
 ) -> Result<()> {
+    crate::validation::message_content(content)?;
     let mentions = AllowedMentions::default();
     let client = http.interaction(interaction.application_id);
     let mut followup = client
@@ -2559,6 +2562,52 @@ pub(crate) mod tests {
         // 登録していない ID や、サーバー限定のコマンドは受け付けない。
         assert!(!global.accepts(&command_interaction(None, None, 6)));
         assert!(!global.accepts(&command_interaction(Some(guild), Some(guild), 5)));
+    }
+
+    #[tokio::test]
+    async fn initial_reply_checks_message_length_before_sending() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(Error::handler)?;
+        let http = Client::builder()
+            .proxy(
+                listener.local_addr().map_err(Error::handler)?.to_string(),
+                true,
+            )
+            .build();
+        let interaction = command_interaction(None, None, 5);
+        let hooks = Hooks::default();
+        let (_, timing) = crate::timing::Pending::new((), None).begin();
+        let initial = crate::slash::InitialResponder {
+            http: &http,
+            interaction: &interaction,
+            timing,
+            info: &hooks.info,
+        };
+        let invalid = "あ".repeat(2001);
+        let rejected = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            initial.message(&invalid, true),
+        )
+        .await
+        .map_err(Error::handler)?;
+        assert!(matches!(rejected, Err(Error::MessageValidation(_))));
+
+        let valid = "あ".repeat(2000);
+        let (result, payload) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(
+                initial.message(&valid, true),
+                capture_response(&listener, "POST")
+            )
+        })
+        .await
+        .map_err(Error::handler)?;
+        result?;
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload.map_err(Error::handler)?).map_err(Error::handler)?;
+        assert_eq!(payload["data"]["content"].as_str(), Some(valid.as_str()));
+
+        Ok(())
     }
 
     #[tokio::test]

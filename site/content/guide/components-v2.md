@@ -96,6 +96,8 @@ async fn send_report(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 ## 制限
 
+`ComponentsV2::validate()` を呼ぶと、送信前に部品配置、本文、アップロードするファイル数などを確認できます。アップロードは1メッセージに最大10件で、更新で添付を追加するときは残すファイルも含めて数えます。Interaction への返信では、その呼び出しで Discord が通知した上限と、各ファイルのサイズも照合します。[Discord のメッセージ添付の制限](https://docs.discord.com/developers/topics/opcodes-and-status-codes#json-json-error-codes)
+
 - **本文と Embed は併用できません。** 文章は `.text()` で入れます。従来の本文や Embed が必要なら、[`UiMessage`](buttons.md) を使います。
 - テキストは、メッセージ全体で 4,000 文字までです。
 - 部品は、入れ子を含めて 40 個までです。

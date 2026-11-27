@@ -25,6 +25,7 @@ mod shutdown;
 mod slash;
 mod timing;
 pub mod ui;
+pub mod validation;
 mod voice_gateway;
 mod work_queue;
 
@@ -1186,6 +1187,7 @@ impl<'a> Context<'a> {
     ///
     /// 本文が Discord の制約に合わない場合や、権限不足などで送信が失敗した場合にエラーを返します。
     pub async fn reply(&self, content: &str) -> Result<()> {
+        validation::message_content(content)?;
         self.http
             .create_message(self.message.channel_id)
             .content(content)
@@ -1205,6 +1207,7 @@ impl<'a> Context<'a> {
     ///
     /// 本文が Discord の制約に合わない場合や、権限不足などで送信が失敗した場合にエラーを返します。
     pub async fn reply_with(&self, content: &str, mentions: &AllowedMentions) -> Result<()> {
+        validation::message_content(content)?;
         self.http
             .create_message(self.message.channel_id)
             .content(content)

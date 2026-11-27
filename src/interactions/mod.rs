@@ -21,6 +21,9 @@ use twilight_model::{
 };
 
 mod modal;
+mod original;
+#[cfg(test)]
+mod original_tests;
 mod owner;
 mod routes;
 pub(crate) use modal::{RadioSubmission, capture_modal_radios};
@@ -411,7 +414,7 @@ async fn finish_component(
             let fallback = match ctx.response {
                 ButtonResponse::Pending => ctx.reply_ephemeral(text).await,
                 ButtonResponse::DeferredUpdate => ctx.followup_ephemeral(text).await,
-                ButtonResponse::Sent => Ok(()),
+                ButtonResponse::Sent | ButtonResponse::OwnResponse(_) => Ok(()),
             };
             if let Err(error) = fallback {
                 hooks.reporter.report(ErrorSource::Response, name, &error);
@@ -552,7 +555,7 @@ impl<'a> ButtonContext<'a> {
     pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
         self.response.require_pending()?;
         self.initial.message(content, true).await?;
-        self.response = ButtonResponse::Sent;
+        self.response = ButtonResponse::OwnResponse(ResponseState::Replied);
         Ok(())
     }
 
@@ -1121,6 +1124,7 @@ enum ButtonResponse {
     Pending,
     DeferredUpdate,
     Sent,
+    OwnResponse(ResponseState),
 }
 
 impl ButtonResponse {
@@ -1136,7 +1140,7 @@ impl ButtonResponse {
         match self {
             Self::Pending => Ok(UpdateAction::Initial),
             Self::DeferredUpdate => Ok(UpdateAction::Edit),
-            Self::Sent => Err(ResponseStateError::CannotUpdate.into()),
+            Self::Sent | Self::OwnResponse(_) => Err(ResponseStateError::CannotUpdate.into()),
         }
     }
 }
