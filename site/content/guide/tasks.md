@@ -199,21 +199,11 @@ async fn join_channel(
 
 `connection.status()` で現在の状態を取得し、`connection.changed().await` で更新を待てます。`Ready(info)` の `info.channel_id` が参加先です。`AwaitingServer` では再割り当てを待ち、`Disconnected` で管理が終了します。`Ready` の接続情報を音声ドライバーに渡して、音声サーバーに接続します。送信キューへ渡した後に参加がタイムアウトした場合、遅れて届く通知との混同を避けるため、次の新規 Gateway セッションまで同じサーバーの参加を再試行できません。その場合も `leave` は使えます。トークンとセッション ID は明示的に取得し、保存やログ出力を避けてください。[Discord の音声サーバー割り当て](https://docs.discord.com/developers/topics/voice-connections#retrieving-voice-server-information)
 
-### WAV を再生・録音する
+### 音声ドライバーとサウンドボード
 
-リポジトリの `examples/voice` に、Akari の接続情報を Songbird に渡して WAV を再生・録音する例があります。Songbird の Twilight 統合は使わず、音声の依存はこの例の Cargo プロジェクトで管理します。
+WAV などを再生・録音する場合は、DAVE に対応する音声ドライバーをアプリ側で組み込みます。音声サーバーが再割り当てされたら、新しい `Ready` の接続情報を使います。[Discord の音声接続仕様](https://docs.discord.com/developers/topics/voice-connections)
 
-Bot のトークンに加え、`AKARI_VOICE_GUILD`、`AKARI_VOICE_CHANNEL` を環境変数に設定します。再生するには `AKARI_VOICE_WAV` に入力ファイル、録音するには `AKARI_VOICE_RECORD_WAV` に新規ファイルのパスを設定します。リポジトリのルートから次のコマンドで実行します。
-
-```sh
-cargo run --locked --manifest-path examples/voice/Cargo.toml
-```
-
-再割り当て時は新しい音声サーバーへ接続し直します。録音は受信処理からファイル書き出しを分け、キューが満杯なら破棄したフレーム数を記録します。Ctrl+C で停止し、録音していれば WAV を確定します。[Songbird の音声ドライバー実装](https://github.com/serenity-rs/songbird/blob/v0.6.1/src/driver/mod.rs)
-
-音声を Discord のコマンドから操作するには、`AKARI_VOICE_RECORD_DIR` にローカルの録音先を設定します。参加先を省略して `/vc-join` を呼ぶと、自分が参加中の VC に Bot が接続します。 `/vc-playtest` で短い2音を再生できます。`/vc-record` で録音を始め、`format:FLAC` を選ぶとロスレス圧縮で保存できます。`/vc-stop` で実行先のチャンネルに録音を投稿し、`/vc-leave` で退出します。このサンプルでは合計 10 MiB、最長5分まで録音できます。[Discord の音声状態取得 API](https://docs.discord.com/developers/resources/voice#get-user-voice-state)
-
-受信録音に保存されるのは、Discord の音声接続を通じて Bot に届いた音声です。Bot 自身が再生した音は同じ接続の受信側に戻らず、ミックスにも入りません。`/vc-record` で Bot 自身を個別トラックに選ぶと録音開始前に拒否します。コマンドを実行した参加者自身は録音できます。読み上げなどの再生音も残したい場合は、アプリで送信前の音源を別に保存するか、録音に合成します。[Discord の音声接続仕様](https://docs.discord.com/developers/topics/voice-connections)
+0.3.0 では `VoiceGateway` とサウンドボード API を利用できます。サウンドボードの音を取得・再生する手順は[イベントガイド](./events)にあります。Songbird を使う再生・録音サンプルは `codex/voice-example` ブランチで管理し、依存関係の更新とレビュー後に公開版へ追加する予定です。
 
 ## シャード別の状態と RTT を監視する
 
