@@ -34,6 +34,47 @@ discord.py と比べて不便な点を洗い出し、Akari の方針（シンプ
 - Bot 自身の権限、別のメンバーの権限、ロール階層、サーバーの所有者、ロールの所持は調べられません。
 - 毎回 `.await?` と `contains` を書く必要があります。足りない権限を名前で取り出す方法がありません。
 
+### 層 0: 数値やビットを名前で扱う
+
+d.py は、Discord が数値で返す権限、フラグ、設定の種類を、名前で読み書きできる型にしています。Twilight は、これらをすでに型（ビットフラグと列挙型）にしているので、生の数値を書く必要はありません。足りないのは、d.py にある次の補助です。
+
+- `perms.manage_messages` のような、名前のアクセサ
+- `text()`、`voice()` などのプリセット
+- 持っているものを名前で列挙する、不足分を調べる
+- 人が読める名前（`MANAGE_MESSAGES` → 「メッセージの管理」）
+
+#### 作り方（原則から決めたこと）
+
+| 原則 | 決めたこと |
+| --- | --- |
+| シンプル | ラッパー型を作りません。Twilight の `Permissions` などに、拡張トレイトを足します。変換は不要で、`ctx.can(..)` が返す型と同じ型をそのまま使えます。 |
+| 規則的 | 全部のフラグ型が、同じ名前のメソッドを持ちます。フラグ 1 つにつき名前を 1 か所だけ書く表から、アクセサ、日本語名、列挙を、マクロで生成します。 |
+| 重複させない | 更新は、すでにある `insert`、`remove`、`set`（ビットフラグの標準）を使います。`update(**kwargs)` に当たる別の方法は足しません。 |
+| 高速 | すべて `const` かインライン化できる関数です。割り当ては行わず、列挙はイテレーターで返します。通信は発生しません。 |
+| 安定 | テストで、Twilight の全ビットが表に載っていることを確かめます。Twilight が新しい権限を足すと、表に無い状態を CI が検出して落ちます。表に無いビットは、表示では 16 進数で出し、黙って捨てません。 |
+| わかりやすい | `use disnana_akari::prelude::*;` でトレイトを取り込みます。名前のアクセサは、エディターの補完で見つかります。 |
+
+#### 対象
+
+| 対象 | 追加するもの |
+| --- | --- |
+| `Permissions` | 名前のアクセサ、プリセット（`text`、`voice`、`moderator` など）、`names()`、`labels()`、日本語名 |
+| `MessageFlags`、`UserFlags`、`SystemChannelFlags`、`ChannelFlags` | 名前のアクセサ、`names()`、日本語名 |
+| `ChannelType`、`VerificationLevel`、通知レベル、コンテンツフィルター、MFA、NSFW レベル、ブーストの段階 | 日本語名（`label()`） |
+
+<!-- no-check -->
+```rust
+use disnana_akari::prelude::*;
+
+let perms = ctx.permissions().await?;
+if perms.manage_messages() { /* ... */ }
+for label in (Permissions::text() - perms).labels() {
+    // 「メッセージの管理」のような日本語名で、不足分を列挙できる
+}
+```
+
+`CheckFailure::MissingPermissions` のメッセージも、この日本語名で表示します（`Debug` の表示は変えません）。
+
 ### 層 1: 登録時に必要な権限を宣言する
 
 <!-- no-check -->
@@ -189,6 +230,175 @@ ctx.set_role_permissions(role_id, role.with(Permissions::MANAGE_MESSAGES), "理�
 ### テスト
 
 階層の関数は、所有者、同位、上位、下位、Bot が下位、自分自身、`@everyone` だけのメンバーを網羅します。権限の計算は、サーバー側の上書きとスレッドを含めて、既存のテストを拡張します。
+
+### 性能の方針
+
+無駄なく速くするための決まりです。通信回数は、テストで固定します。
+
+1. **通信しないで済む場合は、通信しません。** スラッシュコマンドは、Discord が実行者の権限（`member.permissions`）と Bot の権限（`app_permissions`）を送ってきます。この経路は通信 0 回です。
+2. **取得を共有します。** 1 回の呼び出しの中で、宣言した確認、`can`、`snapshot` は、同じ取得結果を使い回します。
+3. **必要になった時に、必要なものだけ取得します。** Bot の権限は、`.bot(..)` を宣言したか、`bot_can` を呼んだときだけ取得します。階層用のメンバー取得は、`require_can_moderate` のときだけです。
+4. **独立した取得は同時に実行します。** サーバー、チャンネル、Bot のメンバーを同時に取得し、待ちを最大の 1 回分にします（今の実装は順番に取得しています）。
+5. **既存のキャッシュに載せます。** 保存の期間を指定したときは、Bot のメンバー情報も同じ枠に載せ、同じ無効化と上限（512 件）を使います。
+6. **計算は、割り当てなしのビット演算だけです。** 名前の列挙はイテレーター、日本語名は静的な表です。
+7. **安い確認から先に行います。** サーバー内か、宣言した権限が足りているかを先に調べ、失敗したら通信せずに終わります。
+8. **書き込みの前に読み直しません。** 送る前の確認には、同じ呼び出しで取得済みの Bot の権限を使います。
+
+| 経路 | キャッシュなし | キャッシュあり |
+| --- | --- | --- |
+| スラッシュで実行者と Bot の権限を確認 | 0 回 | 0 回 |
+| テキストで実行者と Bot の権限を確認 | 同時に 3 回（待ちは 1 回分） | 0 回 |
+| `require_can_moderate` | 対象のメンバー取得 1 回を加算 | 同左 |
+
+テストでは、モックの REST を使い、上の回数を固定します。回数が増えたら CI が落ちます。権限の計算は、割り当てが 0 であることも確かめます。
+
+### 層 5: 管理操作（作成・編集・削除）
+
+d.py の `create_text_channel`、`channel.edit`、`guild.edit`、`role.edit`、`member.kick`、`thread.edit` などに当たる操作です。チャンネルや VC だけでなく、サーバー設定、フォーラム、スレッド、ロール、メンバー、絵文字まで、**同じ決まりで** 扱います。Rust らしく、**種類ごとの型で、成り立たない組み合わせを書けなくします。** d.py は、テキストチャンネルにビットレートを渡しても、実行時にしかエラーになりません。
+
+#### 対象と段階
+
+| 段階 | 対象 | 必要な Bot の権限 | 主な事前検証 |
+| --- | --- | --- | --- |
+| 1 | チャンネル（作成、編集、削除）、VC のメンバー操作 | `MANAGE_CHANNELS`、`MOVE_MEMBERS`、`MUTE_MEMBERS`、`DEAFEN_MEMBERS` | 名前、トピック、スローモード、人数の範囲 |
+| 1 | ロール（作成、編集、削除、位置） | `MANAGE_ROLES` | 色、名前、権限は Bot が持つものだけ、Bot の最上位ロールより下 |
+| 1 | メンバー（ニックネーム、ロールの付け外し、キック、BAN、タイムアウト） | `MANAGE_NICKNAMES`、`MANAGE_ROLES`、`KICK_MEMBERS`、`BAN_MEMBERS`、`MODERATE_MEMBERS` | ロール階層、タイムアウトは 28 日以内 |
+| 2 | サーバー設定（名前、認証レベル、通知、コンテンツフィルター、システムチャンネル、AFK、ルール、言語、説明） | `MANAGE_GUILD` | 名前は 2〜100 文字、列挙は Twilight の型 |
+| 2 | フォーラム（タグ、既定の並び順、レイアウト、反応の絵文字、ガイドライン）と投稿の作成 | `MANAGE_CHANNELS`、投稿は `SEND_MESSAGES` | タグは 20 個まで、タグ名 20 文字、投稿に付けるタグは 5 個まで |
+| 2 | スレッド（作成、名前、アーカイブ、ロック、自動アーカイブ、メンバーの追加・削除） | `CREATE_PUBLIC_THREADS`、`MANAGE_THREADS` など | 自動アーカイブは 60、1440、4320、10080 分のみ |
+| 3 | 絵文字とステッカー（作成、名前、削除） | `CREATE_GUILD_EXPRESSIONS`、`MANAGE_GUILD_EXPRESSIONS` | 名前の文字種と長さ、画像の種類とサイズ |
+| 3 | ステージ、予定イベント、AutoMod、Webhook、招待 | それぞれ別 | 別に設計 |
+
+#### 統一する名前と形
+
+- 入り口は `ctx.manage()` です。動詞は `create_*`、`edit_*`、`delete_*` に統一します（例: `create_role`、`edit_guild`、`delete_channel`）。
+- 作成は `New*`（例: `NewChannel`、`NewRole`、`NewThread`）、編集は `*Edit`（例: `GuildEdit`、`RoleEdit`、`ThreadEdit`）の型を使います。どちらも、種類ごとに、設定できる項目だけを持ちます。
+- 結果は、更新後の Twilight の型です（`Channel`、`Role`、`Guild` など）。
+- 理由は必須で、512 文字以内です。
+
+
+#### 作成
+
+<!-- no-check -->
+```rust
+let channel = ctx.manage().create_channel(
+    guild_id,
+    NewChannel::voice("雑談")
+        .user_limit(10)
+        .bitrate(64_000)
+        .category(category_id)
+        .overwrite(Target::Role(members), Overwrite::new().deny(Permissions::CONNECT)),
+    "新しい雑談用の VC",       // 監査ログの理由（必須）
+).await?;
+```
+
+- 種類ごとの入り口は `NewChannel::text`、`voice`、`category`、`stage`、`forum`、`announcement` です。
+- 設定できる項目は、種類ごとの型にだけあります（テキストにはトピックとスローモード、VC にはビットレートと人数、など）。
+- 上書きは、層 4 の `Overwrite` と `Target` をそのまま使います。
+
+#### 編集
+
+<!-- no-check -->
+```rust
+ctx.manage().edit_channel(
+    channel_id,
+    ChannelEdit::new().name("新しい名前").slowmode(Duration::from_secs(10)),
+    "理由",
+).await?;
+```
+
+- 変更したい項目だけを指定します（指定しない項目は、変更しません）。
+- 項目ごとに、名前は 1〜100 文字、トピックは 1024 文字以内、スローモードは 0〜21600 秒、人数は 0〜99（ステージは別の上限）のように、Discord が決めている範囲を、送る前に検証します。ブーストの段階に依存するビットレートの上限は、Discord の応答に任せます。
+- チャンネルの種類に合わない項目（テキストのビットレートなど）は、型がなく、書けません。
+
+#### VC とメンバーの操作
+
+<!-- no-check -->
+```rust
+ctx.manage().move_member(guild_id, user_id, Some(channel_id), "理由").await?;   // None で切断
+ctx.manage().set_voice_mute(guild_id, user_id, true, "理由").await?;
+ctx.manage().set_voice_deafen(guild_id, user_id, true, "理由").await?;
+```
+
+#### ロールとメンバー
+
+<!-- no-check -->
+```rust
+let role = ctx.manage().create_role(
+    guild_id,
+    NewRole::new("認証済み").color(0x2ecc71).hoist(true).permissions(Permissions::text()),
+    "認証用",
+).await?;
+
+ctx.manage().add_role(guild_id, user_id, role.id, "認証が完了したため").await?;
+ctx.manage().timeout_member(guild_id, user_id, Duration::from_secs(600), "スパム").await?;
+ctx.manage().kick_member(guild_id, user_id, "理由").await?;
+```
+
+- メンバーとロールの操作は、層 3 のロール階層の確認を、**自動で** 行います。Discord に送れば 403 で失敗する操作を、送る前に、理由つきで失敗させます（通信を 1 回減らせます）。
+- `NewRole` と `RoleEdit` に渡す権限は、Bot が持っているものだけです。持たないものを含む場合は、送らずに失敗します。
+- タイムアウトは、28 日を超えると、送る前に失敗します。
+
+#### サーバー設定
+
+<!-- no-check -->
+```rust
+ctx.manage().edit_guild(
+    guild_id,
+    GuildEdit::new()
+        .name("新しい名前")
+        .verification_level(VerificationLevel::Medium)
+        .default_notifications(DefaultMessageNotificationLevel::Mentions)
+        .system_channel(Some(channel_id)),
+    "理由",
+).await?;
+```
+
+- 列挙は Twilight の型をそのまま使います（数値を書きません）。層 0 の日本語名で、エラーや確認の表示ができます。
+- 画像（アイコン、バナー）は、「画像」の節の型を通します。
+- 機能の追加・削除（`features`）は、Discord が管理者権限を求めるものがあるので、最初は対象外にします。
+
+#### フォーラムとスレッド
+
+<!-- no-check -->
+```rust
+// フォーラムのタグ。Discord は、タグ一覧全体を 1 回で置き換える仕様
+ctx.manage().edit_forum_tags(channel_id, |tags| {
+    tags.add(ForumTag::new("質問").emoji("❓"));
+    tags.rename(existing_tag_id, "解決済み");
+    tags.remove(old_tag_id);
+}, "理由").await?;
+
+ctx.manage().create_forum_post(
+    channel_id,
+    NewForumPost::new("投稿のタイトル", "最初のメッセージ").tags(&[tag_id]),
+).await?;
+```
+
+- タグの一覧は、Discord が全体を置き換える仕様です。同時に別の変更があると、巻き戻すおそれがあります。`edit_forum_tags` は、**現在の一覧を読み、既存のタグを ID で維持したまま、変更を適用して書き戻します**。ドキュメントに、競合の可能性を明記します。
+- タグの数、名前の長さ、投稿に付けるタグの数は、送る前に検証します。
+- スレッドの `NewThread` は、メッセージから作る、公開、非公開の入り口を分けます。自動アーカイブの時間は、列挙型（`OneHour`、`OneDay`、`ThreeDays`、`OneWeek`）にして、不正な値を書けなくします。
+
+#### 画像
+
+アイコン、バナー、絵文字、ステッカーに使う画像は、`ImageData` 型を通します。
+
+- 画像の種類（PNG、JPEG、GIF、WebP）をバイト列から判別し、サイズの上限（絵文字は 256 KiB、ステッカーは 512 KiB）を、送る前に検証します。
+- Akari は、画像を勝手に取得しません。バイト列を渡すのは、アプリです。
+- Discord に送る形式の変換（Base64）は、依存を足さずに、小さな自前の実装か、すでにある依存を使います（依存の枠は 132/140 です）。
+
+#### 共通の決まり
+
+- 入り口は `ctx.manage()` です。層 2〜4 の `Access` と同じ取得結果を共有します。
+- 送る前に、Bot の権限を確認します（チャンネルの作成・編集は `MANAGE_CHANNELS`、移動は `MOVE_MEMBERS`、ミュートは `MUTE_MEMBERS`、スピーカーミュートは `DEAFEN_MEMBERS`）。足りなければ、通信せずに失敗します。
+- 理由は必須で、512 文字以内です。
+- 1 つの操作は、REST 1 回です。一括の操作は作りません。
+- 編集の呼び出しには、Discord のレート制限があります（名前とトピックの変更は、チャンネルごとに厳しく制限されます）。待ちが長くなりうるので、ドキュメントに `tokio::time::timeout` で囲む例を載せます。
+- 結果は、更新後の Twilight の `Channel` です。
+
+#### 後回し
+
+チャンネルとロールの並び替え、ステージ、予定イベント、AutoMod、Webhook、招待は、上の段階が入ってから別に設計します。
 
 ### 後回し
 
