@@ -436,7 +436,7 @@ impl<'a> Access<'a> {
     }
 
     /// Bot の、指定したチャンネルでの権限を返す。呼ばれたチャンネルなら、Discord が送った値を使う。
-    async fn bot_permissions_in(
+    pub(crate) async fn bot_permissions_in(
         &self,
         guild_id: Id<GuildMarker>,
         channel_id: Id<ChannelMarker>,
@@ -581,6 +581,37 @@ impl<'a> Access<'a> {
         self.http
     }
 
+    /// Bot の、サーバー全体の権限（チャンネルの上書きを含まない）。所有者と管理者は、すべてを持つ。
+    pub(crate) async fn bot_guild_permissions(&self) -> Result<Permissions> {
+        let guild_id = self.require_guild()?;
+        let bot_id = self.resolver.bot_id(self.http).await?;
+        let (info, bot_member) = tokio::try_join!(
+            self.resolver.guild_info(self.http, guild_id),
+            fetch_member(self.http, guild_id, bot_id),
+        )?;
+        Ok(info.root_permissions(guild_id, bot_id, &bot_member.roles))
+    }
+
+    /// Bot のサーバー全体の権限と、Bot の最上位ロールがロールより高いか。ロールがなければ「高くない」。
+    pub(crate) async fn bot_role_standing(
+        &self,
+        role: Id<RoleMarker>,
+    ) -> Result<(Permissions, bool)> {
+        let guild_id = self.require_guild()?;
+        let bot_id = self.resolver.bot_id(self.http).await?;
+        let (info, bot_member) = tokio::try_join!(
+            self.resolver.guild_info(self.http, guild_id),
+            fetch_member(self.http, guild_id, bot_id),
+        )?;
+        let outranks = info
+            .role_position(role)
+            .is_some_and(|position| info.top_position(&bot_member.roles) > position);
+        Ok((
+            info.root_permissions(guild_id, bot_id, &bot_member.roles),
+            outranks,
+        ))
+    }
+
     /// Bot が、ロールの階層から見て、対象のメンバーを操作できることを確認する。
     /// 実行した人の階層は確認しない（[`require_can_moderate`](Self::require_can_moderate) で確認する）。
     pub(crate) async fn require_bot_can_moderate(&self, target: Id<UserMarker>) -> Result<()> {
@@ -655,7 +686,7 @@ impl<'a> Access<'a> {
 }
 
 /// Bot が持つ権限で、必要な権限をすべて満たせるか。管理者は、すべてを持つ。
-fn check_bot_can_grant(
+pub(crate) fn check_bot_can_grant(
     held: Permissions,
     required: Permissions,
 ) -> std::result::Result<(), CheckFailure> {

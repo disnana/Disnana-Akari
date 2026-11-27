@@ -1,6 +1,6 @@
 # 次の版以降の設計メモ
 
-discord.py と比べて不便な点を洗い出し、Akari の方針（シンプル、規則的、高速、安定、安全）を守ったまま埋める順番と設計をまとめます。**ここに書いた API はまだ実装していません。** 実装するときに、この文書と食い違う点があれば、先にこの文書を直します。
+discord.py と比べて不便な点を洗い出し、Akari の方針（シンプル、規則的、高速、安定、安全）を守ったまま埋める順番と設計をまとめます。**層 0〜4 と、層 5 の段階 1（チャンネル、VC、ロール、メンバー）は実装済みです。残りの API は、まだ実装していません。** 実装するときに、この文書と食い違う点があれば、先にこの文書を直します。
 
 ## 守る方針
 
@@ -282,9 +282,8 @@ d.py の `create_text_channel`、`channel.edit`、`guild.edit`、`role.edit`、`
 
 <!-- no-check -->
 ```rust
-let channel = ctx.manage().create_channel(
-    guild_id,
-    NewChannel::voice("雑談")
+let channel = ctx.manage().create_voice_channel(
+    NewVoiceChannel::new("雑談")
         .user_limit(10)
         .bitrate(64_000)
         .category(category_id)
@@ -293,17 +292,17 @@ let channel = ctx.manage().create_channel(
 ).await?;
 ```
 
-- 種類ごとの入り口は `NewChannel::text`、`voice`、`category`、`stage`、`forum`、`announcement` です。
+- 種類ごとの型は `NewTextChannel`、`NewVoiceChannel`、`NewCategory`（作成）と `TextChannelEdit`、`VoiceChannelEdit`（編集）です。ステージ、フォーラム、アナウンスは、後の段階です。
 - 設定できる項目は、種類ごとの型にだけあります（テキストにはトピックとスローモード、VC にはビットレートと人数、など）。
-- 上書きは、層 4 の `Overwrite` と `Target` をそのまま使います。
+- 上書きは、層 4 の `Overwrite` と `OverwriteTarget` をそのまま使います。
 
 #### 編集
 
 <!-- no-check -->
 ```rust
-ctx.manage().edit_channel(
+ctx.manage().edit_text_channel(
     channel_id,
-    ChannelEdit::new().name("新しい名前").slowmode(Duration::from_secs(10)),
+    TextChannelEdit::new().name("新しい名前").slowmode(Duration::from_secs(10)),
     "理由",
 ).await?;
 ```
@@ -316,9 +315,9 @@ ctx.manage().edit_channel(
 
 <!-- no-check -->
 ```rust
-ctx.manage().move_member(guild_id, user_id, Some(channel_id), "理由").await?;   // None で切断
-ctx.manage().set_voice_mute(guild_id, user_id, true, "理由").await?;
-ctx.manage().set_voice_deafen(guild_id, user_id, true, "理由").await?;
+ctx.manage().move_member(user_id, Some(channel_id), "理由").await?;   // None で切断
+ctx.manage().set_voice_mute(user_id, true, "理由").await?;
+ctx.manage().set_voice_deafen(user_id, true, "理由").await?;
 ```
 
 #### ロールとメンバー
@@ -326,14 +325,13 @@ ctx.manage().set_voice_deafen(guild_id, user_id, true, "理由").await?;
 <!-- no-check -->
 ```rust
 let role = ctx.manage().create_role(
-    guild_id,
     NewRole::new("認証済み").color(0x2ecc71).hoist(true).permissions(Permissions::text()),
     "認証用",
 ).await?;
 
-ctx.manage().add_role(guild_id, user_id, role.id, "認証が完了したため").await?;
-ctx.manage().timeout_member(guild_id, user_id, Duration::from_secs(600), "スパム").await?;
-ctx.manage().kick_member(guild_id, user_id, "理由").await?;
+ctx.manage().add_role(user_id, role.id, "認証が完了したため").await?;
+ctx.manage().timeout_member(user_id, Duration::from_secs(600), "スパム").await?;
+ctx.manage().kick_member(user_id, "理由").await?;
 ```
 
 - メンバーとロールの操作は、層 3 のロール階層の確認を、**自動で** 行います。Discord に送れば 403 で失敗する操作を、送る前に、理由つきで失敗させます（通信を 1 回減らせます）。
@@ -345,7 +343,6 @@ ctx.manage().kick_member(guild_id, user_id, "理由").await?;
 <!-- no-check -->
 ```rust
 ctx.manage().edit_guild(
-    guild_id,
     GuildEdit::new()
         .name("新しい名前")
         .verification_level(VerificationLevel::Medium)

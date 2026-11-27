@@ -8,7 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use twilight_http::{error::ErrorType, request::AuditLogReason};
 use twilight_model::{
-    guild::Permissions,
+    channel::{Channel, ChannelType},
+    guild::{Permissions, Role},
     id::{
         Id,
         marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
@@ -16,7 +17,11 @@ use twilight_model::{
     util::datetime::Timestamp,
 };
 
-use crate::{Access, CheckFailure, Error, HierarchyDenied, InvalidArgument, Result};
+use crate::{
+    Access, CheckFailure, Error, HierarchyDenied, InvalidArgument, NewCategory, NewRole,
+    NewTextChannel, NewVoiceChannel, Overwrite, OverwriteTarget, Result, RoleEdit, TextChannelEdit,
+    VoiceChannelEdit, access::check_bot_can_grant,
+};
 
 /// タイムアウトの最長（28 日）。Discord の上限。
 pub const MAX_TIMEOUT: Duration = Duration::from_secs(28 * 24 * 60 * 60);
@@ -65,6 +70,300 @@ impl<'a> Manage<'a> {
             other => other?,
         }
         Ok(guild_id)
+    }
+
+    /// 作成するチャンネルの権限の上書きに必要な、Bot の権限。
+    fn overwrite_requirements(overwrites: &[(OverwriteTarget, Overwrite)]) -> Permissions {
+        overwrites
+            .iter()
+            .fold(Permissions::empty(), |required, (_, overwrite)| {
+                required | Permissions::MANAGE_ROLES | overwrite.allowed() | overwrite.denied()
+            })
+    }
+
+    async fn check_creating_channel(
+        &self,
+        overwrites: &[(OverwriteTarget, Overwrite)],
+    ) -> Result<Id<GuildMarker>> {
+        let guild_id = self.access.require_guild()?;
+        let held = self.access.bot_guild_permissions().await?;
+        let required = Permissions::MANAGE_CHANNELS | Self::overwrite_requirements(overwrites);
+        check_bot_can_grant(held, required)?;
+        Ok(guild_id)
+    }
+
+    /// テキストチャンネルを作成します。必要な Bot の権限: `MANAGE_CHANNELS`
+    /// （権限の上書きを付けるときは `MANAGE_ROLES` と、上書きする権限も）。
+    ///
+    /// # エラー
+    ///
+    /// 名前やトピックなどが Discord の範囲に入っていないときは、通信せずに検証のエラーを返します。
+    /// Bot の権限が足りないときは [`CheckFailure::BotMissingPermissions`]、送信に失敗したときは
+    /// HTTP のエラーを返します。
+    pub async fn create_text_channel(&self, new: NewTextChannel, reason: &str) -> Result<Channel> {
+        new.validate()?;
+        let guild_id = self.check_creating_channel(new.overwrites()).await?;
+        let overwrites: Vec<_> = new
+            .overwrites()
+            .iter()
+            .map(|(target, overwrite)| overwrite.into_model(*target))
+            .collect();
+        let mut request = self
+            .access
+            .http()
+            .create_guild_channel(guild_id, new.name())
+            .kind(ChannelType::GuildText)
+            .nsfw(new.nsfw_value())
+            .permission_overwrites(&overwrites);
+        if let Some(topic) = new.topic_value() {
+            request = request.topic(topic);
+        }
+        if let Some(seconds) = new.slowmode_value() {
+            request = request.rate_limit_per_user(seconds);
+        }
+        if let Some(category) = new.category_value() {
+            request = request.parent_id(category);
+        }
+        Ok(request.reason(reason).await?.model().await?)
+    }
+
+    /// ボイスチャンネルを作成します。必要な Bot の権限は、[`create_text_channel`](Self::create_text_channel) と同じです。
+    ///
+    /// # エラー
+    ///
+    /// [`create_text_channel`](Self::create_text_channel) と同じです。
+    pub async fn create_voice_channel(
+        &self,
+        new: NewVoiceChannel,
+        reason: &str,
+    ) -> Result<Channel> {
+        new.validate()?;
+        let guild_id = self.check_creating_channel(new.overwrites()).await?;
+        let overwrites: Vec<_> = new
+            .overwrites()
+            .iter()
+            .map(|(target, overwrite)| overwrite.into_model(*target))
+            .collect();
+        let mut request = self
+            .access
+            .http()
+            .create_guild_channel(guild_id, new.name())
+            .kind(ChannelType::GuildVoice)
+            .permission_overwrites(&overwrites);
+        if let Some(bitrate) = new.bitrate_value() {
+            request = request.bitrate(bitrate);
+        }
+        if let Some(limit) = new.user_limit_value() {
+            request = request.user_limit(limit);
+        }
+        if let Some(category) = new.category_value() {
+            request = request.parent_id(category);
+        }
+        Ok(request.reason(reason).await?.model().await?)
+    }
+
+    /// カテゴリーを作成します。必要な Bot の権限は、[`create_text_channel`](Self::create_text_channel) と同じです。
+    ///
+    /// # エラー
+    ///
+    /// [`create_text_channel`](Self::create_text_channel) と同じです。
+    pub async fn create_category(&self, new: NewCategory, reason: &str) -> Result<Channel> {
+        new.validate()?;
+        let guild_id = self.check_creating_channel(new.overwrites()).await?;
+        let overwrites: Vec<_> = new
+            .overwrites()
+            .iter()
+            .map(|(target, overwrite)| overwrite.into_model(*target))
+            .collect();
+        let request = self
+            .access
+            .http()
+            .create_guild_channel(guild_id, new.name())
+            .kind(ChannelType::GuildCategory)
+            .permission_overwrites(&overwrites);
+        Ok(request.reason(reason).await?.model().await?)
+    }
+
+    async fn check_managing_channel(&self, channel_id: Id<ChannelMarker>) -> Result<()> {
+        let guild_id = self.access.require_guild()?;
+        let held = self.access.bot_permissions_in(guild_id, channel_id).await?;
+        check_bot_can_grant(held, Permissions::MANAGE_CHANNELS)?;
+        Ok(())
+    }
+
+    /// テキストチャンネルを編集します。指定した項目だけを変更します。
+    /// 必要な Bot の権限: そのチャンネルでの `MANAGE_CHANNELS`。
+    ///
+    /// # エラー
+    ///
+    /// 何も指定していないときは [`InvalidArgument::NothingToChange`]、範囲外の値は検証のエラー、
+    /// Bot の権限が足りないときは [`CheckFailure::BotMissingPermissions`] を返します。
+    /// いずれも通信する前に返ります。送信に失敗したときは HTTP のエラーです。
+    pub async fn edit_text_channel(
+        &self,
+        channel_id: Id<ChannelMarker>,
+        edit: TextChannelEdit,
+        reason: &str,
+    ) -> Result<Channel> {
+        if edit.is_empty() {
+            return Err(InvalidArgument::NothingToChange.into());
+        }
+        edit.validate()?;
+        self.check_managing_channel(channel_id).await?;
+        let mut request = self.access.http().update_channel(channel_id);
+        if let Some(name) = edit.name_value() {
+            request = request.name(name);
+        }
+        if let Some(topic) = edit.topic_value() {
+            request = request.topic(topic);
+        }
+        if let Some(nsfw) = edit.nsfw_value() {
+            request = request.nsfw(nsfw);
+        }
+        if let Some(seconds) = edit.slowmode_value() {
+            request = request.rate_limit_per_user(seconds);
+        }
+        if let Some(category) = edit.category_value() {
+            request = request.parent_id(category);
+        }
+        Ok(request.reason(reason).await?.model().await?)
+    }
+
+    /// ボイスチャンネルを編集します。指定した項目だけを変更します。
+    /// 必要な Bot の権限: そのチャンネルでの `MANAGE_CHANNELS`。
+    ///
+    /// # エラー
+    ///
+    /// [`edit_text_channel`](Self::edit_text_channel) と同じです。
+    pub async fn edit_voice_channel(
+        &self,
+        channel_id: Id<ChannelMarker>,
+        edit: VoiceChannelEdit,
+        reason: &str,
+    ) -> Result<Channel> {
+        if edit.is_empty() {
+            return Err(InvalidArgument::NothingToChange.into());
+        }
+        edit.validate()?;
+        self.check_managing_channel(channel_id).await?;
+        let mut request = self.access.http().update_channel(channel_id);
+        if let Some(name) = edit.name_value() {
+            request = request.name(name);
+        }
+        if let Some(bitrate) = edit.bitrate_value() {
+            request = request.bitrate(bitrate);
+        }
+        if let Some(limit) = edit.user_limit_value() {
+            request = request.user_limit(limit);
+        }
+        if let Some(category) = edit.category_value() {
+            request = request.parent_id(category);
+        }
+        Ok(request.reason(reason).await?.model().await?)
+    }
+
+    /// チャンネルを削除します。元に戻せません。必要な Bot の権限: そのチャンネルでの `MANAGE_CHANNELS`。
+    ///
+    /// # エラー
+    ///
+    /// Bot の権限が足りないときは [`CheckFailure::BotMissingPermissions`]、そのほかは HTTP のエラーを返します。
+    pub async fn delete_channel(&self, channel_id: Id<ChannelMarker>, reason: &str) -> Result<()> {
+        self.check_managing_channel(channel_id).await?;
+        self.access
+            .http()
+            .delete_channel(channel_id)
+            .reason(reason)
+            .await?;
+        Ok(())
+    }
+
+    /// ロールを作成します。必要な Bot の権限: `MANAGE_ROLES`。付ける権限は、Bot が持つものだけです
+    /// （管理者は除く）。
+    ///
+    /// # エラー
+    ///
+    /// Bot の権限が足りないときは [`CheckFailure::BotMissingPermissions`]、送信に失敗したときは
+    /// HTTP のエラーを返します。
+    pub async fn create_role(&self, new: NewRole, reason: &str) -> Result<Role> {
+        let guild_id = self.access.require_guild()?;
+        let held = self.access.bot_guild_permissions().await?;
+        check_bot_can_grant(held, Permissions::MANAGE_ROLES | new.permissions_value())?;
+        let mut request = self
+            .access
+            .http()
+            .create_role(guild_id)
+            .name(new.name())
+            .hoist(new.hoist_value())
+            .mentionable(new.mentionable_value())
+            .permissions(new.permissions_value());
+        if let Some(color) = new.color_value() {
+            request = request.color(color);
+        }
+        Ok(request.reason(reason).await?.model().await?)
+    }
+
+    /// ロールを編集します。指定した項目だけを変更します。必要な Bot の権限: `MANAGE_ROLES`。
+    /// ロールは Bot の最上位ロールより低い必要があり、権限は Bot が持つものだけを付けられます。
+    ///
+    /// # エラー
+    ///
+    /// 何も指定していないときは [`InvalidArgument::NothingToChange`]、Bot の権限が足りないときは
+    /// [`CheckFailure::BotMissingPermissions`]、ロールの位置が足りないか、ロールが存在しないときは
+    /// [`CheckFailure::Hierarchy`] を返します。いずれも通信する前に返ります。
+    pub async fn edit_role(
+        &self,
+        role_id: Id<RoleMarker>,
+        edit: RoleEdit,
+        reason: &str,
+    ) -> Result<Role> {
+        if edit.is_empty() {
+            return Err(InvalidArgument::NothingToChange.into());
+        }
+        let guild_id = self.access.require_guild()?;
+        let (held, outranks) = self.access.bot_role_standing(role_id).await?;
+        let wanted = edit.permissions_value().unwrap_or_else(Permissions::empty);
+        check_bot_can_grant(held, Permissions::MANAGE_ROLES | wanted)?;
+        if !outranks {
+            return Err(CheckFailure::Hierarchy(HierarchyDenied::BotTooLow).into());
+        }
+        let mut request = self.access.http().update_role(guild_id, role_id);
+        if let Some(name) = edit.name_value() {
+            request = request.name(Some(name));
+        }
+        if let Some(color) = edit.color_value() {
+            request = request.color(color);
+        }
+        if let Some(hoist) = edit.hoist_value() {
+            request = request.hoist(hoist);
+        }
+        if let Some(mentionable) = edit.mentionable_value() {
+            request = request.mentionable(mentionable);
+        }
+        if let Some(permissions) = edit.permissions_value() {
+            request = request.permissions(permissions);
+        }
+        Ok(request.reason(reason).await?.model().await?)
+    }
+
+    /// ロールを削除します。元に戻せません。必要な Bot の権限: `MANAGE_ROLES`。
+    /// ロールは Bot の最上位ロールより低い必要があります。
+    ///
+    /// # エラー
+    ///
+    /// [`edit_role`](Self::edit_role) と同じです。
+    pub async fn delete_role(&self, role_id: Id<RoleMarker>, reason: &str) -> Result<()> {
+        let guild_id = self.access.require_guild()?;
+        let (held, outranks) = self.access.bot_role_standing(role_id).await?;
+        check_bot_can_grant(held, Permissions::MANAGE_ROLES)?;
+        if !outranks {
+            return Err(CheckFailure::Hierarchy(HierarchyDenied::BotTooLow).into());
+        }
+        self.access
+            .http()
+            .delete_role(guild_id, role_id)
+            .reason(reason)
+            .await?;
+        Ok(())
     }
 
     /// メンバーをサーバーからキックします。必要な Bot の権限: `KICK_MEMBERS`。
@@ -335,7 +634,9 @@ mod tests {
     use super::*;
     use crate::{
         Access,
-        access::tests::{Mock, guild_json_with, member_json, offline_http, slash_interaction},
+        access::tests::{
+            Mock, guild_json_with, member_json, offline_http, role_json_with, slash_interaction,
+        },
         permissions::PermissionResolver,
     };
 
@@ -360,8 +661,34 @@ mod tests {
             ("/guilds/20/bans/99".into(), "{}".into()),
             ("/guilds/20/bans/1".into(), "{}".into()),
             ("/guilds/20/members/4/roles/101".into(), "{}".into()),
+            // チャンネルとロール。
+            (
+                "/guilds/20/channels".into(),
+                r#"{"id": "77", "type": 0, "guild_id": "20", "name": "new"}"#.into(),
+            ),
+            (
+                "/channels/30".into(),
+                r#"{"id": "30", "type": 0, "guild_id": "20", "name": "edited"}"#.into(),
+            ),
+            (
+                "/guilds/20/roles".into(),
+                role_json_with(200, 1, Permissions::SEND_MESSAGES),
+            ),
+            (
+                "/guilds/20/roles/101".into(),
+                role_json_with(101, 3, Permissions::SEND_MESSAGES),
+            ),
+            (
+                "/guilds/20/roles/102".into(),
+                role_json_with(102, 9, Permissions::empty()),
+            ),
         ])
         .await
+    }
+
+    /// 変数名 `mock` に隠れないように、別名の入り口を用意する。
+    async fn make_mock(bot_role: Permissions) -> Mock {
+        mock(bot_role).await
     }
 
     fn manage<'a>(
@@ -634,5 +961,292 @@ mod tests {
             manage.set_voice_mute(user(4), true, "理由").await,
             Err(Error::Check(CheckFailure::GuildOnly))
         ));
+    }
+
+    fn denied_validation(result: &Result<impl std::fmt::Debug>) -> bool {
+        matches!(result, Err(Error::ChannelValidation(_)))
+    }
+
+    #[tokio::test]
+    async fn creating_channels_validates_then_checks_the_bots_guild_permissions() {
+        use crate::{NewCategory, NewTextChannel, NewVoiceChannel};
+
+        let mock = mock(
+            Permissions::MANAGE_CHANNELS | Permissions::MANAGE_ROLES | Permissions::VIEW_CHANNEL,
+        )
+        .await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let interaction = slash_interaction(true, 0, 0);
+        let manage = manage(&http, &resolver, &interaction);
+
+        // 範囲外の値は、通信せずに断る。
+        for bad in [
+            NewTextChannel::new(""),
+            NewTextChannel::new("a").topic("あ".repeat(1025)),
+            NewTextChannel::new("a").slowmode(Duration::from_secs(21_601)),
+        ] {
+            assert!(denied_validation(
+                &manage.create_text_channel(bad, "理由").await
+            ));
+        }
+        assert!(denied_validation(
+            &manage
+                .create_voice_channel(NewVoiceChannel::new("v").user_limit(100), "理由")
+                .await
+        ));
+        assert_eq!(mock.count("POST /guilds/20/channels"), 0);
+
+        // 正しい指定は、種類ごとの本文で 1 回だけ送られる。
+        let overwrite = Overwrite::new().deny(Permissions::VIEW_CHANNEL);
+        let new = NewTextChannel::new("お知らせ")
+            .topic("トピック")
+            .slowmode(Duration::from_secs(10))
+            .category(Id::new(9))
+            .overwrite(OverwriteTarget::Role(Id::new(101)), overwrite);
+        assert!(manage.create_text_channel(new, "理由").await.is_ok());
+        let body = mock
+            .body_of("POST /guilds/20/channels")
+            .unwrap_or_else(|| panic!("本文がありません"));
+        assert_eq!(body["name"], "お知らせ");
+        assert_eq!(body["type"], 0);
+        assert_eq!(body["topic"], "トピック");
+        assert_eq!(body["rate_limit_per_user"], 10);
+        assert_eq!(body["parent_id"], "9");
+        assert_eq!(body["permission_overwrites"][0]["id"], "101");
+        assert_eq!(
+            body["permission_overwrites"][0]["deny"],
+            Permissions::VIEW_CHANNEL.bits().to_string()
+        );
+
+        assert!(
+            manage
+                .create_voice_channel(
+                    NewVoiceChannel::new("雑談").user_limit(10).bitrate(64_000),
+                    "理由"
+                )
+                .await
+                .is_ok()
+        );
+        assert!(
+            manage
+                .create_category(NewCategory::new("分類"), "理由")
+                .await
+                .is_ok()
+        );
+        assert_eq!(mock.count("POST /guilds/20/channels"), 3);
+    }
+
+    #[tokio::test]
+    async fn creating_channels_needs_manage_channels_and_the_overwritten_permissions() {
+        use crate::NewTextChannel;
+
+        // Bot のロールは MANAGE_CHANNELS だけ。
+        let mock = mock(Permissions::MANAGE_CHANNELS).await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let interaction = slash_interaction(true, 0, 0);
+        let manage = manage(&http, &resolver, &interaction);
+        assert!(
+            manage
+                .create_text_channel(NewTextChannel::new("a"), "理由")
+                .await
+                .is_ok()
+        );
+
+        // 上書きを付けるには、MANAGE_ROLES と、上書きする権限が要る。
+        let with_overwrite = NewTextChannel::new("b").overwrite(
+            OverwriteTarget::Role(Id::new(101)),
+            Overwrite::new().deny(Permissions::SEND_MESSAGES),
+        );
+        let denied = manage.create_text_channel(with_overwrite, "理由").await;
+        assert!(
+            matches!(
+                &denied,
+                Err(Error::Check(CheckFailure::BotMissingPermissions(missing)))
+                    if *missing == Permissions::MANAGE_ROLES | Permissions::SEND_MESSAGES
+            ),
+            "{denied:?}"
+        );
+        assert_eq!(mock.count("POST /guilds/20/channels"), 1);
+
+        let none = slash_interaction(true, 0, 0);
+        let weak_mock = make_mock(Permissions::empty()).await;
+        let http = weak_mock.client();
+        let weak = Manage::new(Access::for_interaction(&http, &resolver, &none));
+        let denied = weak
+            .create_text_channel(NewTextChannel::new("c"), "理由")
+            .await;
+        assert!(matches!(
+            denied,
+            Err(Error::Check(CheckFailure::BotMissingPermissions(missing)))
+                if missing == Permissions::MANAGE_CHANNELS
+        ));
+        assert_eq!(weak_mock.count("POST /guilds/20/channels"), 0);
+    }
+
+    #[tokio::test]
+    async fn editing_a_channel_sends_only_the_given_fields() {
+        use crate::{TextChannelEdit, VoiceChannelEdit};
+
+        let mock = mock(Permissions::empty()).await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let interaction = slash_interaction(true, 0, Permissions::MANAGE_CHANNELS.bits());
+        let manage = manage(&http, &resolver, &interaction);
+
+        let nothing = manage
+            .edit_text_channel(Id::new(30), TextChannelEdit::new(), "理由")
+            .await;
+        assert!(matches!(
+            nothing,
+            Err(Error::InvalidArgument(InvalidArgument::NothingToChange))
+        ));
+        let nothing = manage
+            .edit_voice_channel(Id::new(30), VoiceChannelEdit::new(), "理由")
+            .await;
+        assert!(matches!(
+            nothing,
+            Err(Error::InvalidArgument(InvalidArgument::NothingToChange))
+        ));
+        assert!(denied_validation(
+            &manage
+                .edit_text_channel(Id::new(30), TextChannelEdit::new().name(""), "理由")
+                .await
+        ));
+        assert_eq!(mock.count("PATCH /channels/30"), 0);
+
+        assert!(
+            manage
+                .edit_text_channel(
+                    Id::new(30),
+                    TextChannelEdit::new()
+                        .name("新しい名前")
+                        .slowmode(Duration::ZERO)
+                        .category(None),
+                    "理由"
+                )
+                .await
+                .is_ok()
+        );
+        let body = mock
+            .body_of("PATCH /channels/30")
+            .unwrap_or_else(|| panic!("本文がありません"));
+        assert_eq!(body["name"], "新しい名前");
+        assert_eq!(body["rate_limit_per_user"], 0);
+        assert!(body["parent_id"].is_null(), "{body}");
+        assert!(
+            body.get("topic").is_none() && body.get("bitrate").is_none(),
+            "{body}"
+        );
+
+        assert!(
+            manage
+                .edit_voice_channel(
+                    Id::new(30),
+                    VoiceChannelEdit::new().bitrate(96_000).user_limit(5),
+                    "理由"
+                )
+                .await
+                .is_ok()
+        );
+        assert_eq!(mock.count("PATCH /channels/30"), 2);
+
+        // MANAGE_CHANNELS がなければ、変更も削除も、送らずに断る。
+        let weak = slash_interaction(true, 0, Permissions::VIEW_CHANNEL.bits());
+        let weak = Manage::new(Access::for_interaction(&http, &resolver, &weak));
+        let denied = weak
+            .edit_text_channel(Id::new(30), TextChannelEdit::new().nsfw(true), "理由")
+            .await;
+        assert!(matches!(
+            denied,
+            Err(Error::Check(CheckFailure::BotMissingPermissions(missing)))
+                if missing == Permissions::MANAGE_CHANNELS
+        ));
+        assert!(weak.delete_channel(Id::new(30), "理由").await.is_err());
+        assert_eq!(mock.count("DELETE /channels/30"), 0);
+        assert!(manage.delete_channel(Id::new(30), "理由").await.is_ok());
+        assert_eq!(mock.count("DELETE /channels/30"), 1);
+    }
+
+    #[tokio::test]
+    async fn roles_are_created_edited_and_deleted_within_the_bots_reach() {
+        use crate::{NewRole, RoleEdit};
+
+        let bot_role = Permissions::MANAGE_ROLES | Permissions::SEND_MESSAGES;
+        let mock = mock(bot_role).await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let interaction = slash_interaction(true, 0, 0);
+        let manage = manage(&http, &resolver, &interaction);
+
+        assert!(
+            manage
+                .create_role(
+                    NewRole::new("認証済み")
+                        .color(0x002e_cc71)
+                        .hoist(true)
+                        .permissions(Permissions::SEND_MESSAGES),
+                    "理由"
+                )
+                .await
+                .is_ok()
+        );
+        let body = mock
+            .body_of("POST /guilds/20/roles")
+            .unwrap_or_else(|| panic!("本文がありません"));
+        assert_eq!(body["name"], "認証済み");
+        assert_eq!(body["color"], 0x002e_cc71);
+        assert_eq!(body["hoist"], true);
+        // Bot が持たない権限は、付けられない。
+        let denied = manage
+            .create_role(
+                NewRole::new("x").permissions(Permissions::BAN_MEMBERS),
+                "理由",
+            )
+            .await;
+        assert!(matches!(
+            denied,
+            Err(Error::Check(CheckFailure::BotMissingPermissions(missing)))
+                if missing == Permissions::BAN_MEMBERS
+        ));
+        assert_eq!(mock.count("POST /guilds/20/roles"), 1);
+
+        // ロール 101（位置 3）は、Bot（位置 9）より低いので、編集も削除もできる。
+        let edited = manage
+            .edit_role(
+                Id::new(101),
+                RoleEdit::new()
+                    .name("新名")
+                    .color(None)
+                    .permissions(Permissions::SEND_MESSAGES),
+                "理由",
+            )
+            .await;
+        assert!(edited.is_ok(), "{edited:?}");
+        assert_eq!(mock.count("PATCH /guilds/20/roles/101"), 1);
+        assert!(manage.delete_role(Id::new(101), "理由").await.is_ok());
+        assert_eq!(mock.count("DELETE /guilds/20/roles/101"), 1);
+
+        // Bot と同位のロール、存在しないロールは、送らずに断る。何も指定しない編集も断る。
+        for role in [102, 999] {
+            let edit = manage
+                .edit_role(Id::new(role), RoleEdit::new().hoist(true), "理由")
+                .await;
+            assert!(
+                is_hierarchy(&edit.map(|_| ()), HierarchyDenied::BotTooLow),
+                "{role}"
+            );
+            let delete = manage.delete_role(Id::new(role), "理由").await;
+            assert!(is_hierarchy(&delete, HierarchyDenied::BotTooLow), "{role}");
+        }
+        assert!(matches!(
+            manage
+                .edit_role(Id::new(101), RoleEdit::new(), "理由")
+                .await,
+            Err(Error::InvalidArgument(InvalidArgument::NothingToChange))
+        ));
+        assert_eq!(mock.count("PATCH /guilds/20/roles/102"), 0);
+        assert_eq!(mock.count("DELETE /guilds/20/roles/102"), 0);
     }
 }

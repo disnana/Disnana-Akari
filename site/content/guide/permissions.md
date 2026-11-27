@@ -252,6 +252,59 @@ async fn mute(ctx: &mut SlashContext<'_>, target: Id<UserMarker>) -> Result<()> 
 - 理由は監査ログに残る文字列で、512 文字以内です。
 - 1 つの操作は、Discord への 1 回のリクエストです（確認のための取得は別です）。
 
+## チャンネルとロールを作成・編集・削除する
+
+`ctx.manage()` で、チャンネルとロールも管理できます。**種類ごとに型を分けてあるので、成り立たない組み合わせは書けません**（テキストチャンネルにビットレートを渡すことはできません）。範囲外の値は、通信する前に失敗します。
+
+```rust
+use std::time::Duration;
+
+use disnana_akari::model::guild::Permissions;
+use disnana_akari::{
+    NewRole, NewTextChannel, NewVoiceChannel, Result, RoleEdit, SlashContext, TextChannelEdit,
+};
+
+async fn setup(ctx: &mut SlashContext<'_>) -> Result<()> {
+    let access = ctx.access();
+    // 実行した人が、操作してよいかは、呼ぶ側で確認する（Akari は確認しません）
+    access.require_permissions(Permissions::MANAGE_CHANNELS | Permissions::MANAGE_ROLES).await?;
+
+    let manage = ctx.manage();
+    let channel = manage
+        .create_text_channel(
+            NewTextChannel::new("お知らせ").topic("運営からのお知らせ").slowmode(Duration::from_secs(10)),
+            "お知らせ用のチャンネル",
+        )
+        .await?;
+    manage
+        .create_voice_channel(NewVoiceChannel::new("雑談").user_limit(10), "雑談用の VC")
+        .await?;
+    manage
+        .edit_text_channel(channel.id, TextChannelEdit::new().topic("新しいトピック"), "トピックの更新")
+        .await?;
+
+    let role = manage
+        .create_role(NewRole::new("認証済み").color(0x002e_cc71).hoist(true), "認証用のロール")
+        .await?;
+    manage
+        .edit_role(role.id, RoleEdit::new().mentionable(true), "メンションを許可")
+        .await?;
+    ctx.reply_ephemeral("作成しました。").await
+}
+```
+
+| メソッド | 必要な Bot の権限 |
+| --- | --- |
+| `create_text_channel`、`create_voice_channel`、`create_category` | `MANAGE_CHANNELS`（権限の上書きを付けるときは、`MANAGE_ROLES` と、上書きする権限も） |
+| `edit_text_channel`、`edit_voice_channel`、`delete_channel` | そのチャンネルでの `MANAGE_CHANNELS` |
+| `create_role` | `MANAGE_ROLES`（付ける権限は、Bot が持つものだけ） |
+| `edit_role`、`delete_role` | `MANAGE_ROLES`。ロールは、Bot の最上位ロールより低い必要があります |
+
+- 編集は、指定した項目だけを変更します。何も指定しないと、`InvalidArgument::NothingToChange` で、通信せずに失敗します。
+- 名前は 1〜100 文字、トピックは 1024 文字以内、スローモードは 6 時間以内、人数は 0〜99 です。範囲外は、検証のエラーで、通信せずに失敗します。ビットレートの上限は、サーバーのブーストの段階で決まるので、Discord の応答に従います。
+- 作成と編集は、更新後の Twilight の `Channel` と `Role` を返します。
+- 削除は、元に戻せません。実行した人への確認は、特に丁寧に行ってください。
+
 ## テキストコマンドで確認する
 
 メッセージには権限が付いていないため、Akari が Discord からサーバーとチャンネルの情報を取得して計算します（Twilight 公式の `twilight-util` の計算を使います）。ロールやチャンネルごとの上書きを反映し、サーバーのオーナーと管理者はすべての権限を持つものとして扱います。
