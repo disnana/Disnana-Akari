@@ -402,3 +402,149 @@ async fn modal_files_wait_for_completed_reply_before_private_followup() -> Resul
     client?;
     server
 }
+
+fn modal_interaction() -> Interaction {
+    use super::{InteractionData, ModalInteractionData};
+
+    let mut event = interaction(
+        InteractionType::ModalSubmit,
+        InteractionData::ModalSubmit(Box::new(ModalInteractionData {
+            components: Vec::new(),
+            custom_id: "test".into(),
+            resolved: None,
+        })),
+    );
+    event.token = "component-token".into();
+    event
+}
+
+#[tokio::test]
+async fn failed_initial_component_callbacks_do_not_send_automatic_replies() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use super::{InteractionHandlers, ModalContext};
+    use crate::{ErrorSource, hooks::Reporter, slash::response_diagnostics_tests::reject_callback};
+
+    let mut handlers = InteractionHandlers::default();
+    handlers.register_button("test", async |ctx: &mut ButtonContext<'_>| {
+        ctx.reply_ephemeral("reply").await
+    })?;
+    handlers.register_select("test", async |ctx: &mut SelectContext<'_>| {
+        ctx.reply_ephemeral("reply").await
+    })?;
+    handlers.register_modal("test", async |ctx: &mut ModalContext<'_>| {
+        ctx.reply_ephemeral("reply").await
+    })?;
+
+    for (source, event) in [
+        (
+            ErrorSource::Button,
+            component_interaction(ComponentType::Button),
+        ),
+        (
+            ErrorSource::Select,
+            component_interaction(ComponentType::TextSelectMenu),
+        ),
+        (ErrorSource::Modal, modal_interaction()),
+    ] {
+        for (status, code) in [("404 Not Found", 10062), ("400 Bad Request", 40060)] {
+            let (listener, http) = local_http().await?;
+            let reports = Arc::new(AtomicUsize::new(0));
+            let seen = Arc::clone(&reports);
+            let hooks = Hooks {
+                reporter: Reporter::new(move |report| {
+                    assert_eq!(report.source, source);
+                    seen.fetch_add(1, Ordering::Relaxed);
+                }),
+                ..Hooks::default()
+            };
+            let (_, timing) = Pending::new((), None).begin();
+            let ((), response) = timeout(Duration::from_secs(3), async {
+                tokio::join!(
+                    handlers.dispatch(&http, &event, timing, &hooks, &[]),
+                    reject_callback(&listener, status, code)
+                )
+            })
+            .await
+            .map_err(Error::handler)?;
+            response.map_err(Error::handler)?;
+            assert_eq!(reports.load(Ordering::Relaxed), 1);
+        }
+    }
+    Ok(())
+}
+
+async fn unrelated_callback(http: &Client) -> Result<()> {
+    use super::{InteractionResponse, InteractionResponseType};
+
+    let response = InteractionResponse {
+        kind: InteractionResponseType::DeferredUpdateMessage,
+        data: None,
+    };
+    http.interaction(Id::new(10))
+        .create_response(Id::new(2), "unrelated-token", &response)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn deferred_components_still_notify_about_unrelated_callback_errors() -> Result<()> {
+    use super::{InteractionHandlers, ModalContext};
+    use crate::slash::response_diagnostics_tests::reject_callback;
+
+    let mut handlers = InteractionHandlers::default();
+    handlers.register_button("test", async |ctx: &mut ButtonContext<'_>| -> Result<()> {
+        ctx.defer_update().await?;
+        unrelated_callback(ctx.http()).await
+    })?;
+    handlers.register_modal("test", async |ctx: &mut ModalContext<'_>| -> Result<()> {
+        ctx.defer_ephemeral().await?;
+        unrelated_callback(ctx.http()).await
+    })?;
+
+    for event in [
+        component_interaction(ComponentType::Button),
+        modal_interaction(),
+    ] {
+        let (listener, http) = local_http().await?;
+        let hooks = Hooks::default();
+        let (_, timing) = Pending::new((), None).begin();
+        let server = async {
+            let defer = json_request(&listener, "POST", CALLBACK).await?;
+            reject_callback(&listener, "404 Not Found", 10062)
+                .await
+                .map_err(Error::handler)?;
+            if event.kind == InteractionType::ModalSubmit {
+                assert_eq!(defer, json!({"type": 5, "data": {"flags": 64}}));
+                let edit = json_request(&listener, "PATCH", ORIGINAL).await?;
+                assert_eq!(
+                    edit["content"],
+                    hooks.messages.modal_failed.as_deref().unwrap()
+                );
+                assert!(edit.get("flags").is_none());
+            } else {
+                assert_eq!(defer, json!({"type": 6}));
+                let reply = json_request(&listener, "POST", FILE_FOLLOWUP).await?;
+                assert_eq!(
+                    reply["content"],
+                    hooks.messages.button_failed.as_deref().unwrap()
+                );
+                assert_eq!(reply["flags"], 64);
+            }
+            Ok::<_, Error>(())
+        };
+        let ((), result) = timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                handlers.dispatch(&http, &event, timing, &hooks, &[]),
+                server
+            )
+        })
+        .await
+        .map_err(Error::handler)?;
+        result?;
+    }
+    Ok(())
+}

@@ -13,7 +13,11 @@ use twilight_model::http::attachment::Attachment;
 use super::{file_response::FileCallback, tests::command_interaction, *};
 use crate::timing::Pending;
 
-async fn reject_callback(listener: &TcpListener, status: &str, code: u64) -> io::Result<()> {
+pub(crate) async fn reject_callback(
+    listener: &TcpListener,
+    status: &str,
+    code: u64,
+) -> io::Result<()> {
     let (stream, _) = listener.accept().await?;
     let mut stream = BufReader::new(stream);
     let mut line = String::new();
@@ -179,4 +183,49 @@ async fn dispatch_does_not_repeat_an_expired_or_acknowledged_callback() -> Resul
         assert_eq!(reports.load(Ordering::Relaxed), 1);
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn autocomplete_does_not_send_empty_choices_after_a_definitive_rejection() -> Result<()> {
+    let mut interaction = command_interaction(None, None, 5);
+    interaction.kind = InteractionType::ApplicationCommandAutocomplete;
+    let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
+        return Err(Error::msg(
+            "試験用の Interaction にコマンドデータがありません",
+        ));
+    };
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(Error::handler)?;
+    let client = Client::builder()
+        .proxy(
+            listener.local_addr().map_err(Error::handler)?.to_string(),
+            true,
+        )
+        .build();
+    let (_, timing) = Pending::new((), None).begin();
+    let info = InfoReporter::default();
+    let mut ctx = AutocompleteContext {
+        initial: InitialResponder {
+            http: &client,
+            interaction: &interaction,
+            timing,
+            info: &info,
+        },
+        data,
+        response_finished: false,
+    };
+    let request = async {
+        let choices = vec![SlashCommands::string_choice("例", "value")];
+        let rejected = ctx.respond(choices).await;
+        assert!(matches!(rejected, Err(error) if callback_unavailable(&error)));
+        ctx.respond_empty_if_needed().await
+    };
+    let (result, mock) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(request, reject_callback(&listener, "404 Not Found", 10062))
+    })
+    .await
+    .map_err(Error::handler)?;
+    mock.map_err(Error::handler)?;
+    result
 }

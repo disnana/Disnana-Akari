@@ -34,7 +34,8 @@ use crate::{
     Error, ErrorSource, HandlerKind, Messages, ResponseStateError, Result, SelectionError, Timing,
     hooks::Hooks,
     slash::{
-        InitialResponder, ResponseState, edit_ui_response, edit_v2_response, send_followup_message,
+        InitialResponder, ResponseState, callback_unavailable, edit_ui_response, edit_v2_response,
+        send_followup_message,
     },
     ui::{ComponentsV2, DynamicIdRef, Modal, UiMessage},
 };
@@ -260,16 +261,7 @@ impl InteractionHandlers {
                     radio,
                 };
                 let result = handler.call(&mut ctx).await;
-                let name = Some(data.custom_id.as_str());
-                if let Err(error) = &result {
-                    hooks.reporter.report(ErrorSource::Modal, name, error);
-                }
-                if let Some((content, ephemeral)) =
-                    modal_fallback(ctx.response, result.is_ok(), &hooks.messages)
-                    && let Err(error) = ctx.response.reply(initial, content, ephemeral).await
-                {
-                    hooks.reporter.report(ErrorSource::Response, name, &error);
-                }
+                finish_modal(&mut ctx, result, hooks).await;
             }
             None => {}
         }
@@ -394,6 +386,22 @@ fn modal_fallback(
     }
 }
 
+async fn finish_modal(ctx: &mut ModalContext<'_>, result: Result<()>, hooks: &Hooks) {
+    let name = Some(ctx.custom_id());
+    if let Err(error) = &result {
+        hooks.reporter.report(ErrorSource::Modal, name, error);
+        if ctx.response == ResponseState::Pending && callback_unavailable(error) {
+            return;
+        }
+    }
+    if let Some((content, ephemeral)) =
+        modal_fallback(ctx.response, result.is_ok(), &hooks.messages)
+        && let Err(error) = ctx.response.reply(ctx.initial, content, ephemeral).await
+    {
+        hooks.reporter.report(ErrorSource::Response, name, &error);
+    }
+}
+
 /// ボタンや選択メニューの関数の結果を処理する。
 ///
 /// 失敗はエラーの報告先へ渡し、文言が設定されていれば本人にだけ知らせる。
@@ -409,6 +417,9 @@ async fn finish_component(
     match result {
         Err(error) => {
             hooks.reporter.report(source, name, &error);
+            if ctx.response == ButtonResponse::Pending && callback_unavailable(&error) {
+                return;
+            }
             let Some(text) = failure else {
                 return;
             };

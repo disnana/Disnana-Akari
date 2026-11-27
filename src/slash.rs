@@ -1335,7 +1335,7 @@ impl ActiveSlashCommands {
         let mut ctx = AutocompleteContext {
             initial,
             data,
-            responded: false,
+            response_finished: false,
         };
         let handler = path.and_then(|path| {
             self.route(data)
@@ -1476,7 +1476,7 @@ impl ActiveSlashCommands {
     }
 }
 
-fn callback_unavailable(error: &Error) -> bool {
+pub(crate) fn callback_unavailable(error: &Error) -> bool {
     use twilight_http::{api_error::ApiError, error::ErrorType};
 
     // Discord が操作を失効済み・応答済みと判定した場合、初回応答を繰り返しても届きません。
@@ -2050,7 +2050,7 @@ impl InitialResponder<'_> {
 
 #[cfg(test)]
 #[path = "slash/response_diagnostics_tests.rs"]
-mod response_diagnostics_tests;
+pub(crate) mod response_diagnostics_tests;
 
 async fn edit_text_response(http: &Client, interaction: &Interaction, content: &str) -> Result<()> {
     crate::validation::message_content(content)?;
@@ -3112,7 +3112,7 @@ pub(crate) mod tests {
                 info: &info,
             },
             data,
-            responded: false,
+            response_finished: false,
         };
         let many = (0..26)
             .map(|index| SlashCommands::integer_choice("n", index))
@@ -3126,7 +3126,7 @@ pub(crate) mod tests {
             ctx.respond(vec![long]).await,
             Err(Error::CommandValidation(_))
         ));
-        ctx.responded = true;
+        ctx.response_finished = true;
         assert!(matches!(
             ctx.respond(vec![]).await,
             Err(Error::ResponseState(ResponseStateError::AlreadyResponded))

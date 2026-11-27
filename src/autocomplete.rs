@@ -18,7 +18,7 @@ use twilight_validate::command::{self, CHOICES_LIMIT};
 use crate::{
     Error, Result, Timing,
     error::ResponseStateError,
-    slash::{InitialResponder, command_path, leaf_options},
+    slash::{InitialResponder, callback_unavailable, command_path, leaf_options},
 };
 
 /// 引数の入力中に、Discord が候補を求めてきたときの呼び出しです。
@@ -28,7 +28,7 @@ use crate::{
 pub struct AutocompleteContext<'a> {
     pub(crate) initial: InitialResponder<'a>,
     pub(crate) data: &'a CommandData,
-    pub(crate) responded: bool,
+    pub(crate) response_finished: bool,
 }
 
 impl std::fmt::Debug for AutocompleteContext<'_> {
@@ -36,7 +36,7 @@ impl std::fmt::Debug for AutocompleteContext<'_> {
         f.debug_struct("AutocompleteContext")
             .field("interaction_id", &self.initial.interaction.id)
             .field("command", &self.data.name)
-            .field("responded", &self.responded)
+            .field("response_finished", &self.response_finished)
             .finish_non_exhaustive()
     }
 }
@@ -107,9 +107,10 @@ impl<'a> AutocompleteContext<'a> {
     /// # エラー
     ///
     /// 26 件以上の場合は [`Error::TooManyChoices`]、候補の名前や値が Discord の制約に合わない場合は
-    /// 検証のエラー、すでに返した場合は [`ResponseStateError::AlreadyResponded`] を返します。
+    /// 検証のエラーを返します。応答が成功した後や、Discord が操作を失効済み・応答済みと判定した後に
+    /// 再び呼ぶと [`ResponseStateError::AlreadyResponded`] を返します。
     pub async fn respond(&mut self, choices: Vec<CommandOptionChoice>) -> Result<()> {
-        if self.responded {
+        if self.response_finished {
             return Err(ResponseStateError::AlreadyResponded.into());
         }
         if choices.len() > CHOICES_LIMIT {
@@ -125,14 +126,17 @@ impl<'a> AutocompleteContext<'a> {
     }
 
     async fn send(&mut self, choices: Vec<CommandOptionChoice>) -> Result<()> {
-        self.initial.autocomplete(choices).await?;
-        self.responded = true;
-        Ok(())
+        let result = self.initial.autocomplete(choices).await;
+        self.response_finished = match &result {
+            Ok(()) => true,
+            Err(error) => callback_unavailable(error),
+        };
+        result
     }
 
     /// 関数が返さずに終わったときに、入力欄が読み込み中のままにならないよう、空の候補を返す。
     pub(crate) async fn respond_empty_if_needed(&mut self) -> Result<()> {
-        if self.responded {
+        if self.response_finished {
             return Ok(());
         }
         self.send(Vec::new()).await
