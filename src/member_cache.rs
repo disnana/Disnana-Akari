@@ -194,7 +194,7 @@ impl MemberCacheRuntime {
             && let Some(cache) = cache.as_mut()
         {
             cache.suspended.insert(shard);
-            cache.bootstrap.cancel_shard(shard);
+            cache.bootstrap.pause_shard(shard);
         }
     }
 

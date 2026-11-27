@@ -37,7 +37,7 @@ impl BootstrapConfig {
         let guilds: HashSet<_> = guilds.into_iter().collect();
         (!guilds.is_empty()).then_some(Self {
             guilds,
-            limit: limit.get().min(PAGE_MAX),
+            limit: limit.get(),
         })
     }
 }
@@ -88,9 +88,12 @@ impl Bootstrap {
                 job: Job {
                     guild: guild.id,
                     shard,
-                    limit: self.config.limit,
+                    limit: self.config.limit.min(PAGE_MAX),
+                    after: None,
                     generation: Arc::new(()),
                 },
+                remaining: self.config.limit,
+                touch_limit: usize::from(self.config.limit),
                 running: false,
                 touched: HashSet::new(),
             },
@@ -104,13 +107,35 @@ struct Job {
     guild: Id<GuildMarker>,
     shard: ShardId,
     limit: u16,
+    after: Option<Id<UserMarker>>,
     generation: Arc<()>,
 }
 
 struct Request {
     job: Job,
+    remaining: u16,
+    touch_limit: usize,
     running: bool,
     touched: HashSet<Id<UserMarker>>,
+}
+
+impl Request {
+    fn next_page(mut self, received: usize, last: Option<Id<UserMarker>>) -> Option<Self> {
+        if received != usize::from(self.job.limit) {
+            return None;
+        }
+        let after = last.filter(|id| Some(*id) != self.job.after)?;
+        self.remaining -= self.job.limit;
+        if self.remaining == 0 {
+            return None;
+        }
+        self.job.limit = self.remaining.min(PAGE_MAX);
+        self.job.after = Some(after);
+        self.job.generation = Arc::new(());
+        self.running = false;
+        self.touched.retain(|id| *id > after);
+        Some(self)
+    }
 }
 
 #[derive(Default)]
@@ -119,6 +144,20 @@ pub(super) struct Pending(HashMap<Id<GuildMarker>, Request>);
 impl Pending {
     pub(super) fn cancel_shard(&mut self, shard: ShardId) {
         self.0.retain(|_, request| request.job.shard != shard);
+    }
+
+    pub(super) fn pause_shard(&mut self, shard: ShardId) {
+        for request in self
+            .0
+            .values_mut()
+            .filter(|request| request.job.shard == shard)
+        {
+            if request.running {
+                // 再開後は最後に保存できたページの次から始める。
+                request.job.generation = Arc::new(());
+                request.running = false;
+            }
+        }
     }
 
     pub(super) fn cancel_guild(&mut self, shard: ShardId, guild: Id<GuildMarker>) {
@@ -134,8 +173,9 @@ impl Pending {
     pub(super) fn touch(&mut self, shard: ShardId, guild: Id<GuildMarker>, user: Id<UserMarker>) {
         if let Some(request) = self.0.get_mut(&guild)
             && request.job.shard == shard
+            && request.job.after.is_none_or(|after| user > after)
             && request.touched.insert(user)
-            && request.touched.len() > usize::from(request.job.limit)
+            && request.touched.len() > request.touch_limit
         {
             // 変化の多いサーバーでも、取得候補と同じ件数までしか競合履歴を保存しません。
             self.0.remove(&guild);
@@ -153,7 +193,7 @@ impl Pending {
 
     fn complete(&mut self, job: &Job) -> Option<Request> {
         let request = self.0.get(&job.guild)?;
-        if !Arc::ptr_eq(&request.job.generation, &job.generation) {
+        if !request.running || !Arc::ptr_eq(&request.job.generation, &job.generation) {
             return None;
         }
         self.0.remove(&job.guild)
@@ -217,7 +257,7 @@ impl BootstrapWorker {
         cache.bootstrap.claim(&cache.suspended)
     }
 
-    fn complete(&self, job: &Job, members: Vec<Member>) -> bool {
+    fn complete(&self, job: &Job, mut members: Vec<Member>) -> bool {
         let Ok(mut cache) = self.cache.0.write() else {
             return false;
         };
@@ -227,27 +267,37 @@ impl BootstrapWorker {
         let Some(request) = cache.bootstrap.complete(job) else {
             return false;
         };
-        for member in members.into_iter().take(usize::from(job.limit)) {
+        members.truncate(usize::from(job.limit));
+        let received = members.len();
+        let mut last = job.after;
+        for member in members {
             if cache.order.len() >= cache.capacity.get() {
                 break;
             }
-            if !request.touched.contains(&member.user.id)
-                && cache.entry_mut((job.guild, member.user.id)).is_none()
-            {
+            let user = member.user.id;
+            if job.after.is_some_and(|after| user <= after) {
+                continue;
+            }
+            last = last.max(Some(user));
+            if !request.touched.contains(&user) && cache.entry_mut((job.guild, user)).is_none() {
                 cache.insert_snapshot(job.shard, job.guild, Arc::new(member));
             }
+        }
+        if cache.order.len() < cache.capacity.get()
+            && let Some(next) = request.next_page(received, last)
+        {
+            cache.bootstrap.0.insert(job.guild, next);
         }
         true
     }
 }
 
 async fn fetch(http: &Client, job: &Job) -> Result<Vec<Member>> {
-    Ok(http
-        .guild_members(job.guild)
-        .limit(job.limit)
-        .await?
-        .models()
-        .await?)
+    let mut request = http.guild_members(job.guild).limit(job.limit);
+    if let Some(after) = job.after {
+        request = request.after(after);
+    }
+    Ok(request.await?.models().await?)
 }
 
 #[cfg(test)]
@@ -255,7 +305,7 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-        net::TcpListener,
+        net::{TcpListener, TcpStream},
         sync::oneshot,
     };
     use twilight_gateway::{Event, EventTypeFlags, Intents};
@@ -323,6 +373,28 @@ mod tests {
         }
     }
 
+    async fn accept_request(listener: &TcpListener, path: &str) -> BufReader<TcpStream> {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut line = String::new();
+        socket.read_line(&mut line).await.unwrap();
+        assert_eq!(line.trim_end(), format!("GET {path} HTTP/1.1"));
+        while !line.trim_end().is_empty() {
+            line.clear();
+            assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+        }
+        socket
+    }
+
+    async fn send_members(socket: &mut BufReader<TcpStream>, body: Vec<Value>) {
+        let body = serde_json::to_string(&body).unwrap();
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.get_mut().write_all(reply.as_bytes()).await.unwrap();
+    }
+
     #[test]
     fn replacement_guild_and_disconnected_shard_cancel_in_flight_pages() {
         let (runtime, handle, worker) = make_runtime(4);
@@ -346,12 +418,19 @@ mod tests {
         ));
         let second = worker.claim().unwrap();
         runtime.suspend_shard(ShardId::ONE);
+        assert!(worker.claim().is_none());
         route.observe(&Event::Resumed);
         assert!(!worker.complete(
             &second,
             vec![serde_json::from_value(member("8", "old")).unwrap()]
         ));
         assert!(handle.get(GUILD, Id::new(8)).is_none());
+        let current = worker.claim().unwrap();
+        assert!(worker.complete(
+            &current,
+            vec![serde_json::from_value(member("8", "current")).unwrap()]
+        ));
+        assert!(handle.get(GUILD, Id::new(8)).is_some());
     }
 
     #[tokio::test]
@@ -374,32 +453,20 @@ mod tests {
         let (changed, when_changed) = oneshot::channel();
         let reporter = Reporter::default();
         let server = async {
-            let (socket, _) = listener.accept().await.unwrap();
-            let mut socket = BufReader::new(socket);
-            let mut line = String::new();
-            socket.read_line(&mut line).await.unwrap();
-            assert_eq!(
-                line.trim_end(),
-                "GET /api/v10/guilds/2/members?limit=4 HTTP/1.1"
-            );
-            while !line.trim_end().is_empty() {
-                line.clear();
-                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
-            }
+            let mut socket = accept_request(&listener, "/api/v10/guilds/2/members?limit=4").await;
             requested.send(()).unwrap();
             when_changed.await.unwrap();
-            let body = json!([
-                member("6", "rest"),
-                member("7", "updated"),
-                member("8", "left"),
-                member("9", "loaded"),
-                member("10", "too many")
-            ]);
-            let reply = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.to_string().len()
-            );
-            socket.get_mut().write_all(reply.as_bytes()).await.unwrap();
+            send_members(
+                &mut socket,
+                vec![
+                    member("6", "rest"),
+                    member("7", "updated"),
+                    member("8", "left"),
+                    member("9", "loaded"),
+                    member("10", "too many"),
+                ],
+            )
+            .await;
         };
         let driving = async {
             when_requested.await.unwrap();
@@ -436,5 +503,70 @@ mod tests {
         assert!(handle.get(GUILD, Id::new(8)).is_none());
         assert!(handle.get(GUILD, Id::new(9)).is_some());
         assert!(handle.get(GUILD, Id::new(10)).is_none());
+    }
+
+    #[tokio::test]
+    async fn paginated_bootstrap_resumes_from_last_completed_page() {
+        let (runtime, handle, worker) = make_runtime(1_002);
+        let route = runtime.shard(ShardId::ONE);
+        let types = runtime.event_types();
+        observe(route, "GUILD_CREATE", create("2", vec![], 2_000), types);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http = Client::builder()
+            .token("fixture".to_owned())
+            .proxy(listener.local_addr().unwrap().to_string(), true)
+            .build();
+        let (requested, when_requested) = oneshot::channel();
+        let (resumed, when_resumed) = oneshot::channel();
+        let reporter = Reporter::default();
+        let server = async {
+            let mut first = accept_request(&listener, "/api/v10/guilds/2/members?limit=1000").await;
+            let descending = (1..=1_000)
+                .rev()
+                .map(|id| member(&id.to_string(), "first"))
+                .collect();
+            send_members(&mut first, descending).await;
+            let path = "/api/v10/guilds/2/members?after=1000&limit=2";
+            let mut obsolete = accept_request(&listener, path).await;
+            requested.send(()).unwrap();
+            when_resumed.await.unwrap();
+            send_members(&mut obsolete, vec![member("1002", "obsolete")]).await;
+            let mut current = accept_request(&listener, path).await;
+            send_members(
+                &mut current,
+                vec![member("1001", "removed"), member("1002", "current")],
+            )
+            .await;
+        };
+        let driving = async {
+            when_requested.await.unwrap();
+            runtime.suspend_shard(ShardId::ONE);
+            assert!(handle.get(GUILD, Id::new(1)).is_none());
+            observe(
+                route,
+                "GUILD_MEMBER_REMOVE",
+                json!({"guild_id":"2","user": member("1001", "removed")["user"]}),
+                types,
+            );
+            route.observe(&Event::Resumed);
+            resumed.send(()).unwrap();
+            loop {
+                if let Some(member) = handle.get(GUILD, Id::new(1_002)) {
+                    assert_eq!(member.nick.as_deref(), Some("current"));
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+        timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                server,
+                BootstrapWorker::drive(Some(worker), &http, &reporter, driving)
+            );
+        })
+        .await
+        .unwrap();
+        assert_eq!(handle.guild_members(GUILD).len(), 1_001);
+        assert!(handle.get(GUILD, Id::new(1_001)).is_none());
     }
 }

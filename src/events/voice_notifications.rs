@@ -10,7 +10,10 @@ use twilight_model::{
 };
 
 use super::{Events, Handler, Reporter, Result, adapt_handler, dispatch};
-use crate::Error;
+use crate::{
+    Error,
+    voice_channel::{ChannelInfo, VoiceChannelStartTimeUpdate, VoiceChannelStatusUpdate},
+};
 
 /// サウンドボード音の [`Id`] に使うマーカーです。
 pub enum SoundboardSoundMarker {}
@@ -137,7 +140,7 @@ pub struct SoundboardSounds {
 macro_rules! notifications {
     ($($(#[$doc:meta])* $method:ident, $field:ident, $payload:ident, $name:literal, $intent:expr;)+) => {
         #[derive(Clone, Copy, Default)]
-        pub(crate) struct VoiceNotificationTypes(u8);
+        pub(crate) struct VoiceNotificationTypes(u16);
 
         #[repr(u8)]
         enum Kind {
@@ -255,6 +258,18 @@ notifications! {
     ///
     /// 登録だけでは一覧を要求しません。
     on_soundboard_sounds, list, SoundboardSounds, "SOUNDBOARD_SOUNDS", Intents::empty();
+    /// ボイスチャンネルのステータス変更の通知を受け取ります。
+    ///
+    /// `GUILDS` Intent が必要です。
+    on_voice_channel_status_update, channel_status, VoiceChannelStatusUpdate, "VOICE_CHANNEL_STATUS_UPDATE", Intents::GUILDS;
+    /// ボイスチャンネルのセッション開始時刻の変更通知を受け取ります。
+    ///
+    /// `GUILDS` Intent が必要です。
+    on_voice_channel_start_time_update, channel_start, VoiceChannelStartTimeUpdate, "VOICE_CHANNEL_START_TIME_UPDATE", Intents::GUILDS;
+    /// Gateway の `Request Channel Info` に対する応答を受け取ります。
+    ///
+    /// 登録だけでは情報を要求しません。
+    on_channel_info, channel_info, ChannelInfo, "CHANNEL_INFO", Intents::empty();
 }
 
 #[cfg(test)]

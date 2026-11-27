@@ -1,52 +1,110 @@
 # 定期処理
 
-Bot の接続中に集計やメンテナンスを行うときは、Tokio のタイマーで処理を繰り返せます。起動する場所、間隔、エラーが起きたときの動作をアプリで決めます。discord.py の `discord.ext.tasks` で使う定期処理にあたります。
+Bot の接続中に集計やメンテナンスを行うときは、Tokio のタイマーで処理を繰り返せます。discord.py の `tasks.loop`、`before_loop`、`stop` にあたる動作を、タイマーと通知で組み立てます。開始条件、停止の順序、再試行するエラーはアプリで決めます。[discord.py の定期処理](https://discordpy.readthedocs.io/en/stable/ext/tasks/)
 
-## Ready を待ってから動かす
+## Ready を待ち、実行中の処理が終わってから停止する
 
-次の例は、Gateway が最初に Ready になったあとに集計を始めます。再接続で Ready が再び来ても、定期処理は 1 本だけです。Bot が終了すると、同じ関数の中で定期処理も終了します。
+次の例は、Gateway が最初に Ready になったあとに、集計を 60 秒ごとに実行します。`on_ready` は準備を通知するだけなので、再接続で Ready が再び届いてもループは 1 本です。`events` には組み立て済みのイベント一覧、`stop` にはアプリの終了通知が届くと完了する Future を渡します。アプリ側の Tokio では `macros`、`rt`、`sync`、`time` 機能を使います。[モジュールで登録をまとめる](modules.md)
 
 ```rust
-use std::time::Duration;
-use disnana_akari::{Bot, Events, Ready, Result};
-use tokio::{sync::watch, time::{self, MissedTickBehavior}};
+use std::{future::Future, io, time::Duration};
 
-async fn run(bot: Bot) -> Result<()> {
+use disnana_akari::{Bot, Error, Events, Ready, Result};
+use tokio::{
+    sync::{oneshot, watch},
+    time::{self, MissedTickBehavior},
+};
+
+async fn run_until(
+    bot: Bot,
+    mut events: Events,
+    stop: impl Future<Output = ()>,
+    collect: impl AsyncFnMut() -> io::Result<()>,
+) -> Result<()> {
     let (ready, mut ready_rx) = watch::channel(false);
-    let mut events = Events::new();
+    let (stop_worker, worker_stop) = oneshot::channel();
     events.on_ready(async move |_: &Ready| -> Result<()> {
         ready.send_replace(true);
         Ok(())
     });
 
-    let periodic = async {
-        if ready_rx.wait_for(|ready| *ready).await.is_err() {
-            return;
-        }
-        let mut interval = time::interval(Duration::from_secs(60));
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            collect_statistics().await;
-        }
-    };
+    let (bot, shutdown) = bot.with_events(events).with_shutdown();
+    let running = bot.start();
+    let worker = periodic(&mut ready_rx, worker_stop, collect);
+    tokio::pin!(running, worker);
 
     tokio::select! {
-        result = bot.with_events(events).start() => result,
-        () = periodic => Ok(()),
+        result = &mut running => {
+            let _ = stop_worker.send(());
+            result.and(worker.await.map_err(Error::handler))
+        }
+        () = stop => {
+            let _ = stop_worker.send(());
+            shutdown.request();
+            let (result, work) = tokio::join!(running, worker);
+            result.and(work.map_err(Error::handler))
+        }
+        work = &mut worker => {
+            shutdown.request();
+            work.map_err(Error::handler).and(running.await)
+        }
     }
 }
 
-async fn collect_statistics() {
-    // ここでアプリの集計処理を行います。
+async fn periodic(
+    ready: &mut watch::Receiver<bool>,
+    mut stop: oneshot::Receiver<()>,
+    mut collect: impl AsyncFnMut() -> io::Result<()>,
+) -> io::Result<()> {
+    tokio::select! {
+        biased;
+        _ = &mut stop => return Ok(()),
+        ready = ready.wait_for(|is_ready| *is_ready) => {
+            if ready.is_err() {
+                return Ok(());
+            }
+        }
+    }
+
+    let mut interval = time::interval(Duration::from_secs(60));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut stop => return Ok(()),
+            _ = interval.tick() => {}
+        }
+
+        let mut delay = Duration::from_secs(1);
+        loop {
+            // 実行中に停止通知が届いても、この 1 回の処理は最後まで待ちます。
+            match collect().await {
+                Ok(()) => break,
+                Err(error) if error.kind() == io::ErrorKind::TimedOut
+                    && delay < Duration::from_secs(8) => {}
+                Err(error) => return Err(error),
+            }
+
+            tokio::select! {
+                biased;
+                _ = &mut stop => return Ok(()),
+                _ = time::sleep(delay) => {}
+            }
+            delay *= 2;
+        }
+    }
 }
 ```
 
-最初の実行は Ready の直後です。集計が長引いた場合、過ぎた間隔の分を連続して実行しないよう `MissedTickBehavior::Skip` を指定しています。集計関数の実行中に Bot が終了すると、集計の Future はその時点で破棄されます。完了まで待つ必要がある書き込みは、終了を通知してタスクを `await` する構成にします。
+最初の実行は Ready の直後です。集計が長引いた場合は `MissedTickBehavior::Skip` で、過ぎた間隔の分をまとめて実行するのを避けます。Ready、次の実行時刻、再試行を待っている間に停止通知が届くと、その場で終了します。すでに集計が始まっていれば、その回の処理が戻ってから停止します。Bot が先に終了した場合も集計へ停止を通知し、完了を待ちます。[Tokio の Interval](https://docs.rs/tokio/latest/tokio/time/struct.Interval.html)
 
-ネットワーク障害の再試行を入れる場合は、処理が安全に繰り返せることを確かめ、対象のエラーと待ち時間を決めます。CPU を長く使う処理や同期 I/O は `tokio::task::spawn_blocking` に移します。
+テキストコマンドと組み合わせる場合は、`bot.start()` の箇所を `bot.run_commands(commands)` に替えます。
 
-[discord.py の定期処理](https://discordpy.readthedocs.io/en/stable/ext/tasks/) · [Tokio の Interval](https://docs.rs/tokio/latest/tokio/time/struct.Interval.html)
+### 一時的なエラーを再試行する
+
+この例では `TimedOut` のときだけ、1 秒、2 秒、4 秒と待ち時間を延ばして最大 3 回再試行します。上限に達した場合やほかのエラーでは定期処理を終え、`run_until` が Bot に停止を要求してエラーを返します。失敗の種類は実際に使うサービスに合わせ、繰り返しても結果が重複しない操作に限って再試行してください。タイムアウト前に書き込みが完了していた可能性がある場合は、識別子による重複防止や結果の照合を処理に組み込みます。
+
+停止時間の上限が必要な場合は、`collect` の I/O に制限時間を設定します。この例は実行中の `collect` が戻るまで待ち続けます。CPU を長く使う処理や同期 I/O は `tokio::task::spawn_blocking` に移します。
 
 ## Bot に終了を要求する
 

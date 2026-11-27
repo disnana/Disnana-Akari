@@ -265,7 +265,7 @@ async fn main() -> Result<()> {
 
 ## 起動時に指定サーバーのメンバーを補う
 
-`with_member_cache_bootstrap` を使うと、明示したサーバーが利用可能になったときに、メンバーを REST で1ページだけ取得します。取得はバックグラウンドで進み、`on_ready` では結果を待ちません。`GUILDS` と特権 Intent の `GUILD_MEMBERS` を設定します。
+`with_member_cache_bootstrap` を使うと、明示したサーバーが利用可能になったときに、メンバーをバックグラウンドで取得します。件数はサーバーごとの指定上限とキャッシュ容量の小さい方までで、REST の各ページは最大1,000件です。Gateway の再開時には途中のページから続けます。`on_ready` は取得完了を待たないので、初回から必要なメンバーがいる場合は、キャッシュに見つからなかったときの処理も用意します。`GUILDS` と特権 Intent の `GUILD_MEMBERS` を設定します。
 
 ```rust
 use std::num::NonZeroU16;
@@ -275,13 +275,13 @@ use disnana_akari::model::{
     id::{Id, marker::GuildMarker},
 };
 
-fn enable_seed(bot: Bot, guild: Id<GuildMarker>, page: NonZeroU16)
+fn enable_seed(bot: Bot, guild: Id<GuildMarker>, per_guild_limit: NonZeroU16)
     -> (Bot, MemberCacheHandle)
 {
     let (bot, members) = bot
         .add_intents(Intents::GUILDS | Intents::GUILD_MEMBERS)
         .with_member_cache(512);
-    (bot.with_member_cache_bootstrap([guild], page), members)
+    (bot.with_member_cache_bootstrap([guild], per_guild_limit), members)
 }
 ```
 
@@ -303,3 +303,11 @@ fn listen(events: &mut Events) {
 ```
 
 サーバーのサウンドボード素材の作成・更新・削除は、`on_guild_soundboard_sound_create`、`on_guild_soundboard_sound_update`、`on_guild_soundboard_sound_delete` で受け取ります。複数の更新は `on_guild_soundboard_sounds_update` です。これらの通知には Twilight の `GUILD_EMOJIS_AND_STICKERS` Intent が必要です。`on_soundboard_sounds` は Gateway の一覧取得に対する応答を受け取ります。[Discord の Gateway イベント仕様](https://docs.discord.com/developers/events/gateway-events#voice-channel-effect-send)
+
+既定音は `soundboard::default_sounds(ctx.http())`、サーバー固有の音は `soundboard::guild_sounds(ctx.http(), guild_id)` で REST から取得できます。`soundboard::play(ctx.http(), channel_id, sound_id, source_guild)` は、Bot がすでに接続しているボイスチャンネルで指定の音を再生します。既定音や同じサーバーの音では `source_guild` に `None` を渡し、別サーバーの音ではそのサーバー ID を渡します。Bot には `SPEAK` と `USE_SOUNDBOARD`、別サーバーの音には追加で `USE_EXTERNAL_SOUNDS` が必要です。[Discord のサウンドボード REST 仕様](https://docs.discord.com/developers/resources/soundboard)
+
+## ボイスチャンネルのステータスと開始時刻
+
+`Events::on_voice_channel_status_update` と `Events::on_voice_channel_start_time_update` は、`GUILDS` Intent を指定すると受信できます。イベント型は `disnana_akari::voice_channel` にあります。ステータスが解除されると `status` は `None` になり、開始時刻は Unix 時刻の秒単位です。[Discord のボイスチャンネルイベント仕様](https://docs.discord.com/developers/events/gateway-events#voice-channel-status-update)
+
+`Events::on_channel_info` は `Request Channel Info` に対するサーバーごとの応答を受信します。Akari が提供するのは受信の登録です。登録だけでは Discord に情報を要求しません。[Discord のチャンネル情報イベント仕様](https://docs.discord.com/developers/events/gateway-events#channel-info)

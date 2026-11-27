@@ -20,6 +20,9 @@ const UPDATE: &str = "GUILD_SOUNDBOARD_SOUND_UPDATE";
 const DELETE: &str = "GUILD_SOUNDBOARD_SOUND_DELETE";
 const UPDATE_ALL: &str = "GUILD_SOUNDBOARD_SOUNDS_UPDATE";
 const LIST: &str = "SOUNDBOARD_SOUNDS";
+const STATUS: &str = "VOICE_CHANNEL_STATUS_UPDATE";
+const START: &str = "VOICE_CHANNEL_START_TIME_UPDATE";
+const INFO: &str = "CHANNEL_INFO";
 const EXPRESSIONS: Intents = Intents::GUILD_EMOJIS_AND_STICKERS;
 const VOICE: Intents = Intents::GUILD_VOICE_STATES;
 
@@ -87,6 +90,69 @@ async fn only_requested_events_are_decoded_and_intents_are_checked_before_connec
         bot.start().await,
         Err(Error::MissingEventIntents { any_of }) if any_of == VOICE
     ));
+}
+
+#[tokio::test]
+async fn channel_updates_and_info_keep_nullable_fields_and_require_only_documented_intents() {
+    let mut events = Events::new();
+    let status = json!({"id":"8", "guild_id":"7", "status":null});
+    events.on_channel_info(async |_: &ChannelInfo| -> Result<()> { Ok(()) });
+    let info_only = events.voice_notification_types(Intents::empty()).unwrap();
+    assert!(decode(STATUS, status.clone(), info_only).is_none());
+
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&observed);
+    events.on_voice_channel_status_update(
+        async move |data: &VoiceChannelStatusUpdate| -> Result<()> {
+            assert_eq!(data.channel_id.get(), 8);
+            assert_eq!(data.guild_id.get(), 7);
+            captured.lock().unwrap().push(data.status.clone());
+            Ok(())
+        },
+    );
+    events.on_voice_channel_start_time_update(
+        async |_: &VoiceChannelStartTimeUpdate| -> Result<()> { Ok(()) },
+    );
+    assert!(matches!(
+        events.voice_notification_types(VOICE),
+        Err(Error::MissingEventIntents { any_of }) if any_of == Intents::GUILDS
+    ));
+    let types = events.voice_notification_types(Intents::GUILDS).unwrap();
+    for data in [status, json!({"id":"8", "guild_id":"7", "status":"録音中"})] {
+        let IncomingEvent::VoiceNotification(event) = decode(STATUS, data, types).unwrap().unwrap()
+        else {
+            panic!("expected a typed voice notification");
+        };
+        events
+            .voice_notification(&event, &Reporter::default())
+            .await;
+    }
+    assert_eq!(*observed.lock().unwrap(), [None, Some("録音中".to_owned())]);
+    assert!(matches!(
+        decode(STATUS, json!({"id":"8", "guild_id":"7"}), types),
+        Some(Err(Error::GatewayNotificationDecode { event: STATUS, .. }))
+    ));
+
+    for start in [None, Some(1_769_904_000_i64)] {
+        let data = json!({"id":"8", "guild_id":"7", "voice_start_time":start});
+        let IncomingEvent::VoiceNotification(VoiceNotification::VoiceChannelStartTimeUpdate(data)) =
+            decode(START, data, types).unwrap().unwrap()
+        else {
+            panic!("expected a start-time update");
+        };
+        assert_eq!(data.channel_id.get(), 8);
+        assert_eq!(data.voice_start_time, start);
+    }
+    let data = json!({"guild_id":"7", "channels":[{"id":"8"}, {"id":"9", "status":null, "voice_start_time":1_769_904_000} ]});
+    let IncomingEvent::VoiceNotification(VoiceNotification::ChannelInfo(data)) =
+        decode(INFO, data, info_only).unwrap().unwrap()
+    else {
+        panic!("expected channel information");
+    };
+    assert_eq!(data.guild_id.get(), 7);
+    assert_eq!(data.channels[0].channel_id.get(), 8);
+    assert_eq!(data.channels[0].status, None);
+    assert_eq!(data.channels[1].voice_start_time, Some(1_769_904_000));
 }
 
 #[tokio::test]

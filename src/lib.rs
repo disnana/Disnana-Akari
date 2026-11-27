@@ -24,9 +24,11 @@ mod permissions;
 mod presence;
 mod shutdown;
 mod slash;
+pub mod soundboard;
 mod timing;
 pub mod ui;
 pub mod validation;
+pub mod voice_channel;
 mod voice_gateway;
 mod work_queue;
 
@@ -376,9 +378,10 @@ impl Bot {
     ///
     /// [`Self::cache_members`] または [`Self::with_member_cache`] で正の容量を設定し、
     /// `GUILDS` と `GUILD_MEMBERS` Intent を指定してください。サーバーが利用可能になった時点で
-    /// 1 ページだけ取得します。1 サーバーの取得上限は `per_guild_limit`、1,000 件、
-    /// キャッシュ容量の最小値です。取得はバックグラウンドで進むので Ready の処理を待たせません。
+    /// 1 ページにつき最大 1,000 件を取得します。サーバーごとの総取得上限は
+    /// `per_guild_limit` とキャッシュ容量の小さい値です。取得はバックグラウンドで進みます。
     /// 保存済みのメンバーや取得中に更新・退出したメンバーは上書きしません。
+    /// Gateway を再開できた場合は、最後に受け取ったページの次から取得を続けます。
     /// 空のリストを渡すと REST 取得を無効にします。
     #[must_use]
     pub fn with_member_cache_bootstrap(
