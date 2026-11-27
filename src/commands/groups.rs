@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{CommandContext, CommandHandler, Invocation, duplicate_command};
+use super::{
+    CommandContext, CommandHandler, CommandInfo, CommandMetadata, Invocation, duplicate_command,
+};
 use crate::{RegistrationError, Result, error::adapt_handler};
 
 /// テキストコマンドをグループにまとめます。
@@ -22,6 +24,19 @@ impl std::fmt::Debug for TextCommandGroup<'_> {
 }
 
 impl TextCommandGroup<'_> {
+    /// このグループ直下の登録済みコマンドやグループのヘルプ設定を置き換えます。
+    ///
+    /// # エラー
+    /// 正式名の子が登録されていない場合に失敗します。
+    pub fn set_child_metadata(&mut self, name: &str, metadata: CommandMetadata) -> Result<()> {
+        self.tree.set_local_metadata(name, metadata).ok_or_else(|| {
+            RegistrationError::UnknownCommand {
+                name: self.tree.qualify(name).into(),
+            }
+            .into()
+        })
+    }
+
     /// このグループにコマンドを登録します。
     ///
     /// # エラー
@@ -122,6 +137,7 @@ impl TextCommandGroup<'_> {
 #[derive(Default)]
 pub(super) struct CommandTree {
     entries: HashMap<String, CommandEntry>,
+    metadata: HashMap<String, CommandMetadata>,
     path: Box<str>,
     fallback: Option<Box<dyn CommandHandler>>,
 }
@@ -172,6 +188,107 @@ impl CommandTree {
 
     pub(super) fn append(&mut self, staged: Self) {
         self.entries.extend(staged.entries);
+        self.metadata.extend(staged.metadata);
+    }
+
+    pub(super) fn set_metadata(&mut self, path: &str, metadata: CommandMetadata) -> Option<()> {
+        let mut names = path.split_whitespace().peekable();
+        let mut tree = self;
+        while let Some(name) = names.next() {
+            if names.peek().is_none() {
+                return tree.set_local_metadata(name, metadata);
+            }
+            let CommandEntry::Group(group) = tree.entries.get_mut(name)? else {
+                return None;
+            };
+            tree = group;
+        }
+        None
+    }
+
+    fn set_local_metadata(&mut self, name: &str, metadata: CommandMetadata) -> Option<()> {
+        if matches!(self.entries.get(name)?, CommandEntry::Alias(_)) {
+            return None;
+        }
+        self.metadata.insert(name.into(), metadata);
+        Some(())
+    }
+
+    pub(super) fn info(&self, query: &str) -> Option<CommandInfo<'_>> {
+        let mut tree = self;
+        let mut names = query.split_whitespace().peekable();
+        let mut hidden = false;
+        while let Some(name) = names.next() {
+            let (canonical, entry) = tree.find(name)?;
+            if names.peek().is_none() {
+                let aliases = tree
+                    .entries
+                    .iter()
+                    .filter_map(|(alias, candidate)| match candidate {
+                        CommandEntry::Alias(target) if target.as_ref() == canonical => {
+                            Some(alias.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                return tree.entry_info(canonical, entry, aliases, hidden);
+            }
+            let CommandEntry::Group(group) = entry else {
+                return None;
+            };
+            hidden |= tree
+                .metadata
+                .get(canonical)
+                .is_some_and(CommandMetadata::is_hidden);
+            tree = group;
+        }
+        None
+    }
+
+    pub(super) fn infos(&self, hidden: bool) -> Vec<CommandInfo<'_>> {
+        let mut aliases: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (name, entry) in &self.entries {
+            if let CommandEntry::Alias(target) = entry {
+                aliases.entry(target).or_default().push(name);
+            }
+        }
+        let mut infos = self
+            .entries
+            .iter()
+            .filter_map(|(name, entry)| {
+                self.entry_info(
+                    name,
+                    entry,
+                    aliases.remove(name.as_str()).unwrap_or_default(),
+                    hidden,
+                )
+            })
+            .collect::<Vec<_>>();
+        infos.sort_unstable_by_key(CommandInfo::name);
+        infos
+    }
+
+    fn entry_info<'a>(
+        &'a self,
+        name: &'a str,
+        entry: &'a CommandEntry,
+        aliases: Vec<&'a str>,
+        parent_hidden: bool,
+    ) -> Option<CommandInfo<'a>> {
+        let (path, children, invokable) = match entry {
+            CommandEntry::Command { path, .. } => (path.as_deref().unwrap_or(name), None, true),
+            CommandEntry::Group(tree) => (
+                tree.path.as_ref(),
+                Some(tree.as_ref()),
+                tree.fallback.is_some(),
+            ),
+            CommandEntry::Alias(_) => return None,
+        };
+        let metadata = self.metadata.get(name);
+        let hidden = parent_hidden || metadata.is_some_and(CommandMetadata::is_hidden);
+        Some(CommandInfo::new(
+            name, path, aliases, metadata, children, invokable, hidden,
+        ))
     }
 
     fn insert_aliases(&mut self, name: &str, aliases: &[&str]) {

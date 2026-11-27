@@ -54,7 +54,8 @@ use twilight_model::{
 pub use autocomplete::AutocompleteContext;
 pub use command_check::{CommandCheck, CommandCheckContext, CommandCheckSource};
 pub use commands::{
-    ArgumentError, Arguments, CommandContext, CommandPrefixes, Commands, TextCommandGroup,
+    ArgumentError, Arguments, CommandContext, CommandInfo, CommandMetadata, CommandPrefixes,
+    Commands, TextCommandGroup,
 };
 pub use concurrency::{ConcurrencyLimit, ConcurrencyPermit};
 pub use cooldown::Cooldown;

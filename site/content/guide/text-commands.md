@@ -94,6 +94,35 @@ async fn show(ctx: CommandContext<'_>) -> Result<()> {
 
 `!config get` を実行しても、`qualified_name()` は正式な経路の `"settings show"` を返します。`command_name()` は末尾の正式名 `"show"`、`invoked_with()` は入力された末尾の名前 `"get"` です。`!settings` のようにグループ名だけ送ると、登録した `fallback` が実行されます。未知のサブコマンドは一致しません。子グループは `settings.group(name)` で作れます。
 
+## ヘルプを表示する
+
+`register_help("help")` でヘルプコマンドを追加できます。次の例では、`!help` に一覧、`!help echo` に使い方を表示します。
+
+```rust
+use disnana_akari::{CommandContext, CommandMetadata, Commands, Result};
+
+async fn echo(ctx: CommandContext<'_>) -> Result<()> {
+    ctx.reply(ctx.args()).await
+}
+
+fn with_help() -> Result<Commands> {
+    let mut commands = Commands::new("!")?;
+    commands.register("echo", echo)?;
+    commands.set_metadata(
+        "echo",
+        CommandMetadata::new()
+            .description("入力された文章を返します。")
+            .usage("<文章>"),
+    )?;
+    commands.register_help("help")?;
+    Ok(commands)
+}
+```
+
+グループ内のコマンドは `!help config set` のように指定します。エイリアスからも同じヘルプを開けます。`CommandMetadata::hidden(true)` はヘルプの表示を制御します。実行者を制限するときは、コマンドのチェックを設定します。
+
+独自のヘルプを作る場合は `command_infos()` で一覧を、`command_info(path)` で指定したコマンドのメタデータを参照できます。標準のヘルプは、一覧に出すコマンドの権限チェックを代行しません。
+
 ## 引数を受け取る
 
 コマンド名のあとの文章は、`ctx.args()` で丸ごと受け取れます。前後の空白は取り除かれ、引数がなければ空文字列です。

@@ -2,11 +2,13 @@ use std::{future::Future, pin::Pin};
 
 mod arguments;
 mod groups;
+mod help;
 mod prefix;
 mod workers;
 pub use arguments::{ArgumentError, Arguments};
 use groups::CommandTree;
 pub use groups::TextCommandGroup;
+pub use help::{CommandInfo, CommandMetadata};
 pub use prefix::CommandPrefixes;
 use prefix::PrefixPolicy;
 pub(crate) use workers::text_workers;
@@ -43,13 +45,18 @@ struct Invocation<'a> {
 }
 
 impl<'a> Invocation<'a> {
-    async fn call(&self, ctx: Context<'a>, checks: &[CommandCheck]) -> Result<()> {
-        if !checks.is_empty() {
-            run_checks(checks, CommandCheckContext::text(&ctx, self.qualified_name)).await?;
+    async fn call(&self, ctx: Context<'a>, commands: &'a Commands) -> Result<()> {
+        if !commands.checks.is_empty() {
+            run_checks(
+                &commands.checks,
+                CommandCheckContext::text(&ctx, self.qualified_name),
+            )
+            .await?;
         }
         self.handler
             .call(CommandContext {
                 ctx,
+                commands,
                 command_name: self.command_name,
                 qualified_name: self.qualified_name,
                 invoked_with: self.invoked_with,
@@ -70,6 +77,50 @@ impl std::fmt::Debug for Commands {
 }
 
 impl Commands {
+    /// コマンドやグループのヘルプ用設定を置き換えます。
+    ///
+    /// `path` はプレフィックスを付けず、正式名を空白でつなぎます。
+    ///
+    /// # エラー
+    /// 指定した正式名のコマンドやグループが見つからない場合に失敗します。
+    pub fn set_metadata(&mut self, path: &str, metadata: CommandMetadata) -> Result<()> {
+        self.entries.set_metadata(path, metadata).ok_or_else(|| {
+            RegistrationError::UnknownCommand {
+                name: path.to_owned(),
+            }
+            .into()
+        })
+    }
+
+    /// 空白区切りの正式名または別名から、該当する登録情報を取得します。非表示のコマンドも取得できます。
+    pub fn command_info(&self, path: &str) -> Option<CommandInfo<'_>> {
+        self.entries.info(path)
+    }
+
+    /// 最上位のコマンドやグループを正式名順で取得します。非表示のコマンドも取得できます。
+    pub fn command_infos(&self) -> Vec<CommandInfo<'_>> {
+        self.entries.infos(false)
+    }
+
+    /// 一覧と個別の使い方を返す、標準のヘルプコマンドを指定の名前で登録します。
+    ///
+    /// 例えば `help` を登録すると `!help` や `!help config set` で使えます。
+    /// 非表示に設定したコマンドとその配下は出しません。ヘルプを実行する際は通常のチェックを行い、
+    /// 一覧に表示する各コマンドのチェックは呼びません。利用者に表示したくないコマンドは
+    /// [`CommandMetadata::hidden`] で隠せます。
+    ///
+    /// # エラー
+    /// 名前が無効、またはすでに使用中の場合に失敗します。
+    pub fn register_help(&mut self, name: &str) -> Result<()> {
+        self.register(name, help::reply_help)?;
+        self.set_metadata(
+            name,
+            CommandMetadata::new()
+                .description("コマンド一覧や使い方を表示します")
+                .usage("[コマンド名]"),
+        )
+    }
+
     /// `!` などのプレフィックスを指定して、空のコマンド一覧を作ります。
     ///
     /// # エラー
@@ -217,7 +268,7 @@ impl Commands {
     /// プレフィックスの判定、チェック、コマンド関数のエラーを呼び出し元に伝えます。
     pub async fn dispatch(&self, ctx: Context<'_>) -> Result<()> {
         if let Some(invocation) = self.resolve_message(ctx.message()).await? {
-            invocation.call(ctx, &self.checks).await?;
+            invocation.call(ctx, self).await?;
         }
 
         Ok(())
@@ -255,7 +306,7 @@ impl Commands {
         let Some(invocation) = self.resolve_selected(&ctx.message().content, prefix_len) else {
             return;
         };
-        let Err(error) = invocation.call(ctx, &self.checks).await else {
+        let Err(error) = invocation.call(ctx, self).await else {
             return;
         };
         let name = Some(invocation.qualified_name);
@@ -305,6 +356,7 @@ fn duplicate_command(name: &str) -> Error {
 #[derive(Debug)]
 pub struct CommandContext<'a> {
     ctx: Context<'a>,
+    commands: &'a Commands,
     command_name: &'a str,
     qualified_name: &'a str,
     invoked_with: &'a str,
@@ -313,6 +365,17 @@ pub struct CommandContext<'a> {
 }
 
 impl<'a> CommandContext<'a> {
+    /// 正式名または別名で、同じ一覧に登録済みのコマンド情報を取得します。
+    /// 独自のヘルプで使えます。非表示の設定や権限を確認してから表示してください。
+    pub fn command_info(&self, path: &str) -> Option<CommandInfo<'a>> {
+        self.commands.command_info(path)
+    }
+
+    /// 同じ一覧の最上位コマンドを正式名順で取得します。非表示のコマンドも取得できます。
+    pub fn command_infos(&self) -> Vec<CommandInfo<'a>> {
+        self.commands.command_infos()
+    }
+
     /// Akari が使用している Twilight の REST クライアントを借ります。
     pub fn http(&self) -> &'a crate::http::Client {
         self.ctx.http()
@@ -651,6 +714,11 @@ mod tests {
                 assert_eq!(ctx.qualified_name(), "config echo");
                 assert_eq!(ctx.invoked_with(), "e");
                 assert_eq!(ctx.args(), "こんにちは  世界");
+                assert_eq!(
+                    ctx.command_info("c e").unwrap().qualified_name(),
+                    "config echo"
+                );
+                assert_eq!(ctx.command_infos()[0].name(), "config");
                 Err(Error::msg("test command failure"))
             },
         )?;
