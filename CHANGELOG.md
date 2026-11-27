@@ -7,6 +7,7 @@
 - **エラーの連鎖で、メッセージが二重に表示されなくなりました。** `Error` の `Http`、`GatewayReceive`、`*Validation` は、表示と原因を元のエラーへそのまま渡します。`Error::Handler` は `HandlerError` を持つようになり（`downcast_ref`、`inner`、`into_inner` で元のエラーを取り出せます）、`CommandRegistration` の表示から原因を外しました（原因は `source()` で取得します）。
 - `ErrorReport` を `{report}` で表示すると、原因の連鎖も `: 原因` の形で続けて表示します。標準エラー出力の既定の表示にも、本当の理由が含まれます。
 - ドキュメントに、Twilight の型を公開 API に含める方針（安定性）を明記しました。
+- **スラッシュコマンドの権限確認を追加しました。** `SlashContext::{require_permissions, require_guild, permissions, guild_id}` で、呼び出した人の権限を確認できます（Discord が計算した値を使います）。失敗は `Error::Check(CheckFailure)` で、既定では `Messages::check_failed` を本人にだけ返します。`SlashCommands::default_member_permissions` で、権限のない人からコマンドを隠せます。テキストコマンドとハイブリッドの権限確認は、今後追加します。
 - **グローバルコマンドに対応しました。** `SlashCommands::global()` で、すべてのサーバーと DM 向けに登録できます。**`replace_guild_commands` は `replace_commands` に名前を変えました**（サーバー、グローバルのどちらにも使えます）。`InfoEvent::SlashCommandsSynced` の `guild_id` は `Option` になりました（グローバルは `None`）。
 - 引数の型変換を追加しました。`SlashCommands::{integer_option, number_option, boolean_option}` で型付きの引数を作り、`SlashContext::{integer, number, boolean}` で受け取れます。`SlashContext::parse::<T>` と `HybridContext::parse::<T>` は、文字列の引数を `FromStr` で変換します（未入力は `None`、変換の失敗は `Some(Err(..))`）。
 - `Bot::limits` と `Limits` を追加しました。同時に処理する数（テキストコマンド、Interaction、混雑の通知）と、待ち行列の大きさを変えられます。既定は、これまでどおりの 8、8、8、64 です。0 を指定すると、起動時に `Error::InvalidLimits` を返します。

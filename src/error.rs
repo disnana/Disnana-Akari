@@ -1,5 +1,6 @@
 use twilight_gateway::{Intents, error::ReceiveMessageError};
 use twilight_http::{error::Error as HttpError, response::DeserializeBodyError};
+use twilight_model::guild::Permissions;
 use twilight_validate::{
     command::CommandValidationError, component::ComponentValidationError,
     embed::EmbedValidationError, message::MessageValidationError,
@@ -9,6 +10,9 @@ use twilight_validate::{
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// 実行前の確認（権限など）に通りませんでした。
+    #[error(transparent)]
+    Check(#[from] CheckFailure),
     /// `Bot::new` に空白だけ、または空のトークンが渡されました。
     #[error("Discord Bot トークンが空です")]
     EmptyToken,
@@ -216,6 +220,12 @@ pub enum RegistrationError {
         /// 登録しようとしたハンドラーの種類です。
         kind: HandlerKind,
     },
+    /// 登録されていないコマンドの設定を変えようとしました。
+    #[error("コマンド `{name}` は登録されていません")]
+    UnknownCommand {
+        /// 指定された名前です。
+        name: String,
+    },
     /// 同じ名前、または同じ `custom_id` が、すでに登録されています。
     #[error("{kind} `{name}` は登録済みです")]
     Duplicate {
@@ -224,6 +234,24 @@ pub enum RegistrationError {
         /// 重複した名前、または `custom_id` です。
         name: String,
     },
+}
+
+/// 実行前の確認（権限など）に通らなかった理由です。
+///
+/// ハンドラーが `ctx.require_permissions(..)?` などで返します。
+/// `Bot` は、この種類のエラーを [`Messages::check_failed`](crate::Messages) で本人に知らせます。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CheckFailure {
+    /// サーバーの中でしか使えないコマンドが、DM などで呼ばれました。
+    #[error("このコマンドはサーバーの中でしか使えません")]
+    GuildOnly,
+    /// 呼び出した人に、必要な権限が足りません。
+    #[error("必要な権限が足りません: {0:?}")]
+    MissingPermissions(Permissions),
+    /// Discord から権限の情報が届かなかったため、確認できません（安全のため、実行させません）。
+    #[error("権限を確認できませんでした")]
+    PermissionsUnavailable,
 }
 
 /// Discord が返したスラッシュコマンドの登録結果が、要求と合わなかった理由です。

@@ -30,7 +30,7 @@ use twilight_model::{
 pub use commands::{CommandContext, Commands};
 pub use cooldown::Cooldown;
 pub use error::{
-    CommandSyncError, Error, HandlerError, HandlerKind, QueueKind, RegistrationError,
+    CheckFailure, CommandSyncError, Error, HandlerError, HandlerKind, QueueKind, RegistrationError,
     ResponseStateError, SelectionError,
 };
 pub use events::{Events, Ready};
