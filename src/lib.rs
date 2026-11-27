@@ -1253,6 +1253,34 @@ impl<'a> Context<'a> {
         Ok(())
     }
 
+    /// 元のメッセージにファイルを添付して返信します。添付だけで送るときは本文を空にします。
+    ///
+    /// # エラー
+    /// 本文、添付の件数・サイズ・メタデータが無効な場合や、Discord が送信を拒否した場合に失敗します。
+    pub async fn reply_files(
+        &self,
+        content: &str,
+        files: &[twilight_model::http::attachment::Attachment],
+        limits: validation::AttachmentLimits,
+    ) -> Result<()> {
+        validation::reply_files(content, files, limits, None)?;
+        validation::channel_message_upload_size(files)?;
+        let mentions = AllowedMentions::default();
+        let mut request = self
+            .http
+            .create_message(self.message.channel_id)
+            .reply(self.message.id)
+            .allowed_mentions(Some(&mentions));
+        if !content.is_empty() {
+            request = request.content(content);
+        }
+        if !files.is_empty() {
+            request = request.attachments(files);
+        }
+        request.await?;
+        Ok(())
+    }
+
     /// 元のメッセージに Embed やボタンを付けて返信します。
     ///
     /// # エラー

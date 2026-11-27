@@ -3,12 +3,14 @@ use std::{future::Future, pin::Pin};
 mod arguments;
 mod groups;
 mod help;
+mod invoke;
 mod prefix;
 mod workers;
 pub use arguments::{ArgumentError, Arguments};
 use groups::CommandTree;
 pub use groups::TextCommandGroup;
 pub use help::{CommandInfo, CommandMetadata};
+use invoke::InvocationHooks;
 pub use prefix::CommandPrefixes;
 use prefix::PrefixPolicy;
 pub(crate) use workers::text_workers;
@@ -23,7 +25,6 @@ use crate::{
     CommandCheck, CommandCheckContext, Context, Error, ErrorSource, HandlerKind, RegistrationError,
     Result, Timing,
     command_check::run_checks,
-    error::adapt_handler,
     hooks::Hooks,
     ui::{ComponentsV2, UiMessage},
 };
@@ -33,6 +34,7 @@ pub struct Commands {
     prefixes: PrefixPolicy,
     entries: CommandTree,
     checks: Vec<CommandCheck>,
+    invocation_hooks: InvocationHooks,
 }
 
 struct Invocation<'a> {
@@ -144,6 +146,7 @@ impl Commands {
             prefixes: PrefixPolicy::Fixed(CommandPrefixes::new(prefixes)?),
             entries: CommandTree::default(),
             checks: Vec::new(),
+            invocation_hooks: InvocationHooks::default(),
         })
     }
 
@@ -167,6 +170,7 @@ impl Commands {
             prefixes: PrefixPolicy::dynamic(resolver),
             entries: CommandTree::default(),
             checks: Vec::new(),
+            invocation_hooks: InvocationHooks::default(),
         }
     }
 
@@ -174,6 +178,27 @@ impl Commands {
     /// コマンドを特定した後に登録順に実行し、最初のエラーで実行を止めます。
     pub fn add_check(&mut self, check: CommandCheck) {
         self.checks.push(check);
+    }
+
+    /// テキストコマンドの関数の直前に呼ぶ非同期フックを設定します。既存の設定は置き換えます。
+    /// 権限などのチェックと、型付きハイブリッドの引数変換に成功した場合に呼びます。
+    /// フックが失敗した場合は、コマンド関数と実行後フックを呼びません。
+    pub fn set_before_invoke(
+        &mut self,
+        hook: impl AsyncFn(&CommandContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) {
+        self.invocation_hooks.before = Some(Box::new(hook));
+    }
+
+    /// テキストコマンドの関数の直後に呼ぶ非同期フックを設定します。既存の設定は置き換えます。
+    /// 関数がエラーや panic で終わった場合も呼び、そのエラーを渡します。
+    /// 関数とフックが両方失敗した場合は、関数のエラーを返します。
+    /// 処理がキャンセルされて Future が破棄される場合の後始末には `Drop` を使ってください。
+    pub fn set_after_invoke(
+        &mut self,
+        hook: impl AsyncFn(&CommandContext<'_>, Option<&Error>) -> Result<()> + Send + Sync + 'static,
+    ) {
+        self.invocation_hooks.after = Some(Box::new(hook));
     }
 
     /// プレフィックスを除いた名前で `async fn` または async クロージャを登録します。
@@ -215,8 +240,16 @@ impl Commands {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let handler = adapt_handler!(handler, ctx: CommandContext<'_>);
-        self.entries.register(name, aliases, Box::new(handler))
+        self.register_handler(name, aliases, plain_handler!(handler))
+    }
+
+    pub(crate) fn register_handler(
+        &mut self,
+        name: &str,
+        aliases: &[&str],
+        handler: Box<dyn CommandHandler>,
+    ) -> Result<()> {
+        self.entries.register(name, aliases, handler)
     }
 
     /// サブコマンドやグループを登録するための、最上位グループを作ります。
@@ -254,6 +287,7 @@ impl Commands {
             prefixes: self.prefixes.clone(),
             entries: CommandTree::default(),
             checks: Vec::new(),
+            invocation_hooks: InvocationHooks::default(),
         }
     }
 
@@ -492,16 +526,31 @@ impl<'a> CommandContext<'a> {
     pub async fn reply_v2(&self, message: &ComponentsV2) -> Result<()> {
         self.ctx.reply_v2(message).await
     }
+
+    /// 添付ファイルを含む返信を送ります。詳細は [`Context::reply_files`] を参照してください。
+    ///
+    /// # エラー
+    /// メッセージやファイルが無効、または Discord への送信に失敗した場合にエラーになります。
+    pub async fn reply_files(
+        &self,
+        content: &str,
+        files: &[twilight_model::http::attachment::Attachment],
+        limits: crate::validation::AttachmentLimits,
+    ) -> Result<()> {
+        self.ctx.reply_files(content, files, limits).await
+    }
 }
 
-trait CommandHandler: Send + Sync {
+pub(crate) trait CommandHandler: Send + Sync {
     fn call<'a>(
         &'a self,
         ctx: CommandContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
 }
 
-impl<F> CommandHandler for F
+struct PlainHandler<F>(F);
+
+impl<F> CommandHandler for PlainHandler<F>
 where
     F: for<'a> AsyncFn(CommandContext<'a>) -> Result<()> + Send + Sync,
 {
@@ -509,7 +558,33 @@ where
         &'a self,
         ctx: CommandContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        Box::pin(self(ctx))
+        Box::pin(ctx.invoke_prepared(&self.0))
+    }
+}
+
+macro_rules! plain_handler {
+    ($handler:ident) => {
+        Box::new($crate::commands::PlainHandler(
+            async move |ctx: $crate::CommandContext<'_>| {
+                $handler(ctx).await.map_err($crate::error::handler_error)
+            },
+        ))
+    };
+}
+use plain_handler;
+
+// 型付きの引数を変換する登録は、その変換が済んでからフックを呼ぶ。
+pub(crate) struct PreparedTextHandler<F>(pub(crate) F);
+
+impl<F> CommandHandler for PreparedTextHandler<F>
+where
+    F: for<'a> AsyncFn(CommandContext<'a>) -> Result<()> + Send + Sync,
+{
+    fn call<'a>(
+        &'a self,
+        ctx: CommandContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        Box::pin(self.0(ctx))
     }
 }
 
@@ -754,7 +829,7 @@ mod tests {
         Ok(())
     }
 
-    fn command_message(content: &str) -> Result<Message> {
+    pub(super) fn command_message(content: &str) -> Result<Message> {
         let mut message: Message = serde_json::from_str(
             r#"{
             "id": "1", "channel_id": "2", "type": 0,

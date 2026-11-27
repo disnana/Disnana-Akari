@@ -97,16 +97,7 @@ pub fn attachment_count(retained: usize, uploaded: usize) -> Result<()> {
 /// ファイル数の上限を超えた場合、または上限より大きいファイルがある場合は
 /// [`Error::InvalidUi`] を返します。
 pub fn attachment_sizes(uploads: &[Attachment], max_file_bytes: u64) -> Result<()> {
-    attachment_count(0, uploads.len())?;
-    for attachment in uploads {
-        validate_file_size(
-            attachment.file.len() as u64,
-            Some(max_file_bytes),
-            None,
-            &mut None,
-        )?;
-    }
-    Ok(())
+    AttachmentLimits::default().validate_uploads(uploads, Some(max_file_bytes))
 }
 
 /// チャンネルへのメッセージ作成リクエスト全体の上限です。
@@ -163,16 +154,20 @@ impl AttachmentLimits {
         Ok(())
     }
 
-    pub(crate) fn validate_uploads(self, uploads: &[Attachment]) -> Result<()> {
+    pub(crate) fn validate_uploads(
+        self,
+        uploads: &[Attachment],
+        discord_file_max: Option<u64>,
+    ) -> Result<()> {
         self.count(0, uploads.len())?;
-        if self.file_bytes.is_none() && self.total_bytes.is_none() {
+        if self.file_bytes.is_none() && self.total_bytes.is_none() && discord_file_max.is_none() {
             return Ok(());
         }
         let mut remaining = self.total_bytes;
         for file in uploads {
             validate_file_size(
                 file.file.len() as u64,
-                None,
+                discord_file_max,
                 self.file_bytes,
                 &mut remaining,
             )?;
@@ -236,6 +231,46 @@ fn validate_file_size(
         ))?;
     }
     Ok(())
+}
+
+pub(crate) fn reply_files(
+    content: &str,
+    files: &[Attachment],
+    limits: AttachmentLimits,
+    discord_file_max: Option<u64>,
+) -> Result<()> {
+    if content.is_empty() && files.is_empty() {
+        return Err(Error::InvalidUi("本文か添付ファイルを指定してください。"));
+    }
+    limits.validate_uploads(files, discord_file_max)?;
+    message_content(content)?;
+    attachment_metadata(files)
+}
+
+pub(crate) fn attachment_metadata(files: &[Attachment]) -> Result<()> {
+    for (index, file) in files.iter().enumerate() {
+        message::attachment(file)?;
+        if !valid_attachment_name(&file.filename) {
+            return Err(Error::InvalidUi("添付ファイルにはファイル名が必要です。"));
+        }
+        if files
+            .iter()
+            .take(index)
+            .any(|previous| previous.id == file.id || previous.filename == file.filename)
+        {
+            return Err(Error::InvalidUi(
+                "添付 ID とファイル名は、メッセージ内で重複できません。",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn valid_attachment_name(filename: &str) -> bool {
+    !filename.trim().is_empty()
+        && !matches!(filename, "." | "..")
+        && !filename.contains(['/', '\\'])
+        && !filename.chars().any(char::is_control)
 }
 
 pub(crate) fn channel_message_upload_size(uploads: &[Attachment]) -> Result<()> {
@@ -311,5 +346,19 @@ mod tests {
                 .validate(0, sizes, None)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn classic_file_replies_share_limits_and_validate_metadata() -> Result<()> {
+        let limit = AttachmentLimits::default().max_file_bytes(Some(4));
+        let pdf = Attachment::from_bytes("report.pdf".into(), vec![1, 2, 3, 4], 0);
+        reply_files("", std::slice::from_ref(&pdf), limit, Some(10))?;
+        assert!(reply_files("", &[], limit, None).is_err());
+        assert!(reply_files("", std::slice::from_ref(&pdf), limit, Some(3)).is_err());
+        let repeated_id = Attachment::from_bytes("second.pdf".into(), vec![1], 0);
+        assert!(reply_files("File", &[pdf, repeated_id], limit, Some(10)).is_err());
+        let invalid_name = Attachment::from_bytes("../file".into(), vec![1], 1);
+        assert!(reply_files("File", &[invalid_name], limit, None).is_err());
+        Ok(())
     }
 }

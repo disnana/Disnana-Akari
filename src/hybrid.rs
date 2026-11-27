@@ -14,6 +14,7 @@ use twilight_model::{
 
 use crate::{
     CommandContext, Commands, Cooldown, Error, Result, SlashCommands, SlashContext, Timing,
+    commands::PreparedTextHandler,
     error::handler_error,
     ui::{ComponentsV2, UiMessage},
 };
@@ -77,9 +78,13 @@ where
         )?;
     }
 
-    commands.register(name, async move |ctx: CommandContext<'_>| {
-        typed.text(ctx).await
-    })
+    commands.register_handler(
+        name,
+        &[],
+        Box::new(PreparedTextHandler(async move |ctx: CommandContext<'_>| {
+            typed.text(ctx).await
+        })),
+    )
 }
 
 struct TypedHandler<F> {
@@ -106,15 +111,18 @@ impl<F> TypedHandler<F> {
         let arguments = self
             .schema
             .bind_text(ctx.args(), &ctx.context().message().attachments)?;
-        let mut ctx = HybridContext {
-            inner: SourceContext::Text {
-                ctx,
-                option_name: None,
-            },
-        };
-        (self.handler)(&mut ctx, arguments)
-            .await
-            .map_err(handler_error)
+        ctx.invoke_prepared(async move |ctx: CommandContext<'_>| {
+            let mut ctx = HybridContext {
+                inner: SourceContext::Text {
+                    ctx,
+                    option_name: None,
+                },
+            };
+            (self.handler)(&mut ctx, arguments)
+                .await
+                .map_err(handler_error)
+        })
+        .await
     }
 
     async fn slash<E>(&self, ctx: &mut SlashContext<'_>) -> Result<()>
@@ -387,6 +395,22 @@ impl<'a> HybridContext<'a> {
         match &mut self.inner {
             SourceContext::Text { ctx, .. } => ctx.reply(content).await,
             SourceContext::Slash(ctx) => ctx.reply(content).await,
+        }
+    }
+
+    /// テキストとスラッシュの両方で、通常の返信にファイルを添付します。
+    ///
+    /// # エラー
+    /// 本文や添付が上限に合わない場合、返信できない応答状態の場合、Discord が拒否した場合に失敗します。
+    pub async fn reply_files(
+        &mut self,
+        content: &str,
+        files: &[twilight_model::http::attachment::Attachment],
+        limits: crate::validation::AttachmentLimits,
+    ) -> Result<()> {
+        match &mut self.inner {
+            SourceContext::Text { ctx, .. } => ctx.reply_files(content, files, limits).await,
+            SourceContext::Slash(ctx) => ctx.reply_files(content, files, limits).await,
         }
     }
 

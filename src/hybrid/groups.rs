@@ -4,7 +4,7 @@ use twilight_model::application::command::CommandOption;
 
 use super::{CommandContext, HybridArguments, HybridContext, SlashContext, TypedHandler};
 use crate::{
-    CommandGroup, Commands, Result, SlashCommands, TextCommandGroup,
+    CommandGroup, Commands, Result, SlashCommands, TextCommandGroup, commands::PreparedTextHandler,
     slash::CommandOptionLocalizations,
 };
 
@@ -148,10 +148,13 @@ impl HybridCommandGroup<'_> {
             typed.schema.options().to_vec(),
             async move |ctx: &mut SlashContext<'_>| slash_handler.slash(ctx).await,
         )?;
-        self.text
-            .subcommand_with_aliases(name, aliases, async move |ctx: CommandContext<'_>| {
+        self.text.subcommand_handler(
+            name,
+            aliases,
+            Box::new(PreparedTextHandler(async move |ctx: CommandContext<'_>| {
                 typed.text(ctx).await
-            })
+            })),
+        )
     }
 
     /// サブコマンドをまとめる中間グループを追加します。
@@ -212,8 +215,9 @@ impl HybridCommandGroup<'_> {
             Vec::new(),
             async move |ctx: &mut SlashContext<'_>| slash_handler.slash(ctx).await,
         )?;
-        self.text
-            .fallback(async move |ctx: CommandContext<'_>| typed.text(ctx).await)
+        self.text.fallback_handler(Box::new(PreparedTextHandler(
+            async move |ctx: CommandContext<'_>| typed.text(ctx).await,
+        )))
     }
 }
 

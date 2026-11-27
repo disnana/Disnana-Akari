@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use super::{
     CommandContext, CommandHandler, CommandInfo, CommandMetadata, Invocation, duplicate_command,
+    plain_handler,
 };
-use crate::{RegistrationError, Result, error::adapt_handler};
+use crate::{RegistrationError, Result};
 
 /// テキストコマンドをグループにまとめます。
 ///
@@ -73,8 +74,16 @@ impl TextCommandGroup<'_> {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let handler = adapt_handler!(handler, ctx: CommandContext<'_>);
-        self.tree.register(name, aliases, Box::new(handler))
+        self.subcommand_handler(name, aliases, plain_handler!(handler))
+    }
+
+    pub(crate) fn subcommand_handler(
+        &mut self,
+        name: &str,
+        aliases: &[&str],
+        handler: Box<dyn CommandHandler>,
+    ) -> Result<()> {
+        self.tree.register(name, aliases, handler)
     }
 
     /// このグループ内に、さらにグループを作ります。
@@ -116,9 +125,12 @@ impl TextCommandGroup<'_> {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
+        self.fallback_handler(plain_handler!(handler))
+    }
+
+    pub(crate) fn fallback_handler(&mut self, handler: Box<dyn CommandHandler>) -> Result<()> {
         self.ensure_fallback_available()?;
-        let handler = adapt_handler!(handler, ctx: CommandContext<'_>);
-        self.tree.fallback = Some(Box::new(handler));
+        self.tree.fallback = Some(handler);
         Ok(())
     }
 

@@ -1,20 +1,9 @@
-use std::time::Instant;
-
-use serde::Serialize;
-use twilight_http::{
-    Client,
-    request::{
-        Request,
-        attachment::{AttachmentManager, PartialAttachment},
-    },
-    response::marker::EmptyBody,
-    routing::Route,
-};
+use twilight_http::Client;
 use twilight_model::{
     application::interaction::Interaction,
     channel::{
         Attachment,
-        message::{AllowedMentions, Component, MessageFlags},
+        message::{AllowedMentions, MessageFlags},
     },
     http::{attachment::Attachment as Upload, interaction::InteractionResponseType},
     id::{Id, marker::AttachmentMarker},
@@ -22,26 +11,14 @@ use twilight_model::{
 
 use crate::{Error, Result, ui::ComponentsV2};
 
-use super::{InitialResponder, InitialResponse, initial_response, v2_update_response};
+use super::{
+    InitialResponder, InitialResponse, file_response::FileCallback, initial_response,
+    v2_update_response,
+};
 
 #[cfg(test)]
 #[path = "v2_attachment_tests.rs"]
 mod tests;
-
-#[derive(Serialize)]
-struct Callback<'a> {
-    #[serde(rename = "type")]
-    kind: InteractionResponseType,
-    data: CallbackData<'a>,
-}
-
-#[derive(Serialize)]
-struct CallbackData<'a> {
-    components: &'a [Component],
-    allowed_mentions: AllowedMentions,
-    flags: MessageFlags,
-    attachments: Vec<PartialAttachment<'a>>,
-}
 
 impl InitialResponder<'_> {
     pub(crate) async fn v2_reply(self, message: &ComponentsV2, ephemeral: bool) -> Result<()> {
@@ -90,32 +67,17 @@ impl InitialResponder<'_> {
         flags: MessageFlags,
         retained: &[Attachment],
     ) -> Result<()> {
-        let started_at = self.info.measures_timing().then(Instant::now);
         let retained_ids = retained_ids(&message.attachments, retained)?;
-        let files = AttachmentManager::new()
-            .set_files(message.attachments.iter().collect())
-            .set_ids(retained_ids);
-        let body = serde_json::to_vec(&Callback {
-            kind,
-            data: CallbackData {
+        self.send_file_callback(
+            FileCallback::V2 {
+                kind,
                 components: &message.components,
-                allowed_mentions: AllowedMentions::default(),
                 flags,
-                attachments: files.get_partial_attachments(),
             },
-        })
-        .map_err(Error::handler)?;
-        let request = Request::builder(&Route::InteractionCallback {
-            interaction_id: self.interaction.id.get(),
-            interaction_token: &self.interaction.token,
-            with_response: false,
-        })
-        .use_authorization_token(false)
-        .form(files.build_form(&body))
-        .build()?;
-        self.http.request::<EmptyBody>(request).await?;
-        self.report_sent(kind, started_at);
-        Ok(())
+            &message.attachments,
+            retained_ids,
+        )
+        .await
     }
 }
 

@@ -20,10 +20,12 @@ use twilight_validate::{
         TEXT_DISPLAY_CONTENT_LENGTH_MAX, THUMBNAIL_DESCRIPTION_LENGTH_MAX,
     },
     embed::COLOR_MAXIMUM,
-    message,
 };
 
-use crate::{Error, Result, validation::AttachmentLimits};
+use crate::{
+    Error, Result,
+    validation::{self, AttachmentLimits, valid_attachment_name},
+};
 
 use super::{
     Button, ChannelSelect, MentionableSelect, RoleSelect, StringSelect, UserSelect, button_row,
@@ -322,21 +324,9 @@ impl ComponentsV2 {
     }
 
     fn validate_attachments(&self) -> Result<()> {
-        self.attachment_limits.validate_uploads(&self.attachments)?;
-        let mut ids = HashSet::new();
-        let mut names = HashSet::new();
-        for attachment in &self.attachments {
-            message::attachment(attachment)?;
-            if !valid_attachment_name(&attachment.filename) {
-                return Err(Error::InvalidUi("添付ファイルにはファイル名が必要です。"));
-            }
-            if !ids.insert(attachment.id) || !names.insert(attachment.filename.as_str()) {
-                return Err(Error::InvalidUi(
-                    "添付 ID とファイル名は、メッセージ内で重複できません。",
-                ));
-            }
-        }
-        Ok(())
+        self.attachment_limits
+            .validate_uploads(&self.attachments, None)?;
+        validation::attachment_metadata(&self.attachments)
     }
 
     /// 添付一覧が分かる送信経路でだけ、部品からのファイル参照を確認します。
@@ -413,13 +403,6 @@ fn check_media_url(url: &str) -> Result<()> {
 fn attachment_filename(url: &str) -> Option<&str> {
     url.strip_prefix("attachment://")
         .filter(|filename| valid_attachment_name(filename))
-}
-
-fn valid_attachment_name(filename: &str) -> bool {
-    !filename.trim().is_empty()
-        && !matches!(filename, "." | "..")
-        && !filename.contains(['/', '\\'])
-        && !filename.chars().any(char::is_control)
 }
 
 #[derive(Default)]

@@ -39,6 +39,7 @@ use crate::{
 };
 
 mod context_menu;
+mod file_response;
 mod localizations;
 mod original_response;
 mod settings;
