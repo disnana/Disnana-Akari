@@ -27,7 +27,7 @@
 
 現在のアクティビティを保ってオンライン状態だけ変える場合は `handle.set_status(status)`、オンライン状態を保ってアクティビティだけ変える場合は `handle.set_activity(Some(activity))` を使います。`handle.set_activity(None)` でアクティビティだけ消せます。`Status::Offline` を指定すると、Discord には `Status::Invisible` を送ります。
 
-更新は Gateway に送ります。短時間の連続更新は最新の値にまとめ、更新の送信間隔を5秒以上空けます。`set` は Discord での表示完了を待ちません。接続が回復したときは最後に設定した値を送ります。[管理者向けのステータス変更サンプル](../examples/presence/main.rs)
+送信キューに入れる前の更新は最新の値にまとめ、キューへの追加間隔を5秒以上空けます。Gateway への送信時刻は接続状況と Twilight の送信処理に依存します。`set` は Discord での表示完了を待ちません。接続が回復したときは最後に設定した値を再びキューに入れます。[管理者向けのステータス変更サンプル](../examples/presence/main.rs)
 
 ### Intent
 

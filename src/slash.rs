@@ -952,8 +952,6 @@ impl ActiveSlashCommands {
             return;
         };
         let path = command_path(data);
-        let full_name = path.join(" ");
-        let name = Some(full_name.as_str());
         let initial = InitialResponder {
             http,
             interaction,
@@ -965,6 +963,8 @@ impl ActiveSlashCommands {
                 .await;
             return;
         }
+        let full_name = path.join(" ");
+        let name = Some(full_name.as_str());
         let Some((route, handler)) = self
             .handlers
             .get(&data.id)

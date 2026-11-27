@@ -22,7 +22,7 @@
 
 ### 追加
 
-- **Bot のステータスとアクティビティを設定できるようにしました。** `PresenceHandle` と `Bot::with_presence` で、起動時の設定と、実行中の変更（`set`、`set_status`、`set_activity`）ができます。短時間の連続した更新は最新の値にまとめ、5 秒以上の間隔を空けて送ります。再接続したときは、最後の値を送り直します。`Status::Offline` は `Invisible` として送ります。
+- **Bot のステータスとアクティビティを設定できるようにしました。** `PresenceHandle` と `Bot::with_presence` で、起動時の設定と、実行中の変更（`set`、`set_status`、`set_activity`）ができます。送信キューに入れる前の更新は最新の値にまとめ、追加の間隔を 5 秒以上空けます。再接続したときは、最後の値を再びキューに入れます。`Status::Offline` は `Invisible` として送ります。
 - **権限付きのギルドコマンドを追加しました。** `SlashCommands::register_with_permissions` と `group_with_permissions` が、Discord の一覧での表示条件と、ハンドラーを呼ぶ前の権限チェックを、同じ権限でまとめて設定します。足りないときは、ハンドラーを呼ばずに `Messages::check_failed` を本人にだけ返し、入力補完は空の候補を返します。グローバル登録では使えません。
 - **`Bot::on_error` を追加しました。** ハンドラーが返したエラー、Gateway の切断と受信エラー、処理枠の満杯でイベントを捨てたこと、自動応答の失敗を、`ErrorReport`（場所、名前、内容）で一件ずつ受け取れます。設定しない場合は、これまでどおり標準エラー出力に書きます（形式は `[akari] ...` に変わりました）。Gateway が接続を閉じたときは、理由を含めて報告します（例: コード 4014 は特権 Intent の案内）。
 - `Bot::on_info` を追加しました。Gateway のセッション、スラッシュコマンドの同期、Interaction の初回応答の計測値をオプトインで受け取れます。

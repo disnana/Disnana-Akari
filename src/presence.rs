@@ -7,7 +7,7 @@ use twilight_model::gateway::{
     presence::{MinimalActivity, Status},
 };
 
-// Discord のアクティビティ更新は20秒に最大5回。再接続による再送にも同じ間隔を使う。
+// Discord のアクティビティ更新制限に合わせ、Gateway の送信キューへ入れる間隔を空ける。
 const MIN_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Discord に表示する Bot のオンライン状態とアクティビティです。
@@ -49,7 +49,7 @@ impl PresenceHandle {
         Self(watch::Sender::new(initial))
     }
 
-    /// 表示したい状態を設定します。短時間に複数回呼ぶと最新の値を送ります。
+    /// 表示したい状態を設定します。送信キューに入れる前の変更は最新の値にまとめます。
     /// この呼び出しは Discord の表示が更新されるまで待機しません。
     pub fn set(&self, presence: Presence) {
         self.0.send_if_modified(|current| {
@@ -90,7 +90,7 @@ impl PresenceHandle {
         PresenceUpdates {
             desired: self.0.subscribe(),
             next_send: Instant::now(),
-            replay: false,
+            pending: false,
         }
     }
 }
@@ -98,7 +98,7 @@ impl PresenceHandle {
 pub(crate) struct PresenceUpdates {
     desired: watch::Receiver<Presence>,
     next_send: Instant,
-    replay: bool,
+    pending: bool,
 }
 
 impl PresenceUpdates {
@@ -107,16 +107,21 @@ impl PresenceUpdates {
     }
 
     pub(crate) fn replay(&mut self) {
-        self.replay = true;
+        self.pending = true;
     }
 
     pub(crate) async fn next(&mut self) -> UpdatePresence {
-        // 先に間隔を空ける。Gateway イベントによって中断されても、更新を読み落とさない。
-        tokio::time::sleep_until(self.next_send).await;
-        if !self.replay && self.desired.changed().await.is_err() {
-            std::future::pending::<()>().await;
+        if !self.pending {
+            if self.desired.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+            // changed は更新を既読にする。待機が中断されても更新を送れるように記録する。
+            self.pending = true;
         }
-        self.replay = false;
+        if Instant::now() < self.next_send {
+            tokio::time::sleep_until(self.next_send).await;
+        }
+        self.pending = false;
         self.next_send = Instant::now() + MIN_UPDATE_INTERVAL;
         UpdatePresence {
             d: self.desired.borrow_and_update().0.clone(),
@@ -157,6 +162,29 @@ mod tests {
         tokio::time::advance(MIN_UPDATE_INTERVAL).await;
         updates.replay();
         assert_eq!(updates.next().await, update);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_during_cooldown_preserves_the_update() {
+        let handle = PresenceHandle::new(Presence::new(Status::Online));
+        let mut updates = handle.subscribe();
+        assert_eq!(updates.initial().status, Status::Online);
+
+        handle.set_status(Status::Idle);
+        assert_eq!(updates.next().await.d.status, Status::Idle);
+
+        handle.set_status(Status::DoNotDisturb);
+        let partial_delay = Duration::from_secs(1);
+        assert!(
+            tokio::time::timeout(partial_delay, updates.next())
+                .await
+                .is_err()
+        );
+        tokio::time::advance(MIN_UPDATE_INTERVAL - partial_delay).await;
+        let update = tokio::time::timeout(Duration::from_secs(1), updates.next())
+            .await
+            .expect("cancelled update is still pending");
+        assert_eq!(update.d.status, Status::DoNotDisturb);
     }
 
     #[tokio::test(start_paused = true)]
