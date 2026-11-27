@@ -135,4 +135,4 @@ fn defaults() -> (SelectOption, UserSelect, MentionableSelect) {
 
 ## 選択のあとにできること
 
-選択メニューのコンテキストでも、[ボタンと同じメソッド](buttons.md)が使えます。`reply_ephemeral`、`defer_update`、`update_message`、`update_v2`、`show_modal`、`followup`、`author_id`、`invoker_id`、`message` などです。時間のかかる処理は、先に `defer_update` で受け付けます。
+選択メニューのコンテキストでも、[ボタンと同じメソッド](buttons.md)が使えます。`reply_ephemeral`、`defer_update`、`update_message`、`update_v2`、`show_modal`、`followup`、`author_id`、`invoker_id`、`message` などです。時間のかかる処理は、先に `defer_update` で受け付けます。受け付け後は `followup_files` や `followup_files_ephemeral` で添付付きのメッセージを追加できます。[添付付きフォローアップ](responding.md#追加のメッセージにファイルを添付する)

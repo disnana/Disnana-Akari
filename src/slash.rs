@@ -48,6 +48,7 @@ mod v2_attachments;
 mod validation;
 pub use context_menu::UserMenuTarget;
 use context_menu::{MenuCommands, MenuKind, replace_application_commands};
+pub(crate) use file_response::send_followup_files;
 pub(crate) use invoke::InvocationHooks;
 use invoke::{PreparedSlashHandler, slash_handler};
 pub use localizations::CommandOptionLocalizations;
@@ -1889,6 +1890,11 @@ impl ResponseState {
         content: &str,
         ephemeral: bool,
     ) -> Result<()> {
+        self.require_followup()?;
+        send_followup_message(http, interaction, content, ephemeral).await
+    }
+
+    pub(crate) fn require_followup(&self) -> Result<()> {
         // 遅延応答の直後の followup は、Discord が元の応答の編集として扱うことがある。
         if !matches!(
             self,
@@ -1896,7 +1902,7 @@ impl ResponseState {
         ) {
             return Err(ResponseStateError::FollowupBeforeResponse.into());
         }
-        send_followup_message(http, interaction, content, ephemeral).await
+        Ok(())
     }
 }
 

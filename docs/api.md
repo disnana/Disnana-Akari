@@ -140,6 +140,8 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.reply_ephemeral(content).await -> Result<()>` | 呼び出したユーザーだけに初回応答を送ります。`defer_ephemeral` の後は、その処理中の表示を本文に置き換えます。 |
 | `ctx.followup(content).await -> Result<()>` | 最初の本文を送った後に、チャンネルに追加のメッセージを送ります。 |
 | `ctx.followup_ephemeral(content).await -> Result<()>` | 最初の本文を送った後に、呼び出したユーザーだけに追加のメッセージを送ります。 |
+| `ctx.followup_files(content, files, limits).await -> Result<()>` | 元の応答を完成させた後、添付付きの追加メッセージをチャンネルへ送ります。 |
+| `ctx.followup_files_ephemeral(content, files, limits).await -> Result<()>` | 元の応答を完成させた後、添付付きの追加メッセージを呼び出したユーザーだけに送ります。 |
 | `ctx.original_response().await -> Result<Message>` | 元の応答メッセージを取得します。非公開の応答も取得できます。 |
 | `ctx.edit_original_response(content)` / `ctx.edit_original_ui(&message)` / `ctx.edit_original_v2(&message)` | 元の応答を編集します。遅延応答を完成させることもでき、いずれも公開範囲と添付を維持します。 |
 | `ctx.delete_original_response().await -> Result<()>` | 元の応答メッセージを削除します。遅延応答だけを削除した場合は、追加応答を送れません。 |
@@ -298,6 +300,8 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.acknowledge().await -> Result<()>` | `defer_update` と同じ確認応答を送ります。 |
 | `ctx.followup(content).await -> Result<()>` | 初回応答の後、チャンネルに追加のメッセージを送ります。 |
 | `ctx.followup_ephemeral(content).await -> Result<()>` | 初回応答の後、ボタンを押した本人にだけ追加のメッセージを送ります。 |
+| `ctx.followup_files(content, files, limits).await -> Result<()>` | 初回応答や `defer_update` の後、添付付きの追加メッセージをチャンネルへ送ります。 |
+| `ctx.followup_files_ephemeral(content, files, limits).await -> Result<()>` | 初回応答や `defer_update` の後、添付付きの追加メッセージをボタンを押した本人だけに送ります。 |
 
 `update_message` は本文、埋め込み、ボタンの行をまとめて置き換えます。次の表示にも残したい埋め込みやボタンは、新しい `UiMessage` に含めます。更新は一回のクリックにつき一度です。時間のかかる処理では、先に `defer_update` を呼んで 3 秒以内に初回応答を送り、処理の完了後に `update_message` で表示を変更します。
 
@@ -346,7 +350,7 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 
 文字列の選択肢は `SelectOption::selected_by_default(true)`、ユーザーなどの対象選択は `default_values(ids)` で初期選択を指定できます。`MentionableSelect` の初期選択には `Mentionable::User(id)` または `Mentionable::Role(id)` を使います。
 
-`SelectContext` には、メニューの `custom_id()` と選択結果の `values() -> &[String]` が渡ります。`author_id()`、`guild_id()`、`message()`、`invoker_id()` で操作者や元のメッセージを確認でき、ボタンと同じように `reply_ephemeral`、`defer_update`、`update_message`、`update_v2`、`show_modal` を呼べます。
+`SelectContext` には、メニューの `custom_id()` と選択結果の `values() -> &[String]` が渡ります。`author_id()`、`guild_id()`、`message()`、`invoker_id()` で操作者や元のメッセージを確認でき、ボタンと同じように `reply_ephemeral`、`defer_update`、`update_message`、`update_v2`、`show_modal`、`followup_files`、`followup_files_ephemeral` を呼べます。
 
 ### ユーザー、ロール、チャンネルを選択する
 
@@ -361,7 +365,7 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 | `ChannelSelectContext<'_>` | `&[Id<ChannelMarker>]` |
 | `MentionableSelectContext<'_>` | `&[Mentionable]` |
 
-`values()` で対象ごとに型の付いた ID を取得できます。Discord が選択対象の情報を同梱した場合は、`resolved()` で `&InteractionDataResolved` を取得できます。操作への本人宛ての返信には `reply_ephemeral` を使います。[Playground の選択メニュー実装](../examples/ping/entities.rs)
+`values()` で対象ごとに型の付いた ID を取得できます。Discord が選択対象の情報を同梱した場合は、`resolved()` で `&InteractionDataResolved` を取得できます。操作への本人宛ての返信には `reply_ephemeral` を使います。上の表の各コンテキストにも `followup_files` と `followup_files_ephemeral` があり、`defer_update` の後にも呼べます。[Playground の選択メニュー実装](../examples/ping/entities.rs)
 
 ユーザーとロールを混ぜたメニューでは、選択された各 ID の種類を Discord の `resolved.users` と `resolved.roles` で判定します。選択があるときに `resolved` が欠けている場合や、ID の種類が一意に決まらない場合は、ハンドラーを呼ばず本人へのエラー応答を試みます。選択数が 0 件なら、`resolved` がなくても空の `values()` を受け取れます。
 
@@ -387,6 +391,8 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 | `ctx.defer_ephemeral().await -> Result<()>` | 最初に本人にだけ見える処理中の応答を送ります。 |
 | `ctx.followup(content).await -> Result<()>` | 最初の本文を送った後、チャンネルに追加のメッセージを送ります。 |
 | `ctx.followup_ephemeral(content).await -> Result<()>` | 最初の本文を送った後、本人にだけ追加のメッセージを送ります。 |
+| `ctx.followup_files(content, files, limits).await -> Result<()>` | フォーム送信への元の応答を完成させた後、添付付きの追加メッセージをチャンネルへ送ります。 |
+| `ctx.followup_files_ephemeral(content, files, limits).await -> Result<()>` | フォーム送信への元の応答を完成させた後、添付付きの追加メッセージを本人だけに送ります。 |
 
 時間がかかる処理では、3 秒の初回応答期限までに `defer` または `defer_ephemeral` を明示的に呼び、完了時に `reply` を呼びます。公開の `defer` の後に `reply_ephemeral` を呼ぶとエラーになります。ハンドラーが本文を送らずに成功した場合は、Akari が `Messages::modal_accepted`（既定は「入力を受け付けました。」）を送ります。初回応答前なら本人にだけ表示し、遅延応答済みならその表示を置き換えます。本文を送る前にハンドラーが失敗した場合は、`Messages::modal_failed` を同じ経路で送ります。どちらの文言も `None` にすると、Akari は何も送りません。その場合、応答が済んでいない操作は、Discord 上で失敗と表示されます。[Components V2 のチュートリアル](tutorial.md) · [Discord の Interaction 応答仕様](https://docs.discord.com/developers/interactions/receiving-and-responding)
 
@@ -538,6 +544,12 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 ## 通常の添付返信
 
 `Context`、`CommandContext`、`SlashContext`、`HybridContext` の `reply_files` で本文と添付を送れます。添付だけを送る場合は空の本文を指定します。`SlashContext::reply_files_ephemeral` は本人向けで、`defer_ephemeral` 後の待機表示も完了できます。
+
+## 添付付きの追加メッセージ
+
+`SlashContext`、`ModalContext`、`ButtonContext` と各選択メニューのコンテキストでは、公開の `followup_files(&self, content: &str, files: &[Attachment], limits: AttachmentLimits)` と、本人だけに送る `followup_files_ephemeral` を使えます。`Attachment` は `model::http::attachment::Attachment`、`AttachmentLimits` は `validation::AttachmentLimits` です。添付だけを送るときは本文に空文字を指定します。本文と添付が両方空の場合はエラーになります。
+
+スラッシュコマンドとフォーム送信では、遅延応答の待機表示を `reply` などで完成させた後に送れます。ボタンと選択メニューでは、`defer_update` で操作を受け付けた後にすぐ送れます。公開範囲は追加メッセージごとに選べます。送信前に本文、添付の件数・名前・ID・サイズを検証し、Discord が Interaction に通知した1ファイルのサイズ上限と `AttachmentLimits` が適用されます。[Discord の追加メッセージ API](https://docs.discord.com/developers/interactions/receiving-and-responding#create-followup-message)
 
 ### テキストコマンドの実行フック
 

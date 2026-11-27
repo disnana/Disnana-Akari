@@ -149,7 +149,7 @@ async fn on_count(ctx: &mut ButtonContext<'_>) -> Result<()> {
 
 ## 時間のかかる処理
 
-ボタンも 3 秒以内の応答が必要です。長くかかるときは、先に `defer_update` で受け付けて、あとで `update_message` や `followup_ephemeral` を呼びます。
+ボタンも 3 秒以内の応答が必要です。長くかかるときは、先に `defer_update` で受け付けて、あとで `update_message` や `followup_ephemeral` を呼びます。作業結果をファイル付きの追加メッセージとして送る場合は、`followup_files` または `followup_files_ephemeral` を使います。[追加のメッセージにファイルを添付する](responding.md#追加のメッセージにファイルを添付する)
 
 ```rust
 use disnana_akari::ui::UiMessage;

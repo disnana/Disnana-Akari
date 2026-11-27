@@ -14,6 +14,7 @@ use crate::{
 
 const CALLBACK: &str = "/interactions/1/token/callback";
 const ORIGINAL: &str = "/webhooks/10/token/messages/@original";
+const FOLLOWUP: &str = "/webhooks/10/token";
 
 async fn local_http() -> Result<(TcpListener, Client)> {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -228,5 +229,86 @@ async fn classic_files_reject_invalid_or_locked_replies_before_completing_deferr
     server?;
     assert_eq!(state, ResponseState::Replied);
     assert_eq!(private_state, ResponseState::Replied);
+    Ok(())
+}
+
+#[tokio::test]
+async fn file_followups_preserve_visibility_and_validate_before_sending() -> Result<()> {
+    let (listener, http) = local_http().await?;
+    let uploads = files();
+    let mut interaction = command_interaction(None, None, 5);
+    interaction.token = "token".into();
+    interaction.attachment_size_limit = 3;
+    let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
+        return Err(Error::msg(
+            "試験用の Interaction にコマンドデータがありません",
+        ));
+    };
+    let hooks = Hooks::default();
+    let (_, timing) = Pending::new((), None).begin();
+    let mut state = ResponseState::Pending;
+    let mut ctx = SlashContext {
+        initial: InitialResponder {
+            http: &http,
+            interaction: &interaction,
+            timing,
+            info: &hooks.info,
+        },
+        data,
+        response_state: &mut state,
+    };
+    let request = async {
+        let limits = AttachmentLimits::default();
+        assert!(matches!(
+            ctx.followup_files_ephemeral("", &uploads, limits).await,
+            Err(Error::ResponseState(
+                ResponseStateError::FollowupBeforeResponse
+            ))
+        ));
+        ctx.defer().await?;
+        assert!(matches!(
+            ctx.followup_files_ephemeral("", &uploads, limits).await,
+            Err(Error::ResponseState(
+                ResponseStateError::FollowupBeforeResponse
+            ))
+        ));
+        ctx.reply("準備完了").await?;
+
+        let oversized = [Attachment::from_bytes("too-big.txt".into(), vec![0; 4], 0)];
+        for error in [
+            ctx.followup_files("", &[], limits).await,
+            ctx.followup_files("", &oversized, limits).await,
+            ctx.followup_files("", &uploads, limits.max_total_bytes(Some(2)))
+                .await,
+        ] {
+            assert!(matches!(error, Err(Error::InvalidUi(_))));
+        }
+
+        ctx.followup_files("<@123>", &uploads, limits).await?;
+        ctx.followup_files_ephemeral("", &uploads, limits).await
+    };
+    let server = async {
+        exchange_response(&listener, "POST", Some(CALLBACK), None)
+            .await
+            .map_err(Error::handler)?;
+        exchange_response(&listener, "PATCH", Some(ORIGINAL), None)
+            .await
+            .map_err(Error::handler)?;
+        let public = multipart(&listener, "POST", FOLLOWUP, false).await?;
+        assert_eq!(public["content"], "<@123>");
+        assert!(public.get("flags").is_none());
+        let private = multipart(&listener, "POST", FOLLOWUP, false).await?;
+        assert_eq!(private["flags"], 64);
+        assert!(private.get("content").is_none());
+        Ok::<_, Error>(())
+    };
+    let (request, server) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(request, server)
+    })
+    .await
+    .map_err(Error::handler)?;
+    request?;
+    server?;
+    assert_eq!(state, ResponseState::Replied);
     Ok(())
 }

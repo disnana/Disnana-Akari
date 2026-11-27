@@ -27,6 +27,35 @@ use super::{InitialResponder, ReplyAction, ResponseState, SlashContext};
 mod tests;
 
 impl SlashContext<'_> {
+    /// 初回応答を完成させた後、本文とファイルを追加で送ります。
+    /// 添付だけを送る場合は、本文に空文字列を指定します。
+    ///
+    /// # エラー
+    /// 初回応答が未完成、本文や添付が無効、上限超過、または Discord が送信を受け付けない場合に失敗します。
+    pub async fn followup_files(
+        &self,
+        content: &str,
+        files: &[Attachment],
+        limits: AttachmentLimits,
+    ) -> Result<()> {
+        self.response_state.require_followup()?;
+        send_followup_files(self.initial, content, files, limits, false).await
+    }
+
+    /// 初回応答を完成させた後、実行者だけに見える添付付きの追加メッセージを送ります。
+    ///
+    /// # エラー
+    /// [`Self::followup_files`] と同じ条件で失敗します。
+    pub async fn followup_files_ephemeral(
+        &self,
+        content: &str,
+        files: &[Attachment],
+        limits: AttachmentLimits,
+    ) -> Result<()> {
+        self.response_state.require_followup()?;
+        send_followup_files(self.initial, content, files, limits, true).await
+    }
+
     /// 本文とファイルで返信します。ファイルだけを送る場合は空の本文を指定できます。
     /// 遅延応答の後は待機表示を完成させ、既存の公開範囲を引き継ぎます。
     ///
@@ -98,6 +127,39 @@ impl SlashContext<'_> {
         *self.response_state = ResponseState::Replied;
         Ok(())
     }
+}
+
+pub(crate) async fn send_followup_files(
+    initial: InitialResponder<'_>,
+    content: &str,
+    files: &[Attachment],
+    limits: AttachmentLimits,
+    ephemeral: bool,
+) -> Result<()> {
+    let interaction = initial.interaction;
+    validation::reply_files(
+        content,
+        files,
+        limits,
+        Some(interaction.attachment_size_limit),
+    )?;
+
+    let mentions = AllowedMentions::default();
+    let client = initial.http.interaction(interaction.application_id);
+    let mut followup = client
+        .create_followup(&interaction.token)
+        .allowed_mentions(Some(&mentions));
+    if !content.is_empty() {
+        followup = followup.content(content);
+    }
+    if !files.is_empty() {
+        followup = followup.attachments(files);
+    }
+    if ephemeral {
+        followup = followup.flags(MessageFlags::EPHEMERAL);
+    }
+    followup.await?;
+    Ok(())
 }
 
 pub(super) enum FileCallback<'a> {

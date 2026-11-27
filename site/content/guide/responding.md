@@ -6,7 +6,7 @@
 
 1. **最初の応答は 3 秒以内。** 間に合わないと、Discord に「アプリケーションが応答しませんでした」と表示されます。
 2. **最初の応答は 1 回だけ。** 2 回目以降は、`followup`（追加のメッセージ）を使います。
-3. **応答の期限は 15 分。** 最初の応答から 15 分たつと、続きのメッセージは送れません。
+3. **応答に使うトークンの有効期間は 15 分。** 続きのメッセージは有効期間内に送ります。
 
 ## 流れ
 
@@ -49,7 +49,7 @@ async fn report(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 `_ephemeral` が付くメソッドは、操作した本人にだけ見えるメッセージを送ります。エラーの説明や、個人向けの結果に向いています。
 
-**公開範囲は最初の応答で決まります。** 公開の `defer` のあとに `reply_ephemeral` を呼ぶと、エラーになります。本人にだけ見せたいときは、最初から `defer_ephemeral` を使ってください。
+**元の応答の公開範囲は、最初の応答で決まります。** 公開の `defer` のあとに `reply_ephemeral` を呼ぶと、エラーになります。元の応答を本人にだけ見せたいときは、最初から `defer_ephemeral` を使ってください。追加メッセージの公開範囲は、呼び出す `followup` 系メソッドで個別に選べます。
 
 ## 使えるメソッドの一覧
 
@@ -60,6 +60,7 @@ async fn report(ctx: &mut SlashContext<'_>) -> Result<()> {
 | 処理中にする | `defer` / `defer_ephemeral` | `defer_update` | `defer` / `defer_ephemeral` |
 | 元のメッセージを更新 | – | `update_message` / `update_v2` | – |
 | 追加のメッセージ | `followup` / `followup_ephemeral` | `followup` / `followup_ephemeral` | `followup` / `followup_ephemeral` |
+| ファイル付きの追加メッセージ | `followup_files` / `followup_files_ephemeral` | `followup_files` / `followup_files_ephemeral` | `followup_files` / `followup_files_ephemeral` |
 | フォームを開く | `show_modal` | `show_modal` | – |
 
 ## 元の応答を取得・更新・削除する
@@ -120,6 +121,32 @@ async fn report(ctx: CommandContext<'_>) -> Result<()> {
 ```
 
 `AttachmentLimits` は Components V2 と共有できます。通常の返信も、本文の長さ、添付数、名前と ID、ファイルサイズを送信前に検証します。アプリ独自の上限を使わない場合は `AttachmentLimits::default()` を渡します。
+
+## 追加のメッセージにファイルを添付する
+
+公開の追加メッセージには `followup_files`、操作した本人にだけ送るときは `followup_files_ephemeral` を使います。ファイルだけを送るときは本文に空文字を指定できます。通常の添付返信と同じ `AttachmentLimits` を渡します。[Discord の追加メッセージ API](https://docs.discord.com/developers/interactions/receiving-and-responding#create-followup-message)
+
+スラッシュコマンドとフォーム送信では、`defer` や `defer_ephemeral` のあとに `reply` などで待機表示を完成させてから送ります。下の例では、集計の完了を知らせたあと、結果ファイルを本人にだけ追加で送ります。
+
+```rust
+use disnana_akari::{
+    Result, SlashContext, model::http::attachment::Attachment, validation::AttachmentLimits,
+};
+
+async fn export_report(ctx: &mut SlashContext<'_>) -> Result<()> {
+    ctx.defer_ephemeral().await?;
+    let files = [Attachment::from_bytes(
+        "summary.csv".into(),
+        b"item,count\nprocessed,12\n".to_vec(),
+        0,
+    )];
+    ctx.reply("集計が完了しました。").await?;
+    ctx.followup_files_ephemeral("", &files, AttachmentLimits::default())
+        .await
+}
+```
+
+ボタンと選択メニューでは `defer_update` で操作を受け付けた時点から、同じメソッドでファイル付きの追加メッセージを送れます。ボタンやメニューが付いた元の投稿はそのままです。
 
 ## 初回応答の失敗を調べる
 

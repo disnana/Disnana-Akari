@@ -228,3 +228,177 @@ async fn select_can_create_and_edit_a_private_v2_original() -> Result<()> {
     client?;
     server
 }
+
+const FILE_FOLLOWUP: Option<&str> = Some("/webhooks/10/component-token");
+
+fn test_uploads() -> [twilight_model::http::attachment::Attachment; 1] {
+    [twilight_model::http::attachment::Attachment::from_bytes(
+        "result.txt".into(),
+        b"xyz".to_vec(),
+        0,
+    )]
+}
+
+async fn followup_multipart(listener: &TcpListener) -> Result<Value> {
+    let body = exchange_response(listener, "POST", FILE_FOLLOWUP, None)
+        .await
+        .map_err(Error::handler)?;
+    assert!(body.contains("name=\"files[0]\"; filename=\"result.txt\""));
+    assert!(body.contains("\r\n\r\nxyz\r\n--"));
+    let data = body
+        .split_once("Content-Type: application/json\r\n\r\n")
+        .and_then(|(_, contents)| contents.lines().next())
+        .unwrap();
+    let data: Value = serde_json::from_str(data).map_err(Error::handler)?;
+    assert_eq!(
+        data["attachments"],
+        json!([{"id": 0, "filename": "result.txt"}])
+    );
+    assert_eq!(data["allowed_mentions"]["parse"], json!([]));
+    Ok(data)
+}
+
+#[tokio::test]
+async fn component_files_follow_source_ack_and_explicit_visibility() -> Result<()> {
+    use super::{ButtonResponse, EntitySelectContext, MentionableSelectContext, ResponseState};
+    use crate::{model::id::marker::UserMarker, validation::AttachmentLimits};
+
+    let (listener, http) = local_http().await?;
+    let mut event = component_interaction(ComponentType::Button);
+    event.attachment_size_limit = 3;
+    let hooks = Hooks::default();
+    let initial = component_initial(&http, &event, &hooks);
+    let mut button = ButtonContext::new(initial, "test", None);
+    let mut select = SelectContext {
+        inner: ButtonContext::new(initial, "test", None),
+        values: &[],
+    };
+    let user = EntitySelectContext::<UserMarker> {
+        inner: ButtonContext::new(initial, "test", None),
+        values: Vec::new(),
+        resolved: None,
+    };
+    let mention = MentionableSelectContext {
+        inner: ButtonContext::new(initial, "test", None),
+        values: Vec::new(),
+        resolved: None,
+    };
+    let limits = AttachmentLimits::default();
+    let files = test_uploads();
+    let client = async {
+        for result in [
+            button.followup_files("", &files, limits).await,
+            user.followup_files_ephemeral("", &files, limits).await,
+            mention.followup_files("", &files, limits).await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(Error::ResponseState(
+                    ResponseStateError::FollowupBeforeResponse
+                ))
+            ));
+        }
+        button.response = ButtonResponse::OwnResponse(ResponseState::Deferred { ephemeral: false });
+        assert!(matches!(
+            button.followup_files_ephemeral("", &files, limits).await,
+            Err(Error::ResponseState(
+                ResponseStateError::FollowupBeforeResponse
+            ))
+        ));
+        button.response = ButtonResponse::Pending;
+
+        button.defer_update().await?;
+        button.followup_files_ephemeral("", &files, limits).await?;
+        select.defer_update().await?;
+        select.followup_files("公開の添付", &files, limits).await
+    };
+    let server = async {
+        assert_eq!(
+            json_request(&listener, "POST", CALLBACK).await?,
+            json!({"type": 6})
+        );
+        assert_eq!(followup_multipart(&listener).await?["flags"], 64);
+        assert_eq!(
+            json_request(&listener, "POST", CALLBACK).await?,
+            json!({"type": 6})
+        );
+        let public = followup_multipart(&listener).await?;
+        assert_eq!(public["content"], "公開の添付");
+        assert_ne!(public["flags"], 64);
+        Ok::<_, Error>(())
+    };
+    let (client, server) = timeout(Duration::from_secs(5), async {
+        tokio::join!(client, server)
+    })
+    .await
+    .map_err(Error::handler)?;
+    client?;
+    server
+}
+
+#[tokio::test]
+async fn modal_files_wait_for_completed_reply_before_private_followup() -> Result<()> {
+    use super::{InteractionData, ModalContext, ModalInteractionData, ResponseState};
+    use crate::validation::AttachmentLimits;
+
+    let (listener, http) = local_http().await?;
+    let mut event = interaction(
+        InteractionType::ModalSubmit,
+        InteractionData::ModalSubmit(Box::new(ModalInteractionData {
+            components: Vec::new(),
+            custom_id: "test".into(),
+            resolved: None,
+        })),
+    );
+    event.attachment_size_limit = 3;
+    event.token = "component-token".into();
+    let Some(InteractionData::ModalSubmit(data)) = event.data.as_ref() else {
+        return Err(Error::msg("テスト用のモーダルデータがありません"));
+    };
+    let hooks = Hooks::default();
+    let mut ctx = ModalContext {
+        initial: component_initial(&http, &event, &hooks),
+        data,
+        dynamic_id: None,
+        response: ResponseState::Pending,
+        radio: &[],
+    };
+    let files = test_uploads();
+    let limits = AttachmentLimits::default();
+    let client = async {
+        assert!(matches!(
+            ctx.followup_files("", &files, limits).await,
+            Err(Error::ResponseState(
+                ResponseStateError::FollowupBeforeResponse
+            ))
+        ));
+        ctx.defer().await?;
+        assert!(matches!(
+            ctx.followup_files_ephemeral("", &files, limits).await,
+            Err(Error::ResponseState(
+                ResponseStateError::FollowupBeforeResponse
+            ))
+        ));
+        ctx.reply("完了").await?;
+        ctx.followup_files_ephemeral("", &files, limits).await
+    };
+    let server = async {
+        assert_eq!(
+            json_request(&listener, "POST", CALLBACK).await?,
+            json!({"type": 5})
+        );
+        assert_eq!(
+            json_request(&listener, "PATCH", ORIGINAL).await?["content"],
+            "完了"
+        );
+        assert_eq!(followup_multipart(&listener).await?["flags"], 64);
+        Ok::<_, Error>(())
+    };
+    let (client, server) = timeout(Duration::from_secs(5), async {
+        tokio::join!(client, server)
+    })
+    .await
+    .map_err(Error::handler)?;
+    client?;
+    server
+}

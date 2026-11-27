@@ -316,6 +316,7 @@ async fn examples(ctx: &mut SlashContext<'_>) -> Result<()> {
 | `ctx.reply_ephemeral(text)` | 呼び出した本人にだけ見える返信です。 |
 | `ctx.defer()` / `ctx.defer_ephemeral()` | 「考え中…」を表示して、あとで返信します。 |
 | `ctx.followup(text)` / `ctx.followup_ephemeral(text)` | 最初の返信のあとに、追加のメッセージを送ります。 |
+| `ctx.followup_files(text, &files, limits)` / `ctx.followup_files_ephemeral(text, &files, limits)` | 元の応答を完成させたあとに、[ファイル付きの追加メッセージ](responding.md#追加のメッセージにファイルを添付する)を送ります。 |
 | `ctx.reply_ui(&message)` | [Embed やボタン](buttons.md)付きで返信します。 |
 | `ctx.reply_v2(&message)` | [Components V2](components-v2.md) で返信します。 |
 | `ctx.show_modal(&form)` | [入力フォーム](modals.md)を開きます。 |

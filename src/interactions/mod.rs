@@ -20,6 +20,7 @@ use twilight_model::{
     },
 };
 
+mod followup;
 mod modal;
 mod original;
 #[cfg(test)]
@@ -672,9 +673,7 @@ impl<'a> ButtonContext<'a> {
     }
 
     async fn send_followup(&self, content: &str, ephemeral: bool) -> Result<()> {
-        if self.response == ButtonResponse::Pending {
-            return Err(ResponseStateError::FollowupBeforeResponse.into());
-        }
+        self.response.require_followup()?;
         send_followup_message(
             self.initial.http,
             self.initial.interaction,
@@ -1128,6 +1127,14 @@ enum ButtonResponse {
 }
 
 impl ButtonResponse {
+    fn require_followup(self) -> Result<()> {
+        match self {
+            Self::Pending => Err(ResponseStateError::FollowupBeforeResponse.into()),
+            Self::DeferredUpdate | Self::Sent => Ok(()),
+            Self::OwnResponse(state) => state.require_followup(),
+        }
+    }
+
     fn require_pending(self) -> Result<()> {
         if self == Self::Pending {
             Ok(())
