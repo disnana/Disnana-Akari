@@ -29,13 +29,14 @@ async fn ping(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 `register` の引数は、順に「名前」「説明」「引数の定義」「呼び出す関数」です。名前や説明が Discord の制約に合わないとき、または名前が重複しているときは、起動前にエラーになります。
 
-起動は `start()` です。テキストコマンドも使う場合は、`run_commands(commands)` に切り替えます。
+起動は `start()` です。テキストコマンドも使う場合は、`run_commands(commands)` に切り替え、本文を読むための Intent も指定します。
 
 <!-- no-check -->
 ```rust
 Bot::from_env()?
     .add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
     .with_slash_commands(slash)
+    .add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
     .run_commands(commands)
     .await
 ```
@@ -147,6 +148,8 @@ async fn echo(ctx: &mut SlashContext<'_>) -> Result<()> {
 ### 整数など、文字列以外の引数
 
 `integer_option`、`number_option`、`boolean_option` で、種類ごとの引数を作れます。値は `ctx.integer`、`ctx.number`、`ctx.boolean` で受け取ります。返される値は Twilight の `CommandOption` なので、範囲などは書き換えられます。
+
+ユーザー、ロール、チャンネル、メンション可能な対象、添付ファイルの引数は、`user_option`、`role_option`、`channel_option`、`mentionable_option`、`attachment_option` で作れます。
 
 ```rust
 use disnana_akari::{Result, SlashCommands, SlashContext};

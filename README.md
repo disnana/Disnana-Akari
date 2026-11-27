@@ -1,10 +1,29 @@
 # Disnana Akari
 
-Twilight を土台にした Rust 製 Discord Bot フレームワークです。テキストコマンド、サーバー向けのスラッシュコマンド、Gateway イベントをそれぞれ `async fn` として登録できます。テキストとスラッシュで処理を共通化したい場合は、同じ関数をハイブリッドコマンドとして登録できます。Discord の返信には埋め込みや Components V2 を使え、ボタンや選択メニューから入力フォームも開けます。スラッシュコマンドは、サブコマンド、オートコンプリート、型付きの引数、グローバル登録に対応し、権限の確認は `ctx.require_permissions(..)?` と明示的に呼びます。関連する登録は `Module` にまとめられます。
+Twilight を土台にした、Rust 製の Discord Bot フレームワークです。discord.py を参考に、Rust らしく、多機能で自由度が高く、シンプルで分かりやすい形を目指しています。
 
-Akari は、頼まれていないことを、勝手にしません。Intent を自動で追加せず、標準出力にも書かず、エラーは `Bot::on_error` で受け取れます。ログは Rust の標準の `tracing` で出すので、出力先とレベルはアプリが決められます。
+## できること
 
-0.x では公開 API に互換性のない変更が入る場合があります。更新時は変更履歴を確認してください。[変更履歴](CHANGELOG.md) · [最新リリース](https://github.com/disnana/Disnana-Akari/releases/latest)
+- **コマンド**: テキストコマンド、スラッシュコマンド（サブコマンド、オートコンプリート、型付きの引数、グローバル登録）、両方に同じ関数を登録できるハイブリッドコマンド。
+- **イベント**: Gateway イベントごとの関数の登録。関連する登録は `Module` にまとめられます。
+- **返信**: Embed、ボタン、選択メニュー、入力フォーム、Components V2。
+- **権限とクールダウン**: `ctx.require_permissions(..)?` で、実行できる人を絞れます。
+- **エラーとログ**: エラーは型で判別でき、`Bot::on_error` と `Bot::on_info` で受け取れます。ログは Rust の標準の `tracing` で出すので、出力先とレベルはアプリが決められます。
+
+## 方針
+
+Akari は、頼まれていないことを、勝手にしません。Intent を自動で追加せず、標準出力にも標準エラー出力にも書かず、権限の確認も、呼んだときだけ行います。依存は、安定していて保守が続いているものだけに絞っています。
+
+0.x では公開 API に互換性のない変更が入る場合があります。更新時は[変更履歴](CHANGELOG.md)を確認してください。0.1 から更新する場合は、変更履歴の「互換性のない変更」と、ドキュメントサイトの「0.1 から 0.2 への移行」を見てください。
+
+## はじめかた
+
+```sh
+cargo add disnana-akari
+cargo add tokio --features macros,rt
+```
+
+Bot トークンを環境変数 `DISCORD_TOKEN` に設定して、次のコードを実行します（Discord 側の準備は[クイックスタート](docs/quickstart.md)を見てください）。
 
 ```rust
 use disnana_akari::model::gateway::Intents;
@@ -26,20 +45,15 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 }
 ```
 
-スラッシュコマンドだけを使う場合は、`Bot::from_env()?.with_slash_commands(slash).start().await` で起動できます。`slash` はテスト用サーバー ID とコマンドを指定した `SlashCommands` です。[API リファレンス](docs/api.md)
+スラッシュコマンドだけを使う場合は、`Bot::from_env()?.with_slash_commands(slash).start().await` で起動できます。`slash` は、テスト用サーバーの ID とコマンドを指定した `SlashCommands` です（Intent の指定は要りません）。
 
-- [日本語ドキュメント](docs/README.md)
-- [クイックスタートとローカルの実験用 Bot](docs/quickstart.md)
-- [Playground のコードを読む](docs/tutorial.md)
-- [API リファレンス](docs/api.md)
-- [変更履歴](CHANGELOG.md)
-- 0.1 から更新する場合は、変更履歴の「互換性のない変更」と、ドキュメントサイトの「0.1 から 0.2 への移行」を確認してください。
-- [公開前の確認](docs/releasing.md)
-- [セキュリティ報告](SECURITY.md)
+## ドキュメント
 
-`Result<T>` が返す `Error` は、Intent の不足、Discord REST API の失敗、アプリ固有のエラーなどを型で判別できます。実行中のエラーは `Bot::on_error` でも受け取れます。[エラーの扱い方](docs/api.md#エラーと自動で送る文言)
-
-Gateway の接続や Interaction の初回応答にかかった時間は、必要に応じて `Bot::on_info` で受け取れます。[実行時の情報](docs/api.md#実行時の情報)
+- [ドキュメントサイト](https://disnana.github.io/Disnana-Akari/) — はじめかた、ガイド、discord.py との対応表
+- [API リファレンス（docs.rs）](https://docs.rs/disnana-akari) · [日本語の API 一覧](docs/api.md)
+- [クイックスタートとローカルの実験用 Bot](docs/quickstart.md) · [Playground のコードを読む](docs/tutorial.md)
+- [トラブルシューティング](docs/troubleshooting.md)
+- [変更履歴](CHANGELOG.md) · [設計の規則](DESIGN.md) · [公開前の確認](docs/releasing.md) · [セキュリティ報告](SECURITY.md)
 
 ## ライセンス
 
