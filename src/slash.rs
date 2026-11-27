@@ -121,23 +121,38 @@ impl SlashCommands {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
+        self.insert(
+            name,
+            description,
+            options,
+            Some(Box::new(
+                adapt_handler!(handler, ctx: &mut SlashContext<'_>),
+            )),
+            PermissionPolicy::Unrestricted,
+        )?;
+        Ok(())
+    }
+
+    fn insert(
+        &mut self,
+        name: &str,
+        description: &str,
+        options: Vec<CommandOption>,
+        handler: Option<Box<dyn SlashHandler>>,
+        permissions: PermissionPolicy,
+    ) -> Result<&mut Definition> {
         command::chat_input_name(name)?;
         command::description(description)?;
         command::options(&options)?;
         match self.entries.entry(name.into()) {
-            Entry::Vacant(entry) => {
-                entry.insert(Definition {
-                    description: description.into(),
-                    options,
-                    default_permissions: None,
-                    handler: Some(Box::new(
-                        adapt_handler!(handler, ctx: &mut SlashContext<'_>),
-                    )),
-                    children: BTreeMap::new(),
-                    autocompletes: HashMap::new(),
-                });
-                Ok(())
-            }
+            Entry::Vacant(entry) => Ok(entry.insert(Definition {
+                description: description.into(),
+                options,
+                permissions,
+                handler,
+                children: BTreeMap::new(),
+                autocompletes: HashMap::new(),
+            })),
             Entry::Occupied(_) => Err(RegistrationError::Duplicate {
                 kind: HandlerKind::SlashCommand,
                 name: name.to_owned(),
@@ -250,29 +265,73 @@ impl SlashCommands {
     ///
     /// 名前や説明が Discord の制約に合わない場合と、重複した名前を拒否します。
     pub fn group(&mut self, name: &str, description: &str) -> Result<CommandGroup<'_>> {
-        command::chat_input_name(name)?;
-        command::description(description)?;
-        match self.entries.entry(name.into()) {
-            Entry::Vacant(entry) => {
-                let definition = entry.insert(Definition {
-                    description: description.into(),
-                    options: Vec::new(),
-                    default_permissions: None,
-                    handler: None,
-                    children: BTreeMap::new(),
-                    autocompletes: HashMap::new(),
-                });
-                Ok(CommandGroup {
-                    root: definition,
-                    group: None,
-                })
-            }
-            Entry::Occupied(_) => Err(RegistrationError::Duplicate {
-                kind: HandlerKind::SlashCommand,
-                name: name.to_owned(),
-            }
-            .into()),
+        let root = self.insert(
+            name,
+            description,
+            Vec::new(),
+            None,
+            PermissionPolicy::Unrestricted,
+        )?;
+        Ok(CommandGroup { root, group: None })
+    }
+
+    /// Discord 上の既定の表示と、実行時の両方で権限を確認するギルドコマンドを登録します。
+    /// `Permissions::ADMINISTRATOR` または空の権限集合を渡すと管理者専用になります。
+    /// 実行時にはサーバー内であることも確認するため、DM からは使えません。
+    ///
+    /// # エラー
+    ///
+    /// グローバル登録、Discord の制約に合わない定義、重複した名前を拒否します。
+    pub fn register_with_permissions<E>(
+        &mut self,
+        name: &str,
+        description: &str,
+        options: Vec<CommandOption>,
+        required: Permissions,
+        handler: impl AsyncFn(&mut SlashContext<'_>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let permissions = self.required_permissions(required)?;
+        self.insert(
+            name,
+            description,
+            options,
+            Some(Box::new(
+                adapt_handler!(handler, ctx: &mut SlashContext<'_>),
+            )),
+            permissions,
+        )?;
+        Ok(())
+    }
+
+    /// 権限の確認が必要なギルドコマンドのグループを登録します。
+    /// 最上位の表示条件と、配下のすべてのサブコマンド・補完に適用します。
+    /// 権限の指定とエラーは [`Self::register_with_permissions`] と同じです。
+    pub fn group_with_permissions(
+        &mut self,
+        name: &str,
+        description: &str,
+        required: Permissions,
+    ) -> Result<CommandGroup<'_>> {
+        let permissions = self.required_permissions(required)?;
+        let root = self.insert(name, description, Vec::new(), None, permissions)?;
+        Ok(CommandGroup { root, group: None })
+    }
+
+    fn required_permissions(&self, required: Permissions) -> Result<PermissionPolicy> {
+        if matches!(self.scope, Scope::Global) {
+            return Err(RegistrationError::RestrictedCommandRequiresGuild.into());
         }
+        Ok(PermissionPolicy::Required(if required.is_empty() {
+            Permissions::ADMINISTRATOR
+        } else {
+            required
+        }))
     }
 
     /// 登録済みのコマンドを、既定で使える人の権限を絞って Discord に登録します。
@@ -284,15 +343,21 @@ impl SlashCommands {
     ///
     /// # エラー
     ///
-    /// 登録されていない名前を指定した場合に失敗します。
+    /// 登録されていない名前、または実行時の権限確認も設定済みの名前を指定した場合に失敗します。
     pub fn default_member_permissions(
         &mut self,
         name: &str,
         permissions: Permissions,
     ) -> Result<()> {
         match self.entries.get_mut(name) {
+            Some(definition) if matches!(definition.permissions, PermissionPolicy::Required(_)) => {
+                Err(RegistrationError::CommandPermissionsAlreadyRequired {
+                    name: name.to_owned(),
+                }
+                .into())
+            }
             Some(definition) => {
-                definition.default_permissions = Some(permissions);
+                definition.permissions = PermissionPolicy::Visibility(permissions);
                 Ok(())
             }
             None => Err(RegistrationError::UnknownCommand {
@@ -391,7 +456,7 @@ impl SlashCommands {
                             .create_guild_command(guild_id)
                             .chat_input(name, &definition.description)
                             .command_options(&options);
-                        if let Some(permissions) = definition.default_permissions {
+                        if let Some(permissions) = definition.permissions.discord_default() {
                             request = request.default_member_permissions(permissions);
                         }
                         request.await
@@ -401,7 +466,7 @@ impl SlashCommands {
                             .create_global_command()
                             .chat_input(name, &definition.description)
                             .command_options(&options);
-                        if let Some(permissions) = definition.default_permissions {
+                        if let Some(permissions) = definition.permissions.discord_default() {
                             request = request.default_member_permissions(permissions);
                         }
                         request.await
@@ -432,7 +497,7 @@ impl SlashCommands {
                 let command = Command {
                     application_id: None,
                     contexts: None,
-                    default_member_permissions: definition.default_permissions,
+                    default_member_permissions: definition.permissions.discord_default(),
                     description: definition.description.clone(),
                     description_localizations: None,
                     dm_permission: None,
@@ -648,10 +713,48 @@ pub(crate) fn leaf_options(mut options: &[CommandDataOption]) -> &[CommandDataOp
     options
 }
 
+#[derive(Clone, Copy)]
+enum PermissionPolicy {
+    Unrestricted,
+    Visibility(Permissions),
+    Required(Permissions),
+}
+
+impl PermissionPolicy {
+    fn discord_default(self) -> Option<Permissions> {
+        match self {
+            Self::Unrestricted => None,
+            Self::Visibility(permissions) => Some(permissions),
+            Self::Required(permissions) if permissions.contains(Permissions::ADMINISTRATOR) => {
+                Some(Permissions::empty())
+            }
+            Self::Required(permissions) => Some(permissions),
+        }
+    }
+
+    fn check(self, interaction: &Interaction) -> Result<()> {
+        if let Self::Required(required) = self {
+            check_permissions(
+                interaction.guild_id,
+                interaction_permissions(interaction),
+                required,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn interaction_permissions(interaction: &Interaction) -> Option<Permissions> {
+    interaction
+        .member
+        .as_ref()
+        .and_then(|member| member.permissions)
+}
+
 struct Definition {
     description: String,
     options: Vec<CommandOption>,
-    default_permissions: Option<Permissions>,
+    permissions: PermissionPolicy,
     /// サブコマンドを持たない、普通のコマンドの関数。
     handler: Option<Box<dyn SlashHandler>>,
     /// サブコマンドと、そのグループ。持つ場合、`options` と `handler` は使わない。
@@ -733,6 +836,7 @@ impl Definition {
             root: self.handler,
             subs,
             autocompletes: self.autocompletes,
+            permissions: self.permissions,
         }
     }
 }
@@ -742,6 +846,7 @@ struct Route {
     root: Option<Box<dyn SlashHandler>>,
     subs: HashMap<Vec<String>, Box<dyn SlashHandler>>,
     autocompletes: HashMap<(Vec<String>, String), Box<dyn AutocompleteHandler>>,
+    permissions: PermissionPolicy,
 }
 
 impl Route {
@@ -813,9 +918,10 @@ impl ActiveSlashCommands {
         let Some(handler) = self
             .handlers
             .get(&data.id)
+            .filter(|route| route.permissions.check(initial.interaction).is_ok())
             .and_then(|route| route.find_autocomplete(&path[1..], ctx.focused_name()))
         else {
-            // 関数のない引数には、候補なしを返して、入力欄を読み込み中のままにしない。
+            // 権限がない場合や関数がない場合は空の候補を返す。
             if let Err(error) = ctx.respond_empty_if_needed().await {
                 hooks
                     .reporter
@@ -859,10 +965,10 @@ impl ActiveSlashCommands {
                 .await;
             return;
         }
-        let Some(handler) = self
+        let Some((route, handler)) = self
             .handlers
             .get(&data.id)
-            .and_then(|route| route.find(&path[1..]))
+            .and_then(|route| route.find(&path[1..]).map(|handler| (route, handler)))
         else {
             hooks
                 .reporter
@@ -881,7 +987,11 @@ impl ActiveSlashCommands {
             data,
             response_state: &mut response_state,
         };
-        let check_failed = match handler.call(&mut ctx).await {
+        let result = match route.permissions.check(interaction) {
+            Ok(()) => handler.call(&mut ctx).await,
+            Err(error) => Err(error),
+        };
+        let check_failed = match result {
             Ok(()) => false,
             Err(error) => {
                 hooks
@@ -953,11 +1063,7 @@ impl<'a> SlashContext<'a> {
     /// Discord が、ロールとチャンネルごとの上書きを反映して計算した値です。
     /// 管理者は、すべての権限を持つものとして返ります。
     pub fn permissions(&self) -> Option<Permissions> {
-        self.initial
-            .interaction
-            .member
-            .as_ref()
-            .and_then(|member| member.permissions)
+        interaction_permissions(self.initial.interaction)
     }
 
     /// サーバーの中で呼ばれたことを確認し、その ID を返します。
@@ -1475,11 +1581,16 @@ mod tests {
         ActiveSlashCommands, AllowedMentions, AutocompleteContext, CommandData, CommandDataOption,
         CommandOptionType, CommandOptionValue, CommandType, Error, GuildMarker, Id,
         InitialResponder, InitialResponse, Interaction, InteractionData, InteractionResponseType,
-        MessageFlags, Permissions, ReplyAction, ResponseState, ResponseStateError, Result, Route,
-        Scope, SlashCommands, SlashContext, command_path, initial_response, leaf_options,
-        v2_update_response,
+        MessageFlags, PermissionPolicy, Permissions, ReplyAction, ResponseState,
+        ResponseStateError, Result, Route, Scope, SlashCommands, SlashContext, command_path,
+        initial_response, leaf_options, v2_update_response,
     };
-    use crate::ui::{Button, ComponentsV2, Embed, UiMessage};
+    use crate::{
+        RegistrationError,
+        hooks::Hooks,
+        ui::{Button, ComponentsV2, Embed, UiMessage},
+    };
+    use twilight_http::Client;
 
     async fn handler(_: &mut SlashContext<'_>) -> Result<()> {
         Ok(())
@@ -1568,6 +1679,7 @@ mod tests {
                 })),
                 subs: HashMap::new(),
                 autocompletes: HashMap::new(),
+                permissions: PermissionPolicy::Unrestricted,
             },
         );
         ActiveSlashCommands { scope, handlers }
@@ -1577,11 +1689,7 @@ mod tests {
     async fn a_failed_check_after_public_defer_sends_the_reason_only_in_a_private_followup()
     -> Result<()> {
         use std::time::Duration;
-        use tokio::{
-            io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-            net::TcpListener,
-            time::timeout,
-        };
+        use tokio::{net::TcpListener, time::timeout};
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1610,35 +1718,12 @@ mod tests {
                 ("PATCH", false, false),
                 ("POST", true, true),
             ] {
-                let (stream, _) = listener.accept().await?;
-                let mut stream = BufReader::new(stream);
-                let mut line = String::new();
-                stream.read_line(&mut line).await?;
-                assert_eq!(line.split_whitespace().next(), Some(method));
-                let mut length = 0;
-                loop {
-                    line.clear();
-                    if stream.read_line(&mut line).await? == 0 || line == "\r\n" {
-                        break;
-                    }
-                    if let Some((name, value)) = line.split_once(':')
-                        && name.eq_ignore_ascii_case("content-length")
-                    {
-                        length = value.trim().parse().unwrap();
-                    }
-                }
-                let mut body = vec![0; length];
-                stream.read_exact(&mut body).await?;
-                let body = String::from_utf8(body).unwrap();
+                let body = capture_response(&listener, method).await?;
                 assert_eq!(body.contains("private check failure"), contains_denial);
                 assert_eq!(body.contains("\"flags\":64"), private);
                 if method == "PATCH" {
                     assert!(body.contains("処理を終了しました。"));
                 }
-                stream
-                    .get_mut()
-                    .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
-                    .await?;
             }
             Ok::<_, std::io::Error>(())
         };
@@ -1651,6 +1736,130 @@ mod tests {
         .await
         .map_err(Error::handler)?;
         server.map_err(Error::handler)
+    }
+
+    async fn capture_response(
+        listener: &tokio::net::TcpListener,
+        method: &str,
+    ) -> std::io::Result<String> {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let (stream, _) = listener.accept().await?;
+        let mut stream = BufReader::new(stream);
+        let mut line = String::new();
+        stream.read_line(&mut line).await?;
+        assert_eq!(line.split_whitespace().next(), Some(method));
+        let mut length = 0;
+        loop {
+            line.clear();
+            if stream.read_line(&mut line).await? == 0 || line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                length = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await?;
+        stream
+            .get_mut()
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .await?;
+        Ok(String::from_utf8(body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn protected_subcommand_skips_handler_and_sends_private_check_failure() -> Result<()> {
+        let guild_id = Id::new(1);
+        let command_id = Id::new(5);
+        let mut slash = SlashCommands::for_guild(guild_id).replace_commands();
+        slash
+            .group_with_permissions("ping", "管理", Permissions::MANAGE_GUILD)?
+            .group("advanced", "詳細")?
+            .subcommand(
+                "run",
+                "実行",
+                vec![],
+                async |_: &mut SlashContext<'_>| -> Result<()> {
+                    panic!("protected handler ran without permissions")
+                },
+            )?;
+        assert!(matches!(
+            slash.default_member_permissions("ping", Permissions::empty()),
+            Err(Error::Registration(
+                RegistrationError::CommandPermissionsAlreadyRequired { .. }
+            ))
+        ));
+        let mut registered = slash.replacement_commands()?;
+        assert_eq!(
+            registered[0].default_member_permissions,
+            Some(Permissions::MANAGE_GUILD)
+        );
+        registered[0].id = Some(command_id);
+        let commands = slash.bind(registered)?;
+        let mut interaction = command_interaction(Some(guild_id), Some(guild_id), command_id.get());
+        assert!(matches!(
+            commands.handlers[&command_id]
+                .permissions
+                .check(&interaction),
+            Err(Error::Check(crate::CheckFailure::PermissionsUnavailable))
+        ));
+        interaction.member = Some(twilight_model::guild::PartialMember {
+            avatar: None,
+            avatar_decoration_data: None,
+            banner: None,
+            communication_disabled_until: None,
+            deaf: false,
+            flags: twilight_model::guild::MemberFlags::empty(),
+            joined_at: None,
+            mute: false,
+            nick: None,
+            permissions: Some(Permissions::VIEW_CHANNEL),
+            premium_since: None,
+            roles: Vec::new(),
+            user: None,
+        });
+        assert!(matches!(
+            commands.handlers[&command_id].permissions.check(&interaction),
+            Err(Error::Check(crate::CheckFailure::MissingPermissions(required))) if required == Permissions::MANAGE_GUILD
+        ));
+        let Some(InteractionData::ApplicationCommand(data)) = &mut interaction.data else {
+            unreachable!();
+        };
+        data.options = vec![option(
+            "advanced",
+            CommandOptionValue::SubCommandGroup(vec![option(
+                "run",
+                CommandOptionValue::SubCommand(vec![]),
+            )]),
+        )];
+        interaction.token = "test-token".into();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(Error::handler)?;
+        let http = Client::builder()
+            .proxy(
+                listener.local_addr().map_err(Error::handler)?.to_string(),
+                true,
+            )
+            .build();
+        let mut hooks = Hooks::default();
+        hooks.messages.check_failed = Some("private check failure".into());
+        let (_, timing) = crate::timing::Pending::new((), None).begin();
+        let (_, response) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(
+                commands.dispatch(&http, &interaction, timing, &hooks),
+                capture_response(&listener, "POST"),
+            )
+        })
+        .await
+        .map_err(Error::handler)?;
+        let response = response.map_err(Error::handler)?;
+        assert!(response.contains("private check failure"));
+        assert!(response.contains("\"flags\":64"));
+        Ok(())
     }
 
     #[test]
@@ -1691,6 +1900,41 @@ mod tests {
         };
         assert_eq!(
             commands[0].default_member_permissions,
+            Some(Permissions::BAN_MEMBERS)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restricted_registration_sets_discord_default_permissions() -> Result<()> {
+        let mut global = SlashCommands::global();
+        assert!(
+            global
+                .register_with_permissions("ban", "追放", vec![], Permissions::BAN_MEMBERS, handler)
+                .is_err()
+        );
+        let mut slash = SlashCommands::for_guild(Id::new(1)).replace_commands();
+        slash.register_with_permissions(
+            "admin",
+            "管理",
+            vec![],
+            Permissions::ADMINISTRATOR,
+            handler,
+        )?;
+        slash.register_with_permissions(
+            "ban",
+            "追放",
+            vec![],
+            Permissions::BAN_MEMBERS,
+            handler,
+        )?;
+        let commands = slash.replacement_commands()?;
+        assert_eq!(
+            commands[0].default_member_permissions,
+            Some(Permissions::empty())
+        );
+        assert_eq!(
+            commands[1].default_member_permissions,
             Some(Permissions::BAN_MEMBERS)
         );
         Ok(())

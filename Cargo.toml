@@ -19,7 +19,7 @@ http-types = { package = "http", version = "1" }
 # 外すとプロバイダーが 1 つもなくなり、最初の TLS 接続で失敗する。
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "sync"] }
+tokio = { version = "1", features = ["macros", "sync", "time"] }
 twilight-gateway = "0.18"
 twilight-http = "0.18"
 twilight-model = "0.18"
