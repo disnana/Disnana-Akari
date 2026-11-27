@@ -59,7 +59,7 @@ use twilight_model::{
     },
 };
 
-pub use access::{Access, PermissionSnapshot};
+pub use access::{Access, Needs, PermissionSnapshot};
 pub use autocomplete::AutocompleteContext;
 pub use command_check::{CommandCheck, CommandCheckContext, CommandCheckSource};
 pub use commands::{

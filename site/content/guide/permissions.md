@@ -71,6 +71,40 @@ fn describe(kind: ChannelType, level: VerificationLevel) -> String {
 }
 ```
 
+## 必要な権限を登録時に宣言する
+
+権限の確認を、ハンドラーの中ではなく、登録のときにまとめて宣言できます。`Needs` に、実行者と Bot に必要な権限を書き、`require` で、コマンドに結び付けます。確認は、ハンドラーの前に Akari が行い、足りなければハンドラーを実行しません。
+
+```rust
+use disnana_akari::model::guild::Permissions;
+use disnana_akari::{Commands, Needs, Result, SlashCommands, SlashContext};
+
+fn register(slash: &mut SlashCommands, commands: &mut Commands) -> Result<()> {
+    slash.register("purge", "メッセージを消します", vec![], async |ctx: &mut SlashContext<'_>| -> Result<()> {
+        // ここに来た時点で、実行者と Bot の権限は確認済み
+        ctx.reply_ephemeral("消します。").await
+    })?;
+    let needs = Needs::new()
+        .author(Permissions::MANAGE_MESSAGES)
+        .bot(Permissions::MANAGE_MESSAGES | Permissions::READ_MESSAGE_HISTORY);
+    slash.require("purge", needs)?;
+
+    // テキストコマンドも、同じ宣言を使えます
+    commands.register("purge", async |ctx| -> Result<()> { ctx.reply("消します。").await })?;
+    commands.require("purge", needs)?;
+    Ok(())
+}
+```
+
+- 実行者の権限が足りなければ `CheckFailure::MissingPermissions`、Bot の権限が足りなければ `CheckFailure::BotMissingPermissions` で失敗します。実行者を先に確認します。
+- グループやコマンドを指定すると、配下のサブコマンドにも適用します（`"config"` と宣言すると、`config set` にも効きます）。サブコマンドだけを指定することもできます（`"config set"`）。
+- 登録されていないコマンドやサブコマンドを指定すると、登録の時点で失敗します。名前の打ち間違いで、確認が効かないまま動くことはありません。
+- スラッシュコマンドでは、実行者の権限を、最上位のコマンドの Discord 側の既定の表示条件にも反映します（すでに設定済みなら、変えません）。サーバーの管理者は、この既定を変えられるので、確認の本体は、実行時の宣言です。
+- サーバーの外（DM）で呼ばれたときは、権限を確認できないので、拒否します。
+- コンテキストメニューには使えません。`add_check` で、共通のチェックを使ってください。
+- ハイブリッドコマンドは、テキストとスラッシュの両方に、同じ `Needs` を渡します。
+- 独自のチェックの中でも、`ctx.access()` で、ここまでの確認を使えます。
+
 ## Bot の権限、ほかのメンバー、ロールの階層を確認する
 
 `ctx.access()` で取得する `Access` に、実行者以外の確認がまとまっています。スラッシュコマンドでは、実行者と Bot の権限を Discord が送ってくるので、通信は要りません。

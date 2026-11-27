@@ -478,6 +478,39 @@ impl SlashCommands {
         }
     }
 
+    /// コマンドの実行に必要な権限を宣言します。ハンドラーの前に、実行者と Bot の権限を確認します。
+    ///
+    /// 足りなければ、ハンドラーを実行せず、[`CheckFailure::MissingPermissions`] か
+    /// [`CheckFailure::BotMissingPermissions`] で失敗します。補完にも適用されます。
+    /// グループやコマンドを指定すると、その配下のサブコマンドにも適用されます。
+    /// 実行者の権限は、最上位のコマンドで、Discord 側の既定の表示条件にも反映します（すでに
+    /// [`default_member_permissions`](Self::default_member_permissions) などで設定済みなら、変えません）。
+    /// コンテキストメニューには使えません。[`add_check`](Self::add_check) を使ってください。
+    /// [`register`](Self::register) のあとに呼びます。
+    ///
+    /// # エラー
+    ///
+    /// 登録されていないコマンドやサブコマンド（空白区切り）を指定した場合に失敗します。
+    pub fn require(&mut self, path: &str, needs: crate::Needs) -> Result<()> {
+        let parts: Vec<String> = path.split_whitespace().map(str::to_owned).collect();
+        let unknown = || RegistrationError::UnknownCommand {
+            name: path.to_owned(),
+        };
+        let (root, rest) = parts.split_first().ok_or_else(unknown)?;
+        let definition = self.entries.get_mut(root).ok_or_else(unknown)?;
+        if !definition.has_path(rest) {
+            return Err(unknown().into());
+        }
+        if rest.is_empty()
+            && !needs.author_permissions().is_empty()
+            && matches!(definition.permissions, PermissionPolicy::Unrestricted)
+        {
+            definition.permissions = PermissionPolicy::Visibility(needs.author_permissions());
+        }
+        self.checks.push(needs.into_check(parts));
+        Ok(())
+    }
+
     /// 文字列の引数を作ります。必要なら返された Twilight の定義で長さなどを設定できます。
     pub fn string_option(name: &str, description: &str, required: bool) -> CommandOption {
         Self::typed_option(CommandOptionType::String, name, description, required)
@@ -1109,6 +1142,21 @@ struct Definition {
     children: BTreeMap<String, Child>,
 }
 
+impl Definition {
+    /// 最上位のコマンドの下に、指定したサブコマンドやグループがあるか。
+    fn has_path(&self, rest: &[String]) -> bool {
+        match rest {
+            [] => true,
+            [name] => self.children.contains_key(name),
+            [group, sub] => matches!(
+                self.children.get(group),
+                Some(Child::Group { subs, .. }) if subs.contains_key(sub)
+            ),
+            _ => false,
+        }
+    }
+}
+
 enum Child {
     Sub(SubDefinition),
     Group {
@@ -1348,12 +1396,7 @@ impl ActiveSlashCommands {
         });
         if let Some((route, path, handler)) = handler {
             let checked = self
-                .check_invocation(
-                    initial.interaction,
-                    route,
-                    path,
-                    CommandCheckSource::Autocomplete,
-                )
+                .check_invocation(initial, route, path, CommandCheckSource::Autocomplete)
                 .await;
             let result = match checked {
                 Ok(()) => handler.call(&mut ctx).await,
@@ -1371,15 +1414,26 @@ impl ActiveSlashCommands {
 
     async fn check_invocation(
         &self,
-        interaction: &Interaction,
+        initial: InitialResponder<'_>,
         route: &Route,
         path: &[&str],
         source: CommandCheckSource,
     ) -> Result<()> {
         if !self.checks.is_empty() {
+            let access = crate::Access::for_interaction(
+                initial.http,
+                initial.permissions,
+                initial.interaction,
+            );
             run_checks(
                 &self.checks,
-                CommandCheckContext::application(interaction, source, &route.name, path),
+                CommandCheckContext::application(
+                    initial.interaction,
+                    access,
+                    source,
+                    &route.name,
+                    path,
+                ),
             )
             .await?;
         }
@@ -1395,7 +1449,7 @@ impl ActiveSlashCommands {
     ) -> Result<()> {
         route.permissions.check(ctx.initial.interaction)?;
         self.check_invocation(
-            ctx.initial.interaction,
+            ctx.initial,
             route,
             path,
             CommandCheckSource::Application(route.kind),
@@ -3766,6 +3820,59 @@ pub(crate) mod tests {
         assert_eq!(data.content.as_deref(), Some("本文のみ"));
         assert_eq!(data.embeds, None);
         assert_eq!(data.components, None);
+        Ok(())
+    }
+
+    #[test]
+    fn require_validates_the_path_and_keeps_an_explicit_visibility() -> Result<()> {
+        use crate::Needs;
+
+        let mut slash = SlashCommands::for_guild(Id::new(1));
+        slash.register(
+            "purge",
+            "削除",
+            vec![],
+            async |_: &mut SlashContext<'_>| -> Result<()> { Ok(()) },
+        )?;
+        slash.register_with_permissions(
+            "ban",
+            "BAN",
+            vec![],
+            Permissions::BAN_MEMBERS,
+            async |_: &mut SlashContext<'_>| -> Result<()> { Ok(()) },
+        )?;
+        slash.group("config", "設定")?.subcommand(
+            "set",
+            "値",
+            vec![],
+            async |_: &mut SlashContext<'_>| -> Result<()> { Ok(()) },
+        )?;
+        let needs = Needs::new().author(Permissions::MANAGE_MESSAGES);
+
+        // 登録されていないコマンドやサブコマンドは、確認が効かないまま見逃さず、失敗する。
+        for unknown in ["", "nope", "purge extra", "config nope", "config set extra"] {
+            assert!(slash.require(unknown, needs).is_err(), "{unknown:?}");
+        }
+        assert!(slash.checks.is_empty());
+
+        slash.require("purge", needs)?;
+        assert!(matches!(
+            slash.entries["purge"].permissions,
+            PermissionPolicy::Visibility(visible) if visible == Permissions::MANAGE_MESSAGES
+        ));
+        // 明示した設定は、変えない。
+        slash.require("ban", needs)?;
+        assert!(matches!(
+            slash.entries["ban"].permissions,
+            PermissionPolicy::Required(required) if required == Permissions::BAN_MEMBERS
+        ));
+        // サブコマンドへの宣言は、最上位の表示条件を変えない。
+        slash.require("config set", needs)?;
+        assert!(matches!(
+            slash.entries["config"].permissions,
+            PermissionPolicy::Unrestricted
+        ));
+        assert_eq!(slash.checks.len(), 3);
         Ok(())
     }
 }
