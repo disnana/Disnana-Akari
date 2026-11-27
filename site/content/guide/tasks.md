@@ -213,6 +213,8 @@ cargo run --locked --manifest-path examples/voice/Cargo.toml
 
 音声を Discord のコマンドから操作するには、`AKARI_VOICE_RECORD_DIR` にローカルの録音先を設定します。参加先を省略して `/vc-join` を呼ぶと、自分が参加中の VC に Bot が接続します。 `/vc-playtest` で短い2音を再生できます。`/vc-record` で録音を始め、`format:FLAC` を選ぶとロスレス圧縮で保存できます。`/vc-stop` で実行先のチャンネルに録音を投稿し、`/vc-leave` で退出します。このサンプルでは合計 10 MiB、最長5分まで録音できます。[Discord の音声状態取得 API](https://docs.discord.com/developers/resources/voice#get-user-voice-state)
 
+受信録音に保存されるのは、Discord の音声接続を通じて Bot に届いた音声です。Bot 自身が再生した音は同じ接続の受信側に戻らず、ミックスにも入りません。`/vc-record` で Bot 自身を個別トラックに選ぶと録音開始前に拒否します。コマンドを実行した参加者自身は録音できます。読み上げなどの再生音も残したい場合は、アプリで送信前の音源を別に保存するか、録音に合成します。[Discord の音声接続仕様](https://docs.discord.com/developers/topics/voice-connections)
+
 ## シャード別の状態と RTT を監視する
 
 `let (bot, status) = bot.with_gateway_status();` で監視を設定します。`status.shards()` は、起動待ち、初回接続中、準備済み、再接続中、終了のいずれかと、計測した RTT をシャード番号順に返します。シャード数が決まるまでは空の一覧です。切断したシャードの RTT は、新しい接続でハートビートの応答を受けるまで `None` です。 起動に失敗して状態が更新されない場合に備え、監視は Bot の起動処理と並行し、その処理が終了した時点でも打ち切ります。

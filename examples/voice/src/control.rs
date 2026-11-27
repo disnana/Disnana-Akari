@@ -1,5 +1,6 @@
 use std::{
     path::Path,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -77,7 +78,10 @@ impl CommandMode {
     }
 }
 
-pub(super) fn commands(guild: Id<GuildMarker>) -> Result<(SlashCommands, mpsc::Receiver<Control>)> {
+pub(super) fn commands(
+    guild: Id<GuildMarker>,
+    bot_user: Arc<OnceLock<Id<UserMarker>>>,
+) -> Result<(SlashCommands, mpsc::Receiver<Control>)> {
     let (sender, receiver) = mpsc::channel(1);
     let mut commands = SlashCommands::for_guild(guild);
 
@@ -91,6 +95,7 @@ pub(super) fn commands(guild: Id<GuildMarker>) -> Result<(SlashCommands, mpsc::R
     ] {
         let name = mode.label();
         let sender = sender.clone();
+        let bot_user = Arc::clone(&bot_user);
         let mut channel = SlashCommands::channel_option(
             "channel",
             "省略すると自分が参加中のボイスチャンネルを使います",
@@ -134,7 +139,9 @@ pub(super) fn commands(guild: Id<GuildMarker>) -> Result<(SlashCommands, mpsc::R
             description,
             options,
             Permissions::MANAGE_GUILD,
-            async move |ctx: &mut SlashContext<'_>| join(ctx, &sender, mode).await,
+            async move |ctx: &mut SlashContext<'_>| {
+                join(ctx, &sender, mode, bot_user.get().copied()).await
+            },
         )?;
     }
     let stop_sender = sender.clone();
@@ -164,10 +171,16 @@ async fn join(
     ctx: &mut SlashContext<'_>,
     sender: &mpsc::Sender<Control>,
     mode: CommandMode,
+    bot_user: Option<Id<UserMarker>>,
 ) -> Result<()> {
     let recording = if matches!(mode, CommandMode::Record) {
         match record_options(|name| ctx.option(name)) {
-            Ok(options) => Some(options),
+            Ok(options) => {
+                if let Err(message) = options.check_recording_users(bot_user) {
+                    return ctx.reply_ephemeral(message).await;
+                }
+                Some(options)
+            }
             Err(message) => return ctx.reply_ephemeral(message).await,
         }
     } else {
@@ -207,6 +220,21 @@ pub(super) struct RecordingOptions {
     pub(super) users: Vec<Id<UserMarker>>,
     pub(super) memory: bool,
     pub(super) format: Format,
+}
+
+impl RecordingOptions {
+    fn check_recording_users(&self, bot_user: Option<Id<UserMarker>>) -> ControlResult<()> {
+        if self.users.is_empty() {
+            return Ok(());
+        }
+        let bot_user = bot_user.ok_or("Bot の準備中です。少し待ってから再度お試しください。")?;
+        if self.users.contains(&bot_user) {
+            return Err(
+                "Bot 自身の再生音は受信録音に含められません。録音する参加者を選び直してください。",
+            );
+        }
+        Ok(())
+    }
 }
 
 fn record_options<'a>(
@@ -512,6 +540,31 @@ mod tests {
         assert!(record_options(|name| (name == "mix").then_some(&disabled)).is_err());
         assert!(record_options(|name| matches!(name, "user1" | "user3").then_some(&one)).is_err());
         assert!(record_options(|name| (name == "user1").then_some(&enabled)).is_err());
+    }
+
+    #[test]
+    fn recording_rejects_its_own_bot_but_allows_other_participants() {
+        let bot = Id::new(7);
+        let participant = CommandOptionValue::User(Id::new(9));
+        let self_selection = CommandOptionValue::User(bot);
+        let options = record_options(|name| (name == "user1").then_some(&participant)).unwrap();
+        assert_eq!(options.check_recording_users(Some(bot)), Ok(()));
+        assert!(options.check_recording_users(None).is_err());
+
+        let options = record_options(|name| match name {
+            "user1" => Some(&participant),
+            "user2" => Some(&self_selection),
+            _ => None,
+        })
+        .unwrap();
+        assert!(options.mix);
+        assert!(options.check_recording_users(Some(bot)).is_err());
+        assert_eq!(
+            record_options(|_| None)
+                .unwrap()
+                .check_recording_users(None),
+            Ok(())
+        );
     }
 
     fn memory(name: &str, bytes: Vec<u8>) -> TrackFile {

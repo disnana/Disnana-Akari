@@ -2,12 +2,13 @@ use std::{
     env,
     future::pending,
     path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use disnana_akari::{
-    Bot, Error, ErrorReport, InfoEvent, Messages, Result, VoiceConnection, VoiceConnectionStatus,
-    VoiceGateway,
+    Bot, Error, ErrorReport, Events, InfoEvent, Messages, Ready, Result, VoiceConnection,
+    VoiceConnectionStatus, VoiceGateway,
     model::{
         gateway::Intents,
         id::{
@@ -38,12 +39,19 @@ pub(super) async fn run(guild: Id<GuildMarker>, directory: PathBuf) -> Result<()
     tokio::fs::create_dir_all(&directory)
         .await
         .map_err(Error::handler)?;
-    let (commands, receiver) = control::commands(guild)?;
+    let bot_user = Arc::new(OnceLock::new());
+    let (commands, receiver) = control::commands(guild, Arc::clone(&bot_user))?;
+    let mut events = Events::new();
+    events.on_ready(async move |ready: &Ready| -> Result<()> {
+        let _ = bot_user.set(ready.user.id);
+        Ok(())
+    });
     let mut messages = Messages::default();
     messages.slash_command_unavailable = Some(
         "このコマンドを利用できませんでした。Discord のコマンド一覧を開き直して選び直してください。".into(),
     );
     let (bot, voice) = Bot::from_env()?
+        .with_events(events)
         .with_intents(Intents::GUILDS | Intents::GUILD_VOICE_STATES)
         .on_info(|event| match event {
             InfoEvent::SlashCommandsSynced { count, .. } => {
