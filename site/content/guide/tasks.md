@@ -153,6 +153,8 @@ cargo run --locked --manifest-path examples/voice/Cargo.toml
 
 再割り当て時は新しい音声サーバーへ接続し直します。録音は受信処理からファイル書き出しを分け、キューが満杯なら破棄したフレーム数を記録します。Ctrl+C で停止し、録音していれば WAV を確定します。[Songbird の音声ドライバー実装](https://github.com/serenity-rs/songbird/blob/v0.6.1/src/driver/mod.rs)
 
+音声を Discord のコマンドから操作するには、`AKARI_VOICE_RECORD_DIR` にローカルの録音先を設定します。参加先を省略して `/vc-join` を呼ぶと、自分が参加中の VC に Bot が接続します。`/vc-record` で録音を始め、`/vc-stop` で実行先のチャンネルに WAV を投稿し、`/vc-leave` で退出します。このサンプルでは WAV を 10 MiB までに制限します。[Discord の音声状態取得 API](https://docs.discord.com/developers/resources/voice#get-user-voice-state)
+
 ## シャード別の状態と RTT を監視する
 
 `let (bot, status) = bot.with_gateway_status();` で監視を設定します。`status.shards()` は、起動待ち、初回接続中、準備済み、再接続中、終了のいずれかと、計測した RTT をシャード番号順に返します。シャード数が決まるまでは空の一覧です。切断したシャードの RTT は、新しい接続でハートビートの応答を受けるまで `None` です。 起動に失敗して状態が更新されない場合に備え、監視は Bot の起動処理と並行し、その処理が終了した時点でも打ち切ります。

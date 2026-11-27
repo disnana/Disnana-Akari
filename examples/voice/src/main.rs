@@ -24,6 +24,8 @@ use tokio::{
     time::timeout,
 };
 
+mod control;
+mod manual;
 mod receive;
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -32,6 +34,9 @@ const LEAVE_TIMEOUT: Duration = Duration::from_secs(5);
 #[tokio::main]
 async fn main() -> Result<()> {
     let guild = read_id("AKARI_VOICE_GUILD")?;
+    if let Some(directory) = env::var_os("AKARI_VOICE_RECORD_DIR") {
+        return manual::run(guild, directory.into()).await;
+    }
     let channel = read_id("AKARI_VOICE_CHANNEL")?;
     let mode = match (
         env::var_os("AKARI_VOICE_WAV"),

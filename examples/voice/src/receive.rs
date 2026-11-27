@@ -22,6 +22,7 @@ const BITS_PER_SAMPLE: u16 = 16;
 const SAMPLES_PER_TICK: usize = 1920;
 const BYTES_PER_TICK: usize = SAMPLES_PER_TICK * size_of::<i16>();
 const RIFF_OVERHEAD: u32 = 36;
+const WAV_HEADER_BYTES: u32 = RIFF_OVERHEAD + 8;
 const QUEUE_TICKS: usize = 64;
 const WRITE_BUFFER_BYTES: usize = 64 * 1024;
 const MIX_SOURCES: usize = 128;
@@ -42,6 +43,14 @@ pub(super) struct Recording {
 
 impl Recording {
     pub(super) fn start(path: &Path) -> io::Result<(Self, VoiceReceiver)> {
+        Self::start_with_limit(path, None)
+    }
+
+    pub(super) fn start_limited(path: &Path, limit: u32) -> io::Result<(Self, VoiceReceiver)> {
+        Self::start_with_limit(path, Some(limit))
+    }
+
+    fn start_with_limit(path: &Path, limit: Option<u32>) -> io::Result<(Self, VoiceReceiver)> {
         // 既存ファイルを上書きしません。ファイル名は呼び出し側が明示します。
         let file = OpenOptions::new().write(true).create_new(true).open(path)?;
         let writer = WaveWriter::new(BufWriter::with_capacity(WRITE_BUFFER_BYTES, file))?;
@@ -57,7 +66,7 @@ impl Recording {
         let writer = tokio::task::spawn_blocking(move || {
             // 解放時に待機側を起こし、書き出しのエラーを finish から返します。
             let _notify_stop = notify_stop;
-            write_recording(writer, receiver)
+            write_recording(writer, receiver, limit)
         });
         Ok((
             Self {
@@ -157,12 +166,18 @@ fn mix<'a>(sources: impl IntoIterator<Item = &'a [i16]>) -> PcmTick {
 fn write_recording<W: Write + Seek>(
     mut writer: WaveWriter<W>,
     mut receiver: mpsc::Receiver<PcmTick>,
+    limit: Option<u32>,
 ) -> io::Result<u64> {
     let mut ticks_written = 0;
     let result = loop {
         let Some(tick) = receiver.blocking_recv() else {
             break Ok(());
         };
+        if limit.is_some_and(|limit| {
+            writer.data_bytes + WAV_HEADER_BYTES + BYTES_PER_TICK as u32 > limit
+        }) {
+            break Ok(());
+        }
         if let Err(error) = writer.write_tick(&tick) {
             break Err(error);
         }
@@ -282,6 +297,24 @@ mod tests {
         assert!(wav.write_tick(&mix([])).is_err());
         assert_eq!(wav.data_bytes, u32::MAX - RIFF_OVERHEAD);
         assert_eq!(wav.output.get_ref().len(), 44);
+        Ok(())
+    }
+
+    #[test]
+    fn recording_limit_finalizes_only_complete_ticks() -> io::Result<()> {
+        let (sender, receiver) = mpsc::channel(2);
+        sender.try_send(mix([])).unwrap();
+        sender.try_send(mix([])).unwrap();
+        drop(sender);
+
+        let mut bytes = Cursor::new(Vec::new());
+        let writer = WaveWriter::new(&mut bytes)?;
+        let limit = WAV_HEADER_BYTES + BYTES_PER_TICK as u32 + 1;
+        assert_eq!(write_recording(writer, receiver, Some(limit))?, 1);
+        assert_eq!(
+            bytes.get_ref().len(),
+            WAV_HEADER_BYTES as usize + BYTES_PER_TICK
+        );
         Ok(())
     }
 
