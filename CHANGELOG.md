@@ -7,6 +7,7 @@
 - **エラーの連鎖で、メッセージが二重に表示されなくなりました。** `Error` の `Http`、`GatewayReceive`、`*Validation` は、表示と原因を元のエラーへそのまま渡します。`Error::Handler` は `HandlerError` を持つようになり（`downcast_ref`、`inner`、`into_inner` で元のエラーを取り出せます）、`CommandRegistration` の表示から原因を外しました（原因は `source()` で取得します）。
 - `ErrorReport` を `{report}` で表示すると、原因の連鎖も `: 原因` の形で続けて表示します。標準エラー出力の既定の表示にも、本当の理由が含まれます。
 - ドキュメントに、Twilight の型を公開 API に含める方針（安定性）を明記しました。
+- **サブコマンドに対応しました。** `SlashCommands::group` と `CommandGroup::{subcommand, group}` で、`/config set` や `/config advanced reset` を登録できます（コマンド → グループ → サブコマンドの最大 3 段）。`SlashContext::option` などはサブコマンドの引数も読み、`SlashContext::command_path` で呼ばれた経路を取得できます。`on_error` に渡る名前は `config advanced reset` の形になります。
 - **テキストコマンドとハイブリッドの権限確認を追加しました。** `Context` と `CommandContext`、`HybridContext` の `require_permissions(..).await?`、`permissions().await`、`require_guild()` です。メッセージには権限が付かないため、サーバーとチャンネルを Discord から取得し、Twilight 公式の `twilight-util`（権限計算のみ）で計算します。`Bot::cache_permissions(ttl)` で取得した情報を保存できます（既定は保存しません）。依存に `twilight-util` を追加しました。
 - **スラッシュコマンドの権限確認を追加しました。** `SlashContext::{require_permissions, require_guild, permissions, guild_id}` で、呼び出した人の権限を確認できます（Discord が計算した値を使います）。失敗は `Error::Check(CheckFailure)` で、既定では `Messages::check_failed` を本人にだけ返します。`SlashCommands::default_member_permissions` で、権限のない人からコマンドを隠せます。
 - **グローバルコマンドに対応しました。** `SlashCommands::global()` で、すべてのサーバーと DM 向けに登録できます。**`replace_guild_commands` は `replace_commands` に名前を変えました**（サーバー、グローバルのどちらにも使えます）。`InfoEvent::SlashCommandsSynced` の `guild_id` は `Option` になりました（グローバルは `None`）。

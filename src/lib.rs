@@ -46,7 +46,7 @@ pub use interactions::{
     MentionableSelectContext, ModalContext, RoleSelectContext, SelectContext, UserSelectContext,
 };
 pub use limits::Limits;
-pub use slash::{SlashCommands, SlashContext};
+pub use slash::{CommandGroup, SlashCommands, SlashContext};
 pub use timing::Timing;
 pub use twilight_http as http;
 pub use twilight_model as model;
