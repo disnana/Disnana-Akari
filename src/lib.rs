@@ -2,6 +2,7 @@
 
 mod commands;
 mod cooldown;
+mod error;
 mod events;
 mod hooks;
 mod hybrid;
@@ -11,7 +12,7 @@ mod timing;
 pub mod ui;
 mod work_queue;
 
-use std::{env, error::Error, sync::Arc};
+use std::{env, fmt, sync::Arc};
 
 use tokio::sync::mpsc;
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
@@ -26,6 +27,7 @@ use twilight_model::{
 
 pub use commands::{CommandContext, Commands};
 pub use cooldown::Cooldown;
+pub use error::Error;
 pub use events::{Events, Ready};
 pub use hooks::{ErrorReport, ErrorSource, Messages};
 pub use hybrid::{CommandSource, HybridContext, register_hybrid};
@@ -38,7 +40,7 @@ pub use timing::Timing;
 pub use twilight_http as http;
 pub use twilight_model as model;
 
-use hooks::{Hooks, Reporter, describe_gateway_close};
+use hooks::{Hooks, Reporter};
 use timing::Pending;
 
 const INTERACTION_WORKERS: usize = 8;
@@ -49,7 +51,7 @@ const GATEWAY_QUEUE_CAPACITY: usize = 64;
 type NoMessageHandler = fn(Context<'_>) -> std::future::Ready<Result<()>>;
 
 /// Akari とメッセージハンドラーで使う結果型です。
-pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// テスト用サーバー向けの、単一シャードの Discord Bot です。
 pub struct Bot {
@@ -62,6 +64,19 @@ pub struct Bot {
     messages: Messages,
 }
 
+impl fmt::Debug for Bot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Bot")
+            .field("token", &"<redacted>")
+            .field("events", &self.events)
+            .field("slash", &self.slash)
+            .field("intents", &self.intents())
+            .field("has_error_hook", &self.reporter.has_hook())
+            .field("messages", &self.messages)
+            .finish()
+    }
+}
+
 impl Bot {
     /// 渡された Discord Bot トークンで Bot を作ります。
     ///
@@ -71,7 +86,7 @@ impl Bot {
     pub fn new(token: &str) -> Result<Self> {
         let token = token.trim();
         if token.is_empty() {
-            return Err("Discord Bot トークンが空です".into());
+            return Err(Error::EmptyToken);
         }
 
         Ok(Self {
@@ -91,10 +106,8 @@ impl Bot {
     ///
     /// 環境変数が未設定、空、または Unicode 文字列として読み取れない場合に失敗します。
     pub fn from_env() -> Result<Self> {
-        let token = env::var("DISCORD_TOKEN")
-            .map_err(|_| "DISCORD_TOKEN に Discord Bot トークンを設定してください")?;
-        Self::new(&token)
-            .map_err(|_| "DISCORD_TOKEN に Discord Bot トークンを設定してください".into())
+        let token = env::var("DISCORD_TOKEN").map_err(|_| Error::InvalidTokenEnvironment)?;
+        Self::new(&token).map_err(|_| Error::InvalidTokenEnvironment)
     }
 
     /// Gateway イベントを受け取るハンドラー一覧を設定します。
@@ -181,6 +194,21 @@ impl Bot {
     /// # エラー
     ///
     /// スラッシュコマンドの登録に失敗した場合や、Gateway が終了した場合に失敗します。
+    ///
+    /// 返る Future は `Send` を実装していません。呼び出し元で直接 `.await` するか、
+    /// `LocalSet` 上で実行してください。
+    ///
+    /// ```compile_fail,E0277
+    /// use disnana_akari::{Bot, Context, Result};
+    ///
+    /// async fn handle_message(_: Context<'_>) -> Result<()> {
+    ///     Ok(())
+    /// }
+    ///
+    /// fn assert_send(_: impl Send) {}
+    /// let bot = Bot::new("test-token").unwrap();
+    /// assert_send(bot.run(handle_message));
+    /// ```
     pub async fn run(
         self,
         on_message: impl for<'a> AsyncFn(Context<'a>) -> Result<()>,
@@ -254,7 +282,7 @@ impl Bot {
                                 timing,
                             };
                             if let Err(error) = handler(context).await {
-                                hooks.reporter.report(ErrorSource::Message, None, &*error);
+                                hooks.reporter.report(ErrorSource::Message, None, &error);
                             }
                         }
                         events.message(&message, &hooks.reporter).await;
@@ -296,7 +324,7 @@ impl Bot {
                 {
                     hooks
                         .reporter
-                        .report(ErrorSource::Response, Some("混雑の通知"), &*error);
+                        .report(ErrorSource::Response, Some("混雑の通知"), &error);
                 }
             });
 
@@ -329,7 +357,7 @@ impl Bot {
                 {
                     hooks
                         .reporter
-                        .report(ErrorSource::Response, Some("混雑の通知"), &*error);
+                        .report(ErrorSource::Response, Some("混雑の通知"), &error);
                 }
             }
         });
@@ -343,10 +371,12 @@ impl Bot {
                             .try_send(MessageEvent::Ready(Box::new(ready)))
                             .is_err()
                         {
-                            hooks.reporter.report_text(
+                            hooks.reporter.report(
                                 ErrorSource::QueueFull,
                                 Some("READY"),
-                                "イベントの待ち行列がいっぱいで、処理できませんでした",
+                                &Error::QueueFull(
+                                    "イベントの待ち行列がいっぱいで、処理できませんでした",
+                                ),
                             );
                         }
                     }
@@ -367,10 +397,12 @@ impl Bot {
                                 )))
                                 .is_err()
                         {
-                            hooks.reporter.report_text(
+                            hooks.reporter.report(
                                 ErrorSource::QueueFull,
                                 Some("MESSAGE_CREATE"),
-                                "イベントの待ち行列がいっぱいで、処理できませんでした",
+                                &Error::QueueFull(
+                                    "イベントの待ち行列がいっぱいで、処理できませんでした",
+                                ),
                             );
                         }
                         if run_command
@@ -390,14 +422,18 @@ impl Bot {
                         }
                     }
                     Ok(Event::GatewayClose(Some(frame))) => {
-                        hooks.reporter.report_text(
+                        hooks.reporter.report(
                             ErrorSource::Gateway,
                             None,
-                            &describe_gateway_close(frame.code),
+                            &Error::GatewayClose(frame.code),
                         );
                     }
                     Ok(_) => {}
-                    Err(error) => hooks.reporter.report(ErrorSource::Gateway, None, &error),
+                    Err(error) => {
+                        hooks
+                            .reporter
+                            .report(ErrorSource::Gateway, None, &Error::from(error))
+                    }
                 }
             }
         };
@@ -412,7 +448,7 @@ impl Bot {
             () = handle_busy => {},
         }
 
-        Err("Discord Gateway の接続が終了しました".into())
+        Err(Error::GatewayEnded)
     }
 }
 
@@ -427,32 +463,32 @@ fn queue_text_busy(
     pending: Pending<Arc<Message>>,
     hooks: &Hooks,
 ) {
-    hooks.reporter.report_text(
+    hooks.reporter.report(
         ErrorSource::QueueFull,
         Some("テキストコマンド"),
-        "処理枠がいっぱいで、コマンドを実行できませんでした",
+        &Error::QueueFull("処理枠がいっぱいで、コマンドを実行できませんでした"),
     );
     if hooks.messages.text_command_busy.is_some() && queue.try_send(pending).is_err() {
-        hooks.reporter.report_text(
+        hooks.reporter.report(
             ErrorSource::QueueFull,
             Some("混雑の通知"),
-            "混雑の通知の待ち行列がいっぱいで、返信できませんでした",
+            &Error::QueueFull("混雑の通知の待ち行列がいっぱいで、返信できませんでした"),
         );
     }
 }
 
 /// Interaction を処理できなかったことを報告し、文言が設定されていれば混雑を返す。
 fn queue_busy_response(queue: &mpsc::Sender<Interaction>, interaction: Interaction, hooks: &Hooks) {
-    hooks.reporter.report_text(
+    hooks.reporter.report(
         ErrorSource::QueueFull,
         Some("Interaction"),
-        "処理枠がいっぱいで、操作を実行できませんでした",
+        &Error::QueueFull("処理枠がいっぱいで、操作を実行できませんでした"),
     );
     if hooks.messages.interaction_busy.is_some() && queue.try_send(interaction).is_err() {
-        hooks.reporter.report_text(
+        hooks.reporter.report(
             ErrorSource::QueueFull,
             Some("混雑の通知"),
-            "混雑の通知の待ち行列がいっぱいで、応答できませんでした",
+            &Error::QueueFull("混雑の通知の待ち行列がいっぱいで、応答できませんでした"),
         );
     }
 }
@@ -466,16 +502,11 @@ fn check_intents(requested: Intents, needs_messages: bool) -> Result<()> {
     if missing.is_empty() {
         return Ok(());
     }
-    Err(format!(
-        "テキストコマンドやメッセージのハンドラーには、Intent {missing:?} が必要です。\
-         `Bot::add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)` で追加してください。\
-         MESSAGE_CONTENT は特権 Intent なので、Developer Portal の Bot ページでも有効にします。"
-    )
-    .into())
+    Err(Error::MissingIntents(missing))
 }
 
 /// ハンドラーに渡される、受信メッセージと返信先の情報です。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Context<'a> {
     http: &'a Client,
     message: &'a Message,
@@ -603,7 +634,22 @@ mod tests {
             .run_commands(commands)
             .await
             .expect_err("Intent が足りないので、接続前に失敗する");
+        assert!(matches!(
+            error,
+            Error::MissingIntents(missing)
+                if missing == Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT
+        ));
         assert!(error.to_string().contains("add_intents"));
+        Ok(())
+    }
+
+    #[test]
+    fn bot_debug_redacts_token() -> Result<()> {
+        let token = "dummy-credential-for-debug-test";
+        let bot = Bot::new(token)?;
+        let debug = format!("{bot:#?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains(token));
         Ok(())
     }
 

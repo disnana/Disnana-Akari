@@ -18,6 +18,16 @@ pub struct Events {
     pub(crate) interaction_handlers: InteractionHandlers,
 }
 
+impl std::fmt::Debug for Events {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Events")
+            .field("ready_handlers", &self.ready.len())
+            .field("message_handlers", &self.message.len())
+            .field("interaction_handlers", &self.interaction_handlers)
+            .finish()
+    }
+}
+
 impl Events {
     /// 空のイベントハンドラー一覧を作ります。
     pub fn new() -> Self {
@@ -152,7 +162,7 @@ async fn dispatch<T>(
 ) {
     for handler in handlers {
         if let Err(error) = handler.call(event).await {
-            reporter.report(ErrorSource::Event, Some(event_name), &*error);
+            reporter.report(ErrorSource::Event, Some(event_name), &error);
         }
     }
 }
@@ -185,7 +195,9 @@ mod tests {
         let handlers: Vec<Box<dyn Handler<i32>>> = vec![
             Box::new(async move |value: &i32| {
                 first.lock().unwrap().push(*value);
-                Err("最初のイベントハンドラーのエラー".into())
+                Err(crate::Error::Handler(
+                    "最初のイベントハンドラーのエラー".into(),
+                ))
             }),
             Box::new(async move |value: &i32| {
                 second.lock().unwrap().push(*value + 1);

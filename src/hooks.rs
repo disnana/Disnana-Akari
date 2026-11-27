@@ -1,6 +1,8 @@
 //! エラーの通知先と、Akari が自動で送る文言の設定です。
 
-use std::{error::Error, fmt, sync::Arc};
+use std::{fmt, sync::Arc};
+
+use crate::Error;
 
 type ErrorHook = dyn Fn(&ErrorReport<'_>) + Send + Sync;
 
@@ -61,8 +63,8 @@ pub struct ErrorReport<'a> {
     pub source: ErrorSource,
     /// コマンド名、`custom_id`、イベント名など、原因を特定する手がかりです。分からないときは `None` です。
     pub name: Option<&'a str>,
-    /// エラーの内容です。ハンドラーが返したエラーは、そのまま渡します。
-    pub error: &'a (dyn Error + Send + Sync + 'static),
+    /// エラーの内容です。ハンドラーが返した型付きエラーを、そのまま渡します。
+    pub error: &'a Error,
 }
 
 impl fmt::Display for ErrorReport<'_> {
@@ -145,12 +147,7 @@ impl Reporter {
         }
     }
 
-    pub(crate) fn report(
-        &self,
-        source: ErrorSource,
-        name: Option<&str>,
-        error: &(dyn Error + Send + Sync + 'static),
-    ) {
+    pub(crate) fn report(&self, source: ErrorSource, name: Option<&str>, error: &Error) {
         let report = ErrorReport {
             source,
             name,
@@ -162,9 +159,8 @@ impl Reporter {
         }
     }
 
-    pub(crate) fn report_text(&self, source: ErrorSource, name: Option<&str>, text: &str) {
-        let error: Box<dyn Error + Send + Sync> = text.into();
-        self.report(source, name, &*error);
+    pub(crate) fn has_hook(&self) -> bool {
+        self.hook.is_some()
     }
 }
 
@@ -175,29 +171,13 @@ pub(crate) struct Hooks {
     pub(crate) messages: Messages,
 }
 
-/// Gateway が接続を閉じたときの理由を、利用者に分かる形にします。
-pub(crate) fn describe_gateway_close(code: u16) -> String {
-    let hint = match code {
-        4004 => Some(
-            "Bot トークンが正しくありません。Developer Portal でトークンを確認し、再発行した場合は環境変数も更新してください。",
-        ),
-        4013 => Some("要求した Intent の指定が正しくありません。"),
-        4014 => Some(
-            "許可されていない Intent が要求されました。Developer Portal の Bot ページで、Message Content Intent などの特権 Intent を有効にしてください。",
-        ),
-        _ => None,
-    };
-    match hint {
-        Some(hint) => format!("Discord Gateway が接続を閉じました (コード {code}): {hint}"),
-        None => format!("Discord Gateway が接続を閉じました (コード {code})"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{ErrorSource, Hooks, Messages, Reporter, describe_gateway_close};
+    use crate::Error;
+
+    use super::{ErrorSource, Hooks, Messages, Reporter};
 
     #[test]
     fn hook_receives_the_source_name_and_error_instead_of_stderr() {
@@ -212,8 +192,12 @@ mod tests {
             ));
         });
 
-        reporter.report_text(ErrorSource::Button, Some("akari:demo"), "壊れました");
-        reporter.report_text(ErrorSource::Gateway, None, "切れました");
+        reporter.report(
+            ErrorSource::Button,
+            Some("akari:demo"),
+            &Error::Handler("壊れました".into()),
+        );
+        reporter.report(ErrorSource::Gateway, None, &Error::GatewayEnded);
 
         let seen = seen.lock().unwrap();
         assert_eq!(
@@ -225,7 +209,7 @@ mod tests {
                 "ボタン `akari:demo`: 壊れました".to_owned()
             )
         );
-        assert_eq!(seen[1].3, "Gateway: 切れました");
+        assert_eq!(seen[1].3, "Gateway: Discord Gateway の接続が終了しました");
     }
 
     #[test]
@@ -251,10 +235,14 @@ mod tests {
 
     #[test]
     fn gateway_close_explains_the_codes_people_hit_first() {
-        assert!(describe_gateway_close(4014).contains("Message Content Intent"));
-        assert!(describe_gateway_close(4004).contains("トークン"));
+        assert!(
+            Error::GatewayClose(4014)
+                .to_string()
+                .contains("Message Content Intent")
+        );
+        assert!(Error::GatewayClose(4004).to_string().contains("トークン"));
         assert_eq!(
-            describe_gateway_close(1000),
+            Error::GatewayClose(1000).to_string(),
             "Discord Gateway が接続を閉じました (コード 1000)"
         );
     }

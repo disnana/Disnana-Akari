@@ -23,6 +23,7 @@ rustdoc には、次の内容があります。
 | `ui::{UiMessage, Embed, Button, ...}` | メッセージの部品 | [Embed とボタン](../guide/buttons.md) |
 | `ui::ComponentsV2` | Components V2 のメッセージ | [Components V2](../guide/components-v2.md) |
 | `Cooldown` | ユーザーごとの実行間隔 | [クールダウン](../guide/cooldowns.md) |
+| `Error` / `ErrorReport` | 型付きエラーと発生箇所の通知 | [エラーと自動で送る文言](../guide/errors.md) |
 | `Timing` | 受信から処理までの測定値 | [Akari の動き方](../guide/how-it-works.md) |
 
 ## 測定値（`Timing`）
@@ -35,7 +36,7 @@ rustdoc には、次の内容があります。
 
 ## 型のメモ
 
-- `Result<T>` は `std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>` の別名です。
+- `Result<T>` は `std::result::Result<T, disnana_akari::Error>` の別名です。
 - `disnana_akari::model` は `twilight_model` の再エクスポート、`disnana_akari::http` は `twilight_http` の再エクスポートです。
 
 > [!NOTE]

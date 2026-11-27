@@ -1,7 +1,7 @@
 use std::{collections::HashMap, future::Future, pin::Pin};
 
 use crate::{
-    Context, ErrorSource, Result, Timing,
+    Context, Error, ErrorSource, Result, Timing,
     hooks::Hooks,
     ui::{ComponentsV2, UiMessage},
 };
@@ -12,6 +12,15 @@ pub struct Commands {
     handlers: HashMap<String, Box<dyn CommandHandler>>,
 }
 
+impl std::fmt::Debug for Commands {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Commands")
+            .field("prefix", &self.prefix)
+            .field("registered", &self.handlers.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
 impl Commands {
     /// `!` などのプレフィックスを指定して、空のコマンド一覧を作ります。
     ///
@@ -20,7 +29,9 @@ impl Commands {
     /// プレフィックスが空、または空白を含む場合に失敗します。
     pub fn new(prefix: &str) -> Result<Self> {
         if prefix.is_empty() || prefix.chars().any(char::is_whitespace) {
-            return Err("プレフィックスには空白を含まない文字列を指定してください".into());
+            return Err(Error::InvalidRegistration(
+                "プレフィックスには空白を含まない文字列を指定してください".to_owned(),
+            ));
         }
 
         Ok(Self {
@@ -46,10 +57,14 @@ impl Commands {
 
     pub(crate) fn ensure_available(&self, name: &str) -> Result<()> {
         if name.is_empty() || name.chars().any(char::is_whitespace) {
-            return Err("コマンド名には空白を含まない文字列を指定してください".into());
+            return Err(Error::InvalidRegistration(
+                "コマンド名には空白を含まない文字列を指定してください".to_owned(),
+            ));
         }
         if self.handlers.contains_key(name) {
-            return Err(format!("コマンド `{name}` は登録済みです").into());
+            return Err(Error::InvalidRegistration(format!(
+                "コマンド `{name}` は登録済みです"
+            )));
         }
         Ok(())
     }
@@ -79,13 +94,13 @@ impl Commands {
         let name = self.command_name(&ctx.message().content);
         hooks
             .reporter
-            .report(ErrorSource::TextCommand, name, &*error);
+            .report(ErrorSource::TextCommand, name, &error);
         if let Some(text) = &hooks.messages.text_command_failed
             && let Err(reply_error) = ctx.reply(text).await
         {
             hooks
                 .reporter
-                .report(ErrorSource::Response, name, &*reply_error);
+                .report(ErrorSource::Response, name, &reply_error);
         }
     }
 
@@ -107,6 +122,7 @@ impl Commands {
 }
 
 /// コマンド関数に渡す、引数と元のメッセージです。
+#[derive(Debug)]
 pub struct CommandContext<'a> {
     ctx: Context<'a>,
     args: &'a str,

@@ -1,7 +1,7 @@
 use std::{env, fs, io, path::Path};
 
 use disnana_akari::model::id::{Id, marker::GuildMarker};
-use disnana_akari::{Bot, Result};
+use disnana_akari::{Bot, Error, Result};
 
 // struct は、関連する値を名前付きでひとまとまりにします。
 pub struct Settings {
@@ -21,9 +21,12 @@ pub fn load() -> Result<Settings> {
             // &settings は文字列をコピーせず、一時的に借りて関数に渡す書き方です。
             let token = setting(&settings, "DISCORD_TOKEN");
             let bot = Bot::new(token.unwrap_or_default()).map_err(|_| {
-                format!(
-                    "{} の DISCORD_TOKEN に Bot トークンを設定してください",
-                    env_path.display()
+                Error::Handler(
+                    format!(
+                        "{} の DISCORD_TOKEN に Bot トークンを設定してください",
+                        env_path.display()
+                    )
+                    .into(),
                 )
             })?;
 
@@ -43,12 +46,16 @@ pub fn load() -> Result<Settings> {
             )
         }
         Err(error) => {
-            return Err(format!("{} を読み込めませんでした ({error})", env_path.display()).into());
+            return Err(Error::Handler(
+                format!("{} を読み込めませんでした ({error})", env_path.display()).into(),
+            ));
         }
     };
 
     if replace_guild_commands && guild_id.is_none() {
-        return Err("一括同期には DISCORD_GUILD_ID が必要です".into());
+        return Err(Error::Handler(
+            "一括同期には DISCORD_GUILD_ID が必要です".into(),
+        ));
     }
 
     Ok(Settings {
@@ -78,9 +85,11 @@ fn parse_guild_id(value: Option<&str>) -> Result<Option<Id<GuildMarker>>> {
     match value.map(str::trim) {
         None | Some("") => Ok(None),
         // parse で文字列を型付きの Discord サーバー ID に変えます。
-        Some(value) => Ok(Some(value.parse().map_err(
-            |_| "DISCORD_GUILD_ID には数字の Discord サーバー ID を指定してください",
-        )?)),
+        Some(value) => Ok(Some(value.parse().map_err(|_| {
+            Error::Handler(
+                "DISCORD_GUILD_ID には数字の Discord サーバー ID を指定してください".into(),
+            )
+        })?)),
     }
 }
 
@@ -89,8 +98,8 @@ fn parse_replace(value: Option<&str>) -> Result<bool> {
     match value.map(str::trim) {
         None | Some("" | "false") => Ok(false),
         Some("true") => Ok(true),
-        Some(_) => {
-            Err("DISCORD_REPLACE_GUILD_COMMANDS には true または false を指定してください".into())
-        }
+        Some(_) => Err(Error::Handler(
+            "DISCORD_REPLACE_GUILD_COMMANDS には true または false を指定してください".into(),
+        )),
     }
 }

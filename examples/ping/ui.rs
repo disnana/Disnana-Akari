@@ -63,7 +63,10 @@ pub async fn slow_refresh(ctx: &mut ButtonContext<'_>) -> Result<()> {
 }
 
 fn refreshed_panel(status: &str) -> Result<UiMessage> {
-    let seconds = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(disnana_akari::Error::handler)?
+        .as_secs();
     // <t:秒:T> は Discord で見る人の時刻表示に変換されます。
     Ok(panel(&format!("{status}\n更新時刻 <t:{seconds}:T>")))
 }

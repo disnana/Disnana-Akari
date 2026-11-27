@@ -31,11 +31,13 @@ Discord ──▶ [受信ループ] ──▶ キュー ──▶ ハンドラ�
 ハンドラーが `.await` で待っている間は、ほかの処理が進みます。逆に、**待たずに** CPU を使い続ける処理（重い計算、同期的なファイル読み込み、`std::thread::sleep` など）は、ほかの処理も止めてしまいます。
 
 ```rust
-use disnana_akari::{CommandContext, Result};
+use disnana_akari::{CommandContext, Error, Result};
 
 async fn heavy(ctx: CommandContext<'_>) -> Result<()> {
     // 重い計算は、専用のスレッドに逃がす
-    let answer = tokio::task::spawn_blocking(|| (1..=1_000_000u64).sum::<u64>()).await?;
+    let answer = tokio::task::spawn_blocking(|| (1..=1_000_000u64).sum::<u64>())
+        .await
+        .map_err(Error::handler)?;
     ctx.reply(&format!("答えは {answer} です。")).await
 }
 ```

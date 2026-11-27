@@ -21,7 +21,7 @@ use twilight_model::{
 };
 use twilight_validate::{component, message};
 
-use crate::Result;
+use crate::{Error, Result};
 
 /// タイトル、説明、色、項目を持つ Discord の埋め込みです。
 #[derive(Clone, Debug)]
@@ -385,23 +385,25 @@ impl Modal {
     pub(crate) fn response(&self) -> Result<InteractionResponse> {
         validate_custom_id(&self.custom_id)?;
         if self.title.trim().is_empty() || self.title.chars().count() > 45 {
-            return Err("モーダルのタイトルは空白以外を含む 1〜45 文字にしてください。".into());
+            return Err(Error::InvalidUi(
+                "モーダルのタイトルは空白以外を含む 1〜45 文字にしてください。",
+            ));
         }
         if !(1..=5).contains(&self.components.len()) {
-            return Err("モーダルには入力欄が 1〜5 個必要です。".into());
+            return Err(Error::InvalidUi("モーダルには入力欄が 1〜5 個必要です。"));
         }
 
         let mut ids = HashSet::new();
         for item in &self.components {
             let Component::Label(label) = item else {
-                return Err("入力欄は Label の中に配置してください。".into());
+                return Err(Error::InvalidUi("入力欄は Label の中に配置してください。"));
             };
             component::label(label)?;
             let Component::TextInput(input) = label.component.as_ref() else {
-                return Err("モーダルの入力欄の種類が無効です。".into());
+                return Err(Error::InvalidUi("モーダルの入力欄の種類が無効です。"));
             };
             if label.label.trim().is_empty() {
-                return Err("入力欄には空でないラベルが必要です。".into());
+                return Err(Error::InvalidUi("入力欄には空でないラベルが必要です。"));
             }
             check_custom_id(&mut ids, &input.custom_id)?;
 
@@ -410,12 +412,16 @@ impl Modal {
                 .max_length
                 .map_or(component::TEXT_INPUT_LENGTH_MAX, usize::from);
             if min > max {
-                return Err("入力欄の最小文字数は最大文字数以下にしてください。".into());
+                return Err(Error::InvalidUi(
+                    "入力欄の最小文字数は最大文字数以下にしてください。",
+                ));
             }
             if let Some(value) = input.value.as_deref().filter(|value| !value.is_empty())
                 && !(min..=max).contains(&value.chars().count())
             {
-                return Err("入力欄の初期値を指定した文字数の範囲に収めてください。".into());
+                return Err(Error::InvalidUi(
+                    "入力欄の初期値を指定した文字数の範囲に収めてください。",
+                ));
             }
         }
 
@@ -497,9 +503,9 @@ impl UiMessage {
     pub(crate) fn validate(&self) -> Result<()> {
         let content = self.content.as_deref().unwrap_or_default();
         if content.trim().is_empty() && self.embeds.is_empty() && self.components.is_empty() {
-            return Err(
-                "本文、埋め込み、ボタン、選択メニューのいずれかを追加してください。".into(),
-            );
+            return Err(Error::InvalidUi(
+                "本文、埋め込み、ボタン、選択メニューのいずれかを追加してください。",
+            ));
         }
         message::content(content)?;
         message::embeds(&self.embeds)?;
@@ -507,21 +513,25 @@ impl UiMessage {
 
         for embed in &self.embeds {
             if embed.title.is_none() && embed.description.is_none() && embed.fields.is_empty() {
-                return Err("埋め込みにタイトル、説明、項目のいずれかを追加してください。".into());
+                return Err(Error::InvalidUi(
+                    "埋め込みにタイトル、説明、項目のいずれかを追加してください。",
+                ));
             }
             if embed
                 .fields
                 .iter()
                 .any(|field| field.name.trim().is_empty() || field.value.trim().is_empty())
             {
-                return Err("埋め込みの項目には名前と値が必要です。".into());
+                return Err(Error::InvalidUi("埋め込みの項目には名前と値が必要です。"));
             }
         }
 
         let mut ids = HashSet::new();
         for component in &self.components {
             let Component::ActionRow(row) = component else {
-                return Err("操作部品は Action Row の中に配置してください。".into());
+                return Err(Error::InvalidUi(
+                    "操作部品は Action Row の中に配置してください。",
+                ));
             };
             check_row(row, &mut ids)?;
         }
@@ -549,14 +559,14 @@ fn select_row(select: SelectMenu) -> Component {
 
 fn check_row<'a>(row: &'a ActionRow, ids: &mut HashSet<&'a str>) -> Result<()> {
     match row.components.as_slice() {
-        [] => return Err("空の行は追加できません。".into()),
+        [] => return Err(Error::InvalidUi("空の行は追加できません。")),
         [Component::SelectMenu(select)] => return check_select(select, ids),
         buttons => {
             for item in buttons {
                 let Component::Button(button) = item else {
-                    return Err(
-                        "1 行にはボタンだけ、または選択メニュー 1 個を配置してください。".into(),
-                    );
+                    return Err(Error::InvalidUi(
+                        "1 行にはボタンだけ、または選択メニュー 1 個を配置してください。",
+                    ));
                 };
                 check_button(button, ids)?;
             }
@@ -568,7 +578,7 @@ fn check_row<'a>(row: &'a ActionRow, ids: &mut HashSet<&'a str>) -> Result<()> {
 fn check_button<'a>(button: &'a RawButton, ids: &mut HashSet<&'a str>) -> Result<()> {
     if matches!(&button.emoji, Some(EmojiReactionType::Unicode { name }) if name.trim().is_empty())
     {
-        return Err("Unicode 絵文字を指定してください。".into());
+        return Err(Error::InvalidUi("Unicode 絵文字を指定してください。"));
     }
     if button.style != ButtonStyle::Premium
         && button.emoji.is_none()
@@ -577,7 +587,7 @@ fn check_button<'a>(button: &'a RawButton, ids: &mut HashSet<&'a str>) -> Result
             .as_deref()
             .is_none_or(|label| label.trim().is_empty())
     {
-        return Err("ボタンにはラベルまたは絵文字が必要です。".into());
+        return Err(Error::InvalidUi("ボタンにはラベルまたは絵文字が必要です。"));
     }
     if button.style == ButtonStyle::Link {
         let url = button.url.as_deref().unwrap_or_default();
@@ -588,9 +598,9 @@ fn check_button<'a>(button: &'a RawButton, ids: &mut HashSet<&'a str>) -> Result
                 matches!(uri.scheme_str(), Some("http" | "https")) && uri.host().is_some()
             })
         {
-            return Err(
-                "リンクボタンには512文字以内の絶対 HTTP(S) URL を指定してください。".into(),
-            );
+            return Err(Error::InvalidUi(
+                "リンクボタンには512文字以内の絶対 HTTP(S) URL を指定してください。",
+            ));
         }
     }
     if let Some(id) = button.custom_id.as_deref() {
@@ -604,20 +614,24 @@ fn check_select<'a>(select: &'a SelectMenu, ids: &mut HashSet<&'a str>) -> Resul
     let min = select.min_values.unwrap_or(1);
     let max = select.max_values.unwrap_or(1);
     if min > max {
-        return Err("選択できる最小数は最大数以下にしてください。".into());
+        return Err(Error::InvalidUi(
+            "選択できる最小数は最大数以下にしてください。",
+        ));
     }
     if select.kind == SelectMenuType::Text {
         let options = select.options.as_deref().unwrap_or_default();
         if options.is_empty() || usize::from(max) > options.len() {
-            return Err("選択メニューには選択できる数以上の選択肢が必要です。".into());
+            return Err(Error::InvalidUi(
+                "選択メニューには選択できる数以上の選択肢が必要です。",
+            ));
         }
         let mut values = HashSet::new();
         for option in options {
             if option.label.trim().is_empty() || option.value.is_empty() {
-                return Err("選択肢には空でない表示名と値が必要です。".into());
+                return Err(Error::InvalidUi("選択肢には空でない表示名と値が必要です。"));
             }
             if !values.insert(&option.value) {
-                return Err("選択肢の値は重複できません。".into());
+                return Err(Error::InvalidUi("選択肢の値は重複できません。"));
             }
         }
     }
@@ -627,14 +641,18 @@ fn check_select<'a>(select: &'a SelectMenu, ids: &mut HashSet<&'a str>) -> Resul
 fn check_custom_id<'a>(ids: &mut HashSet<&'a str>, id: &'a str) -> Result<()> {
     validate_custom_id(id)?;
     if !ids.insert(id) {
-        return Err("同じメッセージやモーダルの中で操作部品の ID は重複できません。".into());
+        return Err(Error::InvalidUi(
+            "同じメッセージやモーダルの中で操作部品の ID は重複できません。",
+        ));
     }
     Ok(())
 }
 
 fn validate_custom_id(id: &str) -> Result<()> {
     if id.is_empty() || id.chars().count() > component::COMPONENT_CUSTOM_ID_LENGTH {
-        return Err("操作部品の ID は 1〜100 文字にしてください。".into());
+        return Err(Error::InvalidUi(
+            "操作部品の ID は 1〜100 文字にしてください。",
+        ));
     }
     Ok(())
 }

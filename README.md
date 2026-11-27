@@ -36,6 +36,8 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 - [公開前の確認](docs/releasing.md)
 - [セキュリティ報告](SECURITY.md)
 
+`Result<T>` が返す `Error` は、Intent の不足、Discord REST API の失敗、アプリ固有のエラーなどを型で判別できます。実行中のエラーは `Bot::on_error` でも受け取れます。[エラーの扱い方](docs/api.md#エラーと自動で送る文言)
+
 ## ライセンス
 
 Disnana Akari は [MIT ライセンス](LICENSE)で提供します。

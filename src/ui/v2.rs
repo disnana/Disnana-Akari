@@ -6,7 +6,7 @@ use twilight_model::channel::message::{
 };
 use twilight_validate::{component::COMPONENT_V2_COUNT, embed::COLOR_MAXIMUM, message};
 
-use crate::Result;
+use crate::{Error, Result};
 
 use super::{
     Button, ChannelSelect, MentionableSelect, RoleSelect, StringSelect, UserSelect, button_row,
@@ -93,7 +93,9 @@ impl ComponentsV2 {
 
     pub(crate) fn validate(&self) -> Result<()> {
         if self.components.is_empty() {
-            return Err("Components V2 には部品が一つ以上必要です。".into());
+            return Err(Error::InvalidUi(
+                "Components V2 には部品が一つ以上必要です。",
+            ));
         }
         message::components(&self.components, true)?;
         let mut limits = Limits::default();
@@ -122,11 +124,15 @@ impl<'a> Limits<'a> {
             }
             Component::TextDisplay(text) => {
                 if text.content.trim().is_empty() {
-                    return Err("テキスト表示には空白以外の内容が必要です。".into());
+                    return Err(Error::InvalidUi(
+                        "テキスト表示には空白以外の内容が必要です。",
+                    ));
                 }
                 self.text_length += text.content.chars().count();
                 if self.text_length > TOTAL_TEXT_LENGTH {
-                    return Err("テキスト表示の合計は 4000 文字以下にしてください。".into());
+                    return Err(Error::InvalidUi(
+                        "テキスト表示の合計は 4000 文字以下にしてください。",
+                    ));
                 }
             }
             Component::Section(section) => {
@@ -140,14 +146,16 @@ impl<'a> Limits<'a> {
             }
             Component::Container(container) => {
                 if container.components.is_empty() {
-                    return Err("コンテナーには部品が一つ以上必要です。".into());
+                    return Err(Error::InvalidUi("コンテナーには部品が一つ以上必要です。"));
                 }
                 if container
                     .accent_color
                     .flatten()
                     .is_some_and(|color| color > COLOR_MAXIMUM)
                 {
-                    return Err("コンテナーの色は 0x000000〜0xFFFFFF にしてください。".into());
+                    return Err(Error::InvalidUi(
+                        "コンテナーの色は 0x000000〜0xFFFFFF にしてください。",
+                    ));
                 }
                 for child in &container.components {
                     self.check(child)?;
@@ -155,11 +163,17 @@ impl<'a> Limits<'a> {
             }
             Component::Separator(separator) => {
                 if matches!(separator.spacing, Some(SeparatorSpacingSize::Other(_))) {
-                    return Err("区切り線の余白は Small または Large を指定してください。".into());
+                    return Err(Error::InvalidUi(
+                        "区切り線の余白は Small または Large を指定してください。",
+                    ));
                 }
             }
             Component::File(_) | Component::MediaGallery(_) => {}
-            _ => return Err("この部品はメッセージ内のこの位置に配置できません。".into()),
+            _ => {
+                return Err(Error::InvalidUi(
+                    "この部品はメッセージ内のこの位置に配置できません。",
+                ));
+            }
         }
         Ok(())
     }
@@ -167,7 +181,9 @@ impl<'a> Limits<'a> {
     fn add_count(&mut self, count: usize) -> Result<()> {
         self.count += count;
         if self.count > COMPONENT_V2_COUNT {
-            return Err("Components V2 の部品は入れ子を含めて 40 個までです。".into());
+            return Err(Error::InvalidUi(
+                "Components V2 の部品は入れ子を含めて 40 個までです。",
+            ));
         }
         Ok(())
     }

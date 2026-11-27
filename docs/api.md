@@ -323,7 +323,7 @@ fn build() -> Result<Bot> {
 | --- | --- |
 | `report.source` | `ErrorSource`。`TextCommand`、`SlashCommand`、`Button`、`Select`、`Modal`、`Message`、`Event`、`Gateway`、`Response`（自動応答の失敗）、`QueueFull`（処理枠が満杯）など。今後増える可能性があります（`#[non_exhaustive]`）。 |
 | `report.name` | コマンド名、`custom_id`、イベント名など、原因を絞り込む手がかり。分からないときは `None`。 |
-| `report.error` | エラーの内容。ハンドラーが返したエラーは、そのまま渡します。 |
+| `report.error` | `&Error`。ハンドラーが返した型付きエラーをそのまま渡します。 |
 
 - 関数を設定すると、Akari は標準エラー出力へは書きません。設定しない場合は、`[akari] ...` の形で標準エラー出力に書きます。
 - 関数は処理の途中で同期的に呼ばれます。短く保ち、`panic` しないでください。重い処理は、チャンネルへ送るなどして、別のタスクで行います。
@@ -367,7 +367,11 @@ fn build() -> Result<Bot> {
 
 `Context` は `Bot::run` に渡すメッセージ処理用の型です。`ctx.message()` で元の `&Message` を借りられます。`ctx.reply(content).await`、`ctx.reply_ui(&message).await`、`ctx.reply_v2(&message).await` は元のメッセージへの返信を送ります。`ctx.timing()` で受信から処理までの測定値を取得できます。
 
-`Result<T>` は `std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>` の別名です。関数内で `?` を使うと、失敗時にそのエラーを呼び出し元へ返します。
+`Bot::run` が返す Future は `Send` ではありません。実行中のタスクで直接 `.await` するか、Tokio の `LocalSet` を使ってください。
+
+`Result<T>` は `std::result::Result<T, Error>` の別名です。`Error::MissingIntents` は不足している Intent を保持し、`Error::Http` や `Error::CommandRegistration` は Twilight の原因を保持します。`Error`、`CommandSource`、`Mentionable` は `#[non_exhaustive]` です。外部のクレートで `match` を書く場合は `_` の分岐を付けてください。
+
+Akari が返したエラーは `?` でそのまま伝播します。アプリ固有のエラーは `.map_err(Error::handler)?` で `Error::Handler` に包みます。`Box<dyn std::error::Error + Send + Sync>` を返す処理には直接 `?` を使えます。`Error::Handler` は元のエラーを保持するため、`std::error::Error::source` で原因を取得できます。
 
 ## Twilight の型と REST クライアントを使う
 
@@ -392,7 +396,7 @@ use std::time::Duration;
 
 use disnana_akari::model::gateway::Intents;
 use disnana_akari::{
-    Bot, ButtonContext, CommandContext, Commands, Cooldown, Events, HybridContext, Ready, Result,
+    Bot, ButtonContext, CommandContext, Commands, Cooldown, Error, Events, HybridContext, Ready, Result,
     SlashCommands, SlashContext, register_hybrid, ui::{Button, Embed, UiMessage},
 };
 
@@ -403,7 +407,10 @@ async fn main() -> Result<()> {
     let mut commands = Commands::new("!")?;
     commands.register("ping", ping)?;
 
-    let guild_id = std::env::var("DISCORD_GUILD_ID")?.parse()?;
+    let guild_id = std::env::var("DISCORD_GUILD_ID")
+        .map_err(Error::handler)?
+        .parse()
+        .map_err(Error::handler)?;
     let mut slash = SlashCommands::for_guild(guild_id);
     slash.register("ping", "Bot の応答を確認します", vec![], slash_ping)?;
     slash.register("ui", "埋め込みとボタンを表示します", vec![], show)?;

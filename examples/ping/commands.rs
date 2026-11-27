@@ -103,6 +103,7 @@ async fn latency(
     let cooldown = match ctx.source() {
         CommandSource::Text => text_cooldown,
         CommandSource::Slash => slash_cooldown,
+        _ => return ctx.reply("この呼び出し方には対応していません。").await,
     };
     // false のときは待ち時間を返信済みです。先頭の ! は true と false を反転させます。
     if !ctx.check_cooldown(cooldown).await? {

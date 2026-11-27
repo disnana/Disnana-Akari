@@ -73,6 +73,8 @@ cargo run --locked --example ping
 
 `（Bot 名） として Discord に接続しました` と表示されたら、サーバーのチャンネルで `!ping` を送ります。Bot が元のメッセージに `Pong!` と返信します。終了は `Ctrl+C` です。
 
+起動に失敗した場合は、端末に表示されるメッセージを確認してください。Bot を組み込むコードでは、たとえば `Error::MissingIntents` から不足している Intent を取り出せます。[トラブルシューティング](troubleshooting.md)
+
 ## Git 管理外で自分のコードを書く
 
 `playground/` は `.gitignore` に登録済みです。Akari を `path = ".."` で参照する独立した Cargo プロジェクトなので、Akari 本体の変更もそのまま試せます。

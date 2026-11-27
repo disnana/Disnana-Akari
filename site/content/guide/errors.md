@@ -22,7 +22,7 @@ fn build() -> Result<Bot> {
 | --- | --- |
 | `report.source` | エラーが起きた場所。`TextCommand`、`SlashCommand`、`Button`、`Select`、`Modal`、`Message`、`Event`、`Gateway`、`Response`（自動応答の失敗）、`QueueFull`（処理枠が満杯）など |
 | `report.name` | コマンド名、`custom_id`、イベント名など、原因を絞り込む手がかり。分からないときは `None` |
-| `report.error` | エラーの内容。ハンドラーが返したエラーは、そのまま渡します |
+| `report.error` | `&Error`。ハンドラーが返した型付きエラーをそのまま渡します |
 
 ```rust
 use disnana_akari::{Bot, ErrorSource, Result};
@@ -41,6 +41,21 @@ fn build() -> Result<Bot> {
 - 関数は処理の途中で **同期的に** 呼ばれます。短く保ち、`panic` しないでください。重い処理は、チャンネルへ送るなどして、別のタスクで行います。
 - `ErrorSource` は、今後増える可能性があります（`#[non_exhaustive]`）。`match` には `_` の分岐を付けてください。
 - Akari は `tracing` や `log` を使いません。ロガーに流したいときは、この関数の中で呼びます。
+
+### アプリ固有のエラー
+
+ハンドラーが返す `Result<T>` のエラー型は `disnana_akari::Error` です。Akari の操作にはそのまま `?` を使えます。アプリ側のエラーは `Error::handler` を使うと、原因を保持したまま `Error::Handler` に包めます。
+
+```rust
+use disnana_akari::{CommandContext, Error, Result};
+
+async fn count(ctx: CommandContext<'_>) -> Result<()> {
+    let count = ctx.args().parse::<u32>().map_err(Error::handler)?;
+    ctx.reply(&format!("個数は {count} です。")).await
+}
+```
+
+`Box<dyn std::error::Error + Send + Sync>` は `?` で `Error::Handler` に変換できます。`on_error` では `report.error` を `match` し、`Error::Handler` や Gateway の終了コードを持つ `Error::GatewayClose` などを判別できます。`Error` にバリアントが増える可能性があるため、`_` の分岐を付けてください。
 
 ### Gateway の切断
 
