@@ -19,6 +19,7 @@
 | `bot.with_shutdown() -> (Bot, ShutdownHandle)` | `shutdown.request()` で停止を要求できます。要求後は、Gateway の切断を最大2秒、受付済みの処理を最大5秒、並行して待ち、起動メソッドが正常に終了します。 |
 | `bot.with_recommended_shards() -> Bot` | Discord の推奨シャード数とセッション開始枠を起動時に調べ、同じプロセスで全シャードを起動します。通常は単一接続です。 |
 | `bot.with_voice_gateway() -> (Bot, VoiceGateway)` | ボイスチャンネルの参加・移動・退出を担当シャードへ要求します。`GUILD_VOICE_STATES` が必要です。 |
+| `bot.with_member_cache(capacity) -> (Bot, MemberCacheHandle)` | 保存済みメンバーを `handle.get(guild, user)` または `handle.guild_members(guild)` で参照できます。 |
 | `bot.cache_members(capacity)` | キャッシュ付きのメンバー更新・退出通知が使う最大保存件数です。`GUILDS` と `GUILD_MEMBERS` が必要です。 |
 | `bot.cache_messages(capacity)` | キャッシュ付きの編集・削除イベントが使うメッセージの最大保存件数を指定します。既定値と `0` は無効です。 |
 | `bot.with_gateway_status() -> (Bot, GatewayStatusHandle)` | `status.shards()` で現在のシャード一覧を読み、`status.subscribe()` で変化を購読します。 |
@@ -517,6 +518,10 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 - 標準のエラーなどは、Akari が `Error::Handler` で包んで `on_error` に報告します。`Error::Handler` が持つ `HandlerError` から、`downcast_ref::<T>()`、`inner()`、`into_inner()` で元のエラーを取り出せます。表示と原因の連鎖は、元のエラーと同じです（メッセージが二重に表示されません）。
 - メッセージだけのエラーは `Error::msg("使い方: !echo 文章")` で作れます。`Error::handler(e)` は、任意のエラーを `Error::Handler` に包みます。
 - **クロージャ**は、末尾が関数呼び出しなら、そのまま渡せます。`Ok(())` で終わるときは、戻り値の型を書きます: `async move |ctx: CommandContext<'_>| -> Result<()> { ...; Ok(()) }`。書かないと、エラー型を決められずに `type annotations needed` になります。
+
+## ハイブリッドの添付とメンション
+
+`SlashCommands::attachment_option` と `mentionable_option` を型付きハイブリッドの登録にも使えます。`HybridArguments::attachment` は Discord が渡した添付メタデータを借り、`mentionable` はユーザーかロールを型付きで返します。テキストの添付は投稿に添付した順に読み、メンションはユーザー用かロール用の書式を指定します。
 
 ## サブコマンドと選択肢の翻訳
 
