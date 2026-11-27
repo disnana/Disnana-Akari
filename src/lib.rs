@@ -27,7 +27,7 @@ use twilight_model::{
 
 pub use commands::{CommandContext, Commands};
 pub use cooldown::Cooldown;
-pub use error::Error;
+pub use error::{Error, HandlerError};
 pub use events::{Events, Ready};
 pub use hooks::{ErrorReport, ErrorSource, InfoEvent, Messages};
 pub use hybrid::{CommandSource, HybridContext, register_hybrid};
@@ -164,7 +164,7 @@ impl Bot {
     /// 実行時の情報を受け取る関数を設定します。
     ///
     /// 設定した場合に限り、Gateway の準備や再開、スラッシュコマンドの同期、
-    /// Interaction の初回応答を同期的に通知します。関数内では短い処理だけを行ってください。
+    /// Interaction の初回応答を同期的に通知します。関数は処理の途中で呼ばれます。短く保ち、`panic` しないでください。
     pub fn on_info(mut self, hook: impl Fn(&InfoEvent) + Send + Sync + 'static) -> Self {
         self.info = InfoReporter::new(hook);
         self

@@ -29,7 +29,7 @@ pub enum Error {
     #[error("{0}")]
     InvalidCommandSync(String),
     /// 指定のスラッシュコマンドを Discord に登録できませんでした。
-    #[error("スラッシュコマンド `/{name}` を登録できませんでした ({source})")]
+    #[error("スラッシュコマンド `/{name}` を登録できませんでした")]
     CommandRegistration {
         /// 登録しようとしたコマンド名です。
         name: String,
@@ -62,40 +62,88 @@ pub enum Error {
     #[error("{}", describe_gateway_close(*.0))]
     GatewayClose(u16),
     /// Gateway のイベントを受信できませんでした。
-    #[error("{0}")]
+    #[error(transparent)]
     GatewayReceive(#[from] ReceiveMessageError),
     /// Discord REST API のリクエストが失敗しました。
-    #[error("{0}")]
+    #[error(transparent)]
     Http(#[from] HttpError),
     /// Discord REST API のレスポンス本文を読み取れませんでした。
-    #[error("{0}")]
+    #[error(transparent)]
     HttpBody(#[from] DeserializeBodyError),
     /// Twilight がコマンドの設定を無効と判定しました。
-    #[error("{0}")]
+    #[error(transparent)]
     CommandValidation(#[from] CommandValidationError),
     /// Twilight がメッセージを無効と判定しました。
-    #[error("{0}")]
+    #[error(transparent)]
     MessageValidation(#[from] MessageValidationError),
     /// Twilight が埋め込みを無効と判定しました。
-    #[error("{0}")]
+    #[error(transparent)]
     EmbedValidation(#[from] EmbedValidationError),
     /// Twilight が操作部品を無効と判定しました。
-    #[error("{0}")]
+    #[error(transparent)]
     ComponentValidation(#[from] ComponentValidationError),
     /// 利用者が登録したハンドラーから返された、アプリ固有のエラーです。
-    #[error("{0}")]
-    Handler(#[from] Box<dyn std::error::Error + Send + Sync>),
+    #[error(transparent)]
+    Handler(#[from] HandlerError),
 }
 
 impl Error {
     /// アプリ固有のエラーを包みます。`map_err(Error::handler)?` の形で使えます。
     pub fn handler(error: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::Handler(Box::new(error))
+        Self::Handler(HandlerError(Box::new(error)))
     }
 
     /// メッセージだけのアプリ固有のエラーを作ります。`return Err(Error::msg("使い方: !echo 文章"))` の形で使えます。
     pub fn msg(message: impl std::fmt::Display) -> Self {
-        Self::Handler(message.to_string().into())
+        Self::Handler(HandlerError(message.to_string().into()))
+    }
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for Error {
+    fn from(error: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        handler_error(error)
+    }
+}
+
+/// ハンドラーが返した、アプリ固有のエラーです。[`Error::Handler`] に入っています。
+///
+/// 表示と原因の連鎖は、元のエラーと同じです（メッセージが二重に表示されません）。
+/// 元のエラーは [`Self::inner`]、[`Self::downcast_ref`]、[`Self::into_inner`] で取り出せます。
+pub struct HandlerError(Box<dyn std::error::Error + Send + Sync>);
+
+impl HandlerError {
+    /// 元のエラーを借ります。
+    pub fn inner(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        &*self.0
+    }
+
+    /// 元のエラーを取り出します。
+    pub fn into_inner(self) -> Box<dyn std::error::Error + Send + Sync> {
+        self.0
+    }
+
+    /// 元のエラーが `T` なら、借りて返します。
+    pub fn downcast_ref<T: std::error::Error + 'static>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+}
+
+impl std::fmt::Display for HandlerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::fmt::Debug for HandlerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for HandlerError {
+    /// 元のエラーの原因を返します。元のエラー自身は、表示に含まれています。
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
     }
 }
 
@@ -118,7 +166,7 @@ where
     };
     match boxed.downcast::<DeserializeBodyError>() {
         Ok(error) => Error::HttpBody(*error),
-        Err(boxed) => Error::Handler(boxed),
+        Err(boxed) => Error::Handler(HandlerError(boxed)),
     }
 }
 
@@ -160,21 +208,55 @@ mod tests {
     use super::{Error, handler_error};
 
     #[test]
-    fn boxed_handler_error_preserves_its_source() {
+    fn boxed_handler_error_keeps_the_original_error() {
         let source: Box<dyn std::error::Error + Send + Sync> = Box::new(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "test source",
         ));
         let error = Error::from(source);
-        assert!(matches!(&error, Error::Handler(_)));
-        let source = error
-            .source()
-            .and_then(|source| source.downcast_ref::<io::Error>());
+        let Error::Handler(inner) = &error else {
+            panic!("Handler を想定");
+        };
         assert_eq!(
-            source.map(io::Error::kind),
+            inner.downcast_ref::<io::Error>().map(io::Error::kind),
             Some(io::ErrorKind::PermissionDenied)
         );
         assert_eq!(error.to_string(), "test source");
+        // 表示に元のメッセージがあるので、原因には同じメッセージを繰り返さない。
+        assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn handler_error_shows_each_message_once_in_the_chain() {
+        let error = Error::handler(Outer(Inner));
+        let mut chain = vec![error.to_string()];
+        let mut source = error.source();
+        while let Some(cause) = source {
+            chain.push(cause.to_string());
+            source = cause.source();
+        }
+        assert_eq!(chain, ["外側のエラー", "内側のエラー"]);
+    }
+
+    #[derive(Debug)]
+    struct Inner;
+    #[derive(Debug)]
+    struct Outer(Inner);
+    impl std::fmt::Display for Inner {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("内側のエラー")
+        }
+    }
+    impl std::fmt::Display for Outer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("外側のエラー")
+        }
+    }
+    impl std::error::Error for Inner {}
+    impl std::error::Error for Outer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
     }
 
     #[test]

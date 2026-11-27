@@ -36,6 +36,13 @@ async fn channel_name(ctx: CommandContext<'_>) -> Result<()> {
 
 `disnana_akari::http` は `twilight_http` の再エクスポートです。
 
+## 安定性
+
+Akari は Twilight 0.18 の上に作られていて、公開 API に Twilight の型が出ています（`model`、`http`、`Error` の `Http` など、スラッシュコマンドの `CommandOption`、`Intents`、`Ready`、`InfoEvent` の `InteractionType`）。Twilight は 0.x なので、Twilight の更新に合わせて Akari も、互換性のない変更を入れることがあります。
+
+- Twilight の型を使うときは、`twilight-*` を自分の依存に加えず、`disnana_akari::model` と `disnana_akari::http` を使ってください。版がずれて、型が一致しなくなることを防げます。
+- Akari が Twilight の互換性のない版に上げるときは、Akari の 0.x のマイナーバージョンを上げ、[変更履歴](../reference/changelog.md)に書きます。
+
 ## Intent と暗号プロバイダー
 
 Intent の指定は、[Intent の設定](intents.md) を参照してください。Akari は Intent を自動では追加しません。

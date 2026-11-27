@@ -352,6 +352,7 @@ fn build() -> Result<Bot> {
 | `report.error` | `&Error`。ハンドラーが返した型付きエラーをそのまま渡します。 |
 
 - 関数を設定すると、Akari は標準エラー出力へは書きません。設定しない場合は、`[akari] ...` の形で標準エラー出力に書きます。
+- `{report}` で表示すると、`場所 `名前`: エラー: 原因: 原因…` の形で、**原因の連鎖も**続けて表示します（たとえば `Http` では、本当の理由は原因の側にあります）。
 - 関数は処理の途中で同期的に呼ばれます。短く保ち、`panic` しないでください。重い処理は、チャンネルへ送るなどして、別のタスクで行います。
 - Gateway が接続を閉じたときは、理由を含めて報告します。たとえばコード `4014` では、特権 Intent を有効にするよう案内します。
 - Akari は `tracing` や `log` を使いません。必要なら、`on_error` の中で、お使いのロガーへ渡してください。
@@ -413,7 +414,7 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 ```
 
 - Akari が返したエラー（`ctx.reply(...).await?` など）は、`Result<()>`（`Result<(), Error>`）を返すハンドラーなら、そのまま `?` で伝播し、`Error` のバリアントも保たれます。標準のエラーと Akari のエラーの両方に `?` を使いたいときは、`Box<dyn Error + Send + Sync>` を返すと便利です。ハンドラーが特定の型（`io::Error` など）を返す場合、Akari の `Error` からの変換はないので、`ctx.reply(...).await` の結果は自分で扱ってください。
-- 標準のエラーなどは、Akari が `Error::Handler` で包んで `on_error` に報告します。`Error::Handler` は元のエラーを保持します。
+- 標準のエラーなどは、Akari が `Error::Handler` で包んで `on_error` に報告します。`Error::Handler` が持つ `HandlerError` から、`downcast_ref::<T>()`、`inner()`、`into_inner()` で元のエラーを取り出せます。表示と原因の連鎖は、元のエラーと同じです（メッセージが二重に表示されません）。
 - メッセージだけのエラーは `Error::msg("使い方: !echo 文章")` で作れます。`Error::handler(e)` は、任意のエラーを `Error::Handler` に包みます。
 - **クロージャ**は、末尾が関数呼び出しなら、そのまま渡せます。`Ok(())` で終わるときは、戻り値の型を書きます: `async move |ctx: CommandContext<'_>| -> Result<()> { ...; Ok(()) }`。書かないと、エラー型を決められずに `type annotations needed` になります。
 
@@ -432,6 +433,21 @@ async fn fetch_channel(ctx: Context<'_>) -> Result<Channel> {
 ```
 
 スラッシュコマンドとボタン操作の応答は、`reply`、`defer`、`update_message` など対応するコンテキストのメソッドで送ります。これらのメソッドは、初回応答や更新が済んだかどうかを Akari に記録します。[Twilight HTTP の API](https://docs.rs/twilight-http/0.18.0/twilight_http/)
+
+## 安定性（Twilight の型）
+
+Akari は Twilight 0.18 の上に作られていて、公開 API に Twilight の型が出ています。Twilight は 0.x なので、Twilight の更新に合わせて Akari も、互換性のない変更を入れることがあります。
+
+| 場所 | Twilight の型 |
+| --- | --- |
+| `disnana_akari::model`、`disnana_akari::http` | `twilight_model`、`twilight_http` の再エクスポート |
+| `Error` の `Http`、`HttpBody`、`GatewayReceive`、`*Validation`、`CommandRegistration` | Twilight のエラー型 |
+| `Context` などの `message()`、`http()`、`Intents`、`Ready`、スラッシュコマンドの `CommandOption` | Twilight の型 |
+| `InfoEvent` の `InteractionType`、`InteractionResponseType` | Twilight の型 |
+
+- Twilight の型を使うときは、`twilight-*` を自分の依存に加えず、`disnana_akari::model` と `disnana_akari::http` を使ってください。版がずれて、型が一致しなくなることを防げます。
+- Akari が Twilight の互換性のない版（0.19 など）に上げるときは、Akari の 0.x のマイナーバージョンを上げ、変更履歴に書きます。
+- Akari 自身の列挙型（`Error`、`ErrorSource`、`InfoEvent`、`CommandSource`、`Mentionable`）は `#[non_exhaustive]` です。バリアントが増えても、`_` の分岐があれば壊れません。
 
 ## 使用例
 

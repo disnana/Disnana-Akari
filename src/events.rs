@@ -258,9 +258,7 @@ mod tests {
         let handlers: Vec<Box<dyn Handler<i32>>> = vec![
             Box::new(async move |value: &i32| {
                 first.lock().unwrap().push(*value);
-                Err(crate::Error::Handler(
-                    "最初のイベントハンドラーのエラー".into(),
-                ))
+                Err(crate::Error::msg("最初のイベントハンドラーのエラー"))
             }),
             Box::new(async move |value: &i32| {
                 second.lock().unwrap().push(*value + 1);
