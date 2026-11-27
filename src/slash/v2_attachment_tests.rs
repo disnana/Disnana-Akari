@@ -15,7 +15,8 @@ use crate::{
         tests::{command_interaction, exchange_response, test_command_message},
     },
     timing::Pending,
-    ui::FileDisplay,
+    ui::{Button, FileDisplay, UiMessage},
+    validation::AttachmentLimits,
 };
 
 fn upload() -> ComponentsV2 {
@@ -41,7 +42,7 @@ async fn local_http() -> Result<(TcpListener, Client)> {
     Ok((listener, http))
 }
 
-async fn multipart(listener: &TcpListener, method: &str, path: &str) -> Result<Value> {
+async fn multipart_payload(listener: &TcpListener, method: &str, path: &str) -> Result<Value> {
     let body = exchange_response(listener, method, Some(path), None)
         .await
         .map_err(Error::handler)?;
@@ -52,7 +53,11 @@ async fn multipart(listener: &TcpListener, method: &str, path: &str) -> Result<V
         .split_once("Content-Type: application/json\r\n\r\n")
         .and_then(|(_, contents)| contents.lines().next())
         .unwrap();
-    let payload: Value = serde_json::from_str(payload).map_err(Error::handler)?;
+    serde_json::from_str(payload).map_err(Error::handler)
+}
+
+async fn multipart(listener: &TcpListener, method: &str, path: &str) -> Result<Value> {
+    let payload = multipart_payload(listener, method, path).await?;
     let data = payload.get("data").unwrap_or(&payload);
     assert_eq!(data["allowed_mentions"]["parse"], json!([]));
     assert_eq!(
@@ -304,6 +309,99 @@ async fn invalid_v2_upload_limits_are_rejected_before_http() -> Result<()> {
         ] {
             assert!(matches!(result, Err(Error::InvalidUi(_))));
         }
+        Ok(())
+    };
+    tokio::select! {
+        biased;
+        connection = listener.accept() => panic!("invalid upload attempted HTTP: {connection:?}"),
+        result = check => result,
+    }
+}
+
+#[tokio::test]
+async fn premium_channel_replies_preserve_json_and_multipart_contracts() -> Result<()> {
+    let (listener, http) = local_http().await?;
+    let source = test_command_message("!store")?;
+    let (_, timing) = Pending::new((), None).begin();
+    let permissions = PermissionResolver::new(None);
+    let ctx = Context {
+        http: &http,
+        message: &source,
+        timing,
+        permissions: &permissions,
+    };
+    let premium = Button::premium(Id::new(123));
+    let legacy = UiMessage::new()
+        .content("Store")
+        .buttons(vec![premium.clone()]);
+    let v2 = upload().buttons(vec![premium]);
+    let client = async {
+        ctx.reply_ui(&legacy).await?;
+        ctx.reply_v2(&v2).await
+    };
+    let server = async {
+        let body = exchange_response(&listener, "POST", Some("/channels/2/messages"), None)
+            .await
+            .map_err(Error::handler)?;
+        let legacy: Value = serde_json::from_str(&body).map_err(Error::handler)?;
+        let v2 = multipart_payload(&listener, "POST", "/channels/2/messages").await?;
+        assert_eq!(legacy["content"], "Store");
+        assert_eq!(v2["flags"], 32768);
+        assert_eq!(v2["attachments"][0]["filename"], "manual.pdf");
+        for (json, index) in [(&legacy, 0), (&v2, 1)] {
+            assert_eq!(json["message_reference"]["message_id"], "1");
+            assert_eq!(json["allowed_mentions"]["parse"], json!([]));
+            assert_eq!(json["components"][index]["components"][0]["sku_id"], "123");
+            assert!(
+                json["components"][index]["components"][0]
+                    .get("custom_id")
+                    .is_none()
+            );
+        }
+        Ok::<_, Error>(())
+    };
+    let (client, server) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(client, server)
+    })
+    .await
+    .map_err(Error::handler)?;
+    client?;
+    server
+}
+
+#[tokio::test]
+async fn app_limit_rejects_before_lookup_or_send() -> Result<()> {
+    let (listener, http) = local_http().await?;
+    let source = test_command_message("!file")?;
+    let (_, timing) = Pending::new((), None).begin();
+    let permissions = PermissionResolver::new(None);
+    let ctx = Context {
+        http: &http,
+        message: &source,
+        timing,
+        permissions: &permissions,
+    };
+    let mut interaction = command_interaction(None, None, 5);
+    interaction.attachment_size_limit = 100;
+    let hooks = Hooks::default();
+    let initial = InitialResponder {
+        http: &http,
+        interaction: &interaction,
+        timing,
+        info: &hooks.info,
+    };
+    let message = upload().attachment_limits(AttachmentLimits::default().max_file_bytes(Some(2)));
+    let check = async {
+        assert!(matches!(
+            ctx.reply_v2(&message).await,
+            Err(Error::InvalidUi(_))
+        ));
+        assert!(matches!(
+            ResponseState::RepliedV2
+                .edit_original_v2(initial, &message)
+                .await,
+            Err(Error::InvalidUi(_))
+        ));
         Ok(())
     };
     tokio::select! {

@@ -28,10 +28,10 @@ use twilight_model::{
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
         Id,
-        marker::{ChannelMarker, RoleMarker, UserMarker},
+        marker::{ChannelMarker, RoleMarker, SkuMarker, UserMarker},
     },
 };
-use twilight_validate::{component, message};
+use twilight_validate::component;
 
 use crate::{Error, Mentionable, Result};
 
@@ -91,7 +91,7 @@ impl Embed {
     }
 }
 
-/// 登録したイベントを呼ぶか、リンク先を開くボタンです。
+/// 登録したイベント、リンク、購入画面を開くボタンです。
 #[derive(Clone, Debug)]
 #[must_use]
 pub struct Button(RawButton);
@@ -122,6 +122,15 @@ impl Button {
         Self::styled(ButtonStyle::Link, None, Some(url.into()), label.into())
     }
 
+    /// 指定したアプリの SKU を購入するボタンを作ります。
+    ///
+    /// Discord がボタンの表示と購入操作を扱います。色、ラベル、絵文字、URL を指定する必要はありません。
+    pub fn premium(sku_id: Id<SkuMarker>) -> Self {
+        let mut button = Self::styled(ButtonStyle::Premium, None, None, String::new());
+        button.0.sku_id = Some(sku_id);
+        button
+    }
+
     fn interactive(
         style: ButtonStyle,
         custom_id: impl Into<String>,
@@ -150,6 +159,7 @@ impl Button {
 
     /// Unicode 絵文字や Discord のカスタム絵文字を設定します。
     /// 絵文字だけを表示する場合は、作成時に空のラベルを渡します。
+    /// 購入ボタンには絵文字を設定できません。
     pub fn emoji(mut self, emoji: EmojiReactionType) -> Self {
         self.0.emoji = Some(emoji);
         self
@@ -990,6 +1000,10 @@ pub struct UiMessage {
 }
 
 impl UiMessage {
+    pub(crate) fn has_premium_button(&self) -> bool {
+        self.components.iter().any(contains_premium_button)
+    }
+
     /// 空の返信を作ります。本文や埋め込み、ボタン、選択メニューを追加してから送信します。
     pub fn new() -> Self {
         Self::default()
@@ -1057,7 +1071,9 @@ impl UiMessage {
             ));
         }
         crate::validation::embeds(&self.embeds)?;
-        message::components(&self.components, false)?;
+        if self.components.len() > component::COMPONENT_COUNT {
+            return Err(Error::InvalidUi("操作部品の行は 5 行までです。"));
+        }
 
         for embed in &self.embeds {
             if embed.title.is_none() && embed.description.is_none() && embed.fields.is_empty() {
@@ -1111,7 +1127,10 @@ fn check_row<'a>(row: &'a ActionRow, ids: &mut HashSet<&'a str>) -> Result<()> {
     }
     match row.components.as_slice() {
         [] => return Err(Error::InvalidUi("空の行は追加できません。")),
-        [Component::SelectMenu(select)] => return check_select(select, ids),
+        [Component::SelectMenu(select)] => {
+            check_select(select, ids)?;
+            component::select_menu(select, true)?;
+        }
         buttons => {
             for item in buttons {
                 let Component::Button(button) = item else {
@@ -1127,6 +1146,23 @@ fn check_row<'a>(row: &'a ActionRow, ids: &mut HashSet<&'a str>) -> Result<()> {
 }
 
 fn check_button<'a>(button: &'a RawButton, ids: &mut HashSet<&'a str>) -> Result<()> {
+    if button.style == ButtonStyle::Premium {
+        // Twilight 0.18 の button 検証は Premium にも custom_id を要求します。
+        if button.sku_id.is_none()
+            || button.custom_id.is_some()
+            || button.label.is_some()
+            || button.url.is_some()
+            || button.emoji.is_some()
+        {
+            return Err(Error::InvalidUi(
+                "購入ボタンには SKU が必要です。カスタム ID、ラベル、URL、絵文字は指定できません。",
+            ));
+        }
+        return Ok(());
+    }
+    if button.sku_id.is_some() {
+        return Err(Error::InvalidUi("SKU は購入ボタンに指定してください。"));
+    }
     if button.label.as_deref().is_some_and(|label| {
         exceeds_character_limit(label, component::COMPONENT_BUTTON_LABEL_LENGTH)
     }) {
@@ -1138,8 +1174,7 @@ fn check_button<'a>(button: &'a RawButton, ids: &mut HashSet<&'a str>) -> Result
     {
         return Err(Error::InvalidUi("Unicode 絵文字を指定してください。"));
     }
-    if button.style != ButtonStyle::Premium
-        && button.emoji.is_none()
+    if button.emoji.is_none()
         && button
             .label
             .as_deref()
@@ -1158,7 +1193,18 @@ fn check_button<'a>(button: &'a RawButton, ids: &mut HashSet<&'a str>) -> Result
     if let Some(id) = button.custom_id.as_deref() {
         check_custom_id(ids, id)?;
     }
+    component::button(button)?;
     Ok(())
+}
+
+fn contains_premium_button(component: &Component) -> bool {
+    match component {
+        Component::Button(button) => button.style == ButtonStyle::Premium,
+        Component::ActionRow(row) => row.components.iter().any(contains_premium_button),
+        Component::Container(container) => container.components.iter().any(contains_premium_button),
+        Component::Section(section) => contains_premium_button(&section.accessory),
+        _ => false,
+    }
 }
 
 fn is_absolute_http_url(url: &str) -> bool {
@@ -1308,6 +1354,79 @@ fn validate_custom_id(id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn premium_button_validates_and_serializes_in_both_message_formats() -> crate::Result<()> {
+        use super::{ComponentsV2, Id};
+        use serde_json::{json, to_value};
+
+        let button = Button::premium(Id::new(123)).disabled(true);
+        let legacy =
+            UiMessage::new().buttons(vec![Button::primary("ordinary", "開く"), button.clone()]);
+        let v2 = ComponentsV2::new()
+            .container(0, ComponentsV2::new().section_with_button(["購入"], button));
+        legacy.validate()?;
+        v2.validate()?;
+        assert!(legacy.has_premium_button());
+        assert!(v2.has_premium_button());
+        assert!(
+            !UiMessage::new()
+                .buttons(vec![Button::primary("p", "p")])
+                .has_premium_button()
+        );
+        assert!(!ComponentsV2::new().text("通常").has_premium_button());
+
+        let expected = json!({"type": 2, "style": 6, "sku_id": "123", "disabled": true});
+        let legacy = to_value(&legacy.components).map_err(crate::Error::handler)?;
+        let v2 = to_value(&v2.components).map_err(crate::Error::handler)?;
+        assert_eq!(legacy.pointer("/0/components/1"), Some(&expected));
+        assert_eq!(v2.pointer("/0/components/0/accessory"), Some(&expected));
+        Ok(())
+    }
+
+    #[test]
+    fn premium_button_rejects_conflicting_fields_and_missing_sku() {
+        use super::{ComponentsV2, EmojiReactionType, Id, RawButton};
+
+        let button = Button::premium(Id::new(123)).0;
+        for raw in [
+            RawButton {
+                custom_id: Some("forbidden".into()),
+                ..button.clone()
+            },
+            RawButton {
+                label: Some(String::new()),
+                ..button.clone()
+            },
+            RawButton {
+                url: Some("https://example.test".into()),
+                ..button.clone()
+            },
+            Button(button.clone())
+                .emoji(EmojiReactionType::Unicode { name: "✅".into() })
+                .0,
+            RawButton {
+                sku_id: None,
+                ..button
+            },
+        ] {
+            assert!(
+                UiMessage::new()
+                    .buttons(vec![Button(raw.clone())])
+                    .validate()
+                    .is_err()
+            );
+            assert!(
+                ComponentsV2::new()
+                    .buttons(vec![Button(raw)])
+                    .validate()
+                    .is_err()
+            );
+        }
+        let mut ordinary = Button::primary("test", "test");
+        ordinary.0.sku_id = Some(Id::new(123));
+        assert!(UiMessage::new().buttons(vec![ordinary]).validate().is_err());
+    }
+
     #[test]
     fn link_and_styled_buttons_work_with_both_message_formats() {
         use super::{ComponentsV2, EmojiReactionType};

@@ -1,6 +1,7 @@
 #![doc = include_str!("../docs/api.md")]
 
 mod autocomplete;
+mod channel_ui;
 mod command_check;
 mod commands;
 mod concurrency;
@@ -1259,6 +1260,18 @@ impl<'a> Context<'a> {
     /// メッセージの構成が無効、または Discord が送信を受け付けない場合に失敗します。
     pub async fn reply_ui(&self, message: &ui::UiMessage) -> Result<()> {
         message.validate()?;
+        if message.has_premium_button() {
+            return channel_ui::reply_with_premium_button(
+                self.http,
+                self.message,
+                message.content.as_deref(),
+                &message.embeds,
+                &message.components,
+                None,
+                &[],
+            )
+            .await;
+        }
         let mentions = AllowedMentions::default();
         let mut request = self
             .http
@@ -1285,6 +1298,19 @@ impl<'a> Context<'a> {
     pub async fn reply_v2(&self, message: &ui::ComponentsV2) -> Result<()> {
         message.validate()?;
         message.validate_attachment_references(&[])?;
+        validation::channel_message_upload_size(&message.attachments)?;
+        if message.has_premium_button() {
+            return channel_ui::reply_with_premium_button(
+                self.http,
+                self.message,
+                None,
+                &[],
+                &message.components,
+                Some(MessageFlags::IS_COMPONENTS_V2),
+                &message.attachments,
+            )
+            .await;
+        }
         let mentions = AllowedMentions::default();
         let mut request = self
             .http

@@ -23,11 +23,12 @@ use twilight_validate::{
     message,
 };
 
-use crate::{Error, Result};
+use crate::{Error, Result, validation::AttachmentLimits};
 
 use super::{
     Button, ChannelSelect, MentionableSelect, RoleSelect, StringSelect, UserSelect, button_row,
-    check_button, check_row, exceeds_character_limit, is_absolute_http_url, select_row,
+    check_button, check_row, contains_premium_button, exceeds_character_limit,
+    is_absolute_http_url, select_row,
 };
 
 const TOTAL_TEXT_LENGTH: usize = 4_000;
@@ -101,6 +102,7 @@ fn unfurled(url: String) -> UnfurledMediaItem {
 pub struct ComponentsV2 {
     pub(crate) components: Vec<Component>,
     pub(crate) attachments: Vec<Attachment>,
+    attachment_limits: AttachmentLimits,
 }
 
 impl std::fmt::Debug for ComponentsV2 {
@@ -113,6 +115,10 @@ impl std::fmt::Debug for ComponentsV2 {
 }
 
 impl ComponentsV2 {
+    pub(crate) fn has_premium_button(&self) -> bool {
+        self.components.iter().any(contains_premium_button)
+    }
+
     /// 空のメッセージを作ります。送信前に部品を追加します。
     pub fn new() -> Self {
         Self::default()
@@ -265,6 +271,7 @@ impl ComponentsV2 {
         spoiler: Option<bool>,
         contents: Self,
     ) -> Self {
+        self.attachment_limits = self.attachment_limits.restrict(contents.attachment_limits);
         self.attachments.extend(contents.attachments);
         self.component(Component::Container(Container {
             accent_color: accent_color.map(Some),
@@ -277,6 +284,15 @@ impl ComponentsV2 {
     /// Twilight の部品をそのまま追加します。送信前にメッセージ上の配置と制限を検証します。
     pub fn component(mut self, component: Component) -> Self {
         self.components.push(component);
+        self
+    }
+
+    /// 新しい添付ファイルに共通のアプリ上限を指定します。
+    ///
+    /// バイト数は新規アップロード、件数は編集時に保持する添付も対象です。
+    /// Discord の上限も送信時に確認します。
+    pub fn attachment_limits(mut self, limits: AttachmentLimits) -> Self {
+        self.attachment_limits = limits;
         self
     }
 
@@ -298,12 +314,15 @@ impl ComponentsV2 {
         for component in &self.components {
             limits.check(component)?;
         }
-        message::components(&self.components, true)?;
         self.validate_attachments()
     }
 
+    pub(crate) fn needs_existing_attachments(&self) -> bool {
+        !self.attachments.is_empty() || self.attachment_limits.limits_retained_count()
+    }
+
     fn validate_attachments(&self) -> Result<()> {
-        crate::validation::attachment_count(0, self.attachments.len())?;
+        self.attachment_limits.validate_uploads(&self.attachments)?;
         let mut ids = HashSet::new();
         let mut names = HashSet::new();
         for attachment in &self.attachments {
@@ -325,7 +344,8 @@ impl ComponentsV2 {
         &self,
         retained: &[ReceivedAttachment],
     ) -> Result<()> {
-        crate::validation::attachment_count(retained.len(), self.attachments.len())?;
+        self.attachment_limits
+            .count(retained.len(), self.attachments.len())?;
         let check = |url: &str| {
             if let Some(filename) = attachment_filename(url)
                 && !self
@@ -444,6 +464,11 @@ impl<'a> Limits<'a> {
                     }
                 }
                 for child in &section.components {
+                    if !matches!(child, Component::TextDisplay(_)) {
+                        return Err(Error::InvalidUi(
+                            "セクションの本文にはテキスト表示を置いてください。",
+                        ));
+                    }
                     self.check(child)?;
                 }
             }
@@ -461,6 +486,11 @@ impl<'a> Limits<'a> {
                     ));
                 }
                 for child in &container.components {
+                    if matches!(child, Component::Container(_)) {
+                        return Err(Error::InvalidUi(
+                            "コンテナーの中にコンテナーは配置できません。",
+                        ));
+                    }
                     self.check(child)?;
                 }
             }
