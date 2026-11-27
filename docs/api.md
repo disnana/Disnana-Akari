@@ -87,6 +87,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | メソッド | 動作 |
 | --- | --- |
 | `SlashCommands::for_guild(guild_id) -> SlashCommands` | Discord のサーバー ID を指定して空のコマンド一覧を作ります。ID の型は `Id<GuildMarker>` です。 |
+| `commands.group(name, description) -> Result<CommandGroup>` | サブコマンドをまとめるコマンドを作ります。`group.subcommand(name, description, options, handler)` と、`group.group(name, description)`（さらに 1 段）で登録します。 |
 | `SlashCommands::global() -> SlashCommands` | アプリ全体（すべてのサーバーと DM）向けに空のコマンド一覧を作ります。Discord 側の反映に時間がかかることがあります。 |
 | `commands.replace_commands() -> SlashCommands` | 起動時に、このアプリの同じ範囲（サーバー、またはグローバル）の全コマンドを、登録した一覧に一括で置き換えます。 |
 | `commands.register(name, description, options, handler) -> Result<()>` | 表示名、説明、引数の定義、呼び出す非同期関数を登録します。Discord の名前や説明の制約、重複名を検証します。 |

@@ -220,6 +220,12 @@ pub enum RegistrationError {
         /// 登録しようとしたハンドラーの種類です。
         kind: HandlerKind,
     },
+    /// サブコマンドのグループの中に、さらにグループを作ろうとしました。
+    #[error("グループ `{name}` は、グループの中には作れません")]
+    NestedGroup {
+        /// 作ろうとしたグループの名前です。
+        name: String,
+    },
     /// 登録されていないコマンドの設定を変えようとしました。
     #[error("コマンド `{name}` は登録されていません")]
     UnknownCommand {

@@ -128,13 +128,47 @@ async fn double(ctx: &mut SlashContext<'_>) -> std::result::Result<(), Box<dyn s
 
 テキストとスラッシュを兼ねる[ハイブリッドコマンド](hybrid-commands.md)でも、`ctx.parse::<T>(name)` を同じように使えます（文字列の引数が対象です）。
 
+## サブコマンドにまとめる
+
+`/config set`、`/config advanced reset` のように、コマンドをまとめるには `SlashCommands::group` を使います。返された `CommandGroup` に `subcommand` を登録します。グループの中にグループ（`group`）も作れますが、Discord の制約で最大 3 段（コマンド → グループ → サブコマンド）までです。
+
+```rust
+use disnana_akari::{Result, SlashCommands, SlashContext};
+
+fn register(slash: &mut SlashCommands) -> Result<()> {
+    let mut config = slash.group("config", "設定を変更します")?;
+    let value = SlashCommands::string_option("value", "設定する値", true);
+    config.subcommand("set", "値を設定します", vec![value], set)?;
+
+    let mut advanced = config.group("advanced", "詳細な設定")?;
+    advanced.subcommand("reset", "初期化します", vec![], reset)?;
+    Ok(())
+}
+
+async fn set(ctx: &mut SlashContext<'_>) -> Result<()> {
+    // サブコマンドの引数は、そのまま ctx.string などで受け取れます
+    let value = ctx.string("value").unwrap_or_default();
+    ctx.reply(&format!("{value} に設定しました")).await
+}
+
+async fn reset(ctx: &mut SlashContext<'_>) -> Result<()> {
+    ctx.reply("初期化しました").await
+}
+```
+
+- サブコマンドを持つコマンド自体（`/config` だけ）は、Discord の制約で実行できません。
+- 同じ名前の普通のコマンドと、グループは両立しません。
+- `ctx.command_path()` は、`["config", "advanced", "reset"]` のように呼ばれた経路を返します。`Bot::on_error` に渡る名前も `config advanced reset` の形です。
+- `default_member_permissions("config", ..)` は、グループ全体にかかります。
+
 ## 呼び出した人やチャンネルを調べる
 
 | メソッド | 返す値 |
 | --- | --- |
 | `ctx.author_id()` | 呼び出したユーザーの ID |
 | `ctx.channel_id()` | コマンドが実行されたチャンネルの ID |
-| `ctx.option(name)` | 引数（Twilight の値） |
+| `ctx.option(name)` | 引数（Twilight の値。サブコマンドの引数も同じ名前で取れます） |
+| `ctx.command_path()` | コマンド名とサブコマンド名の経路（`["config", "set"]`） |
 | `ctx.string(name)` | 文字列の引数 |
 | `ctx.integer(name)` / `ctx.number(name)` / `ctx.boolean(name)` | 整数、数値、真偽値の引数 |
 | `ctx.parse::<T>(name)` | 文字列の引数を `FromStr` で変換した結果 |

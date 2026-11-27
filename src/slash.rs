@@ -11,7 +11,7 @@ use twilight_model::{
         command::{Command, CommandOption, CommandOptionType, CommandType},
         interaction::{
             Interaction, InteractionData, InteractionType,
-            application_command::{CommandData, CommandOptionValue},
+            application_command::{CommandData, CommandDataOption, CommandOptionValue},
         },
     },
     channel::message::{AllowedMentions, MessageFlags},
@@ -126,9 +126,46 @@ impl SlashCommands {
                     description: description.into(),
                     options,
                     default_permissions: None,
-                    handler: Box::new(adapt_handler!(handler, ctx: &mut SlashContext<'_>)),
+                    handler: Some(Box::new(
+                        adapt_handler!(handler, ctx: &mut SlashContext<'_>),
+                    )),
+                    children: BTreeMap::new(),
                 });
                 Ok(())
+            }
+            Entry::Occupied(_) => Err(RegistrationError::Duplicate {
+                kind: HandlerKind::SlashCommand,
+                name: name.to_owned(),
+            }
+            .into()),
+        }
+    }
+
+    /// サブコマンドをまとめるコマンドを作ります。`/config set` の `config` にあたります。
+    ///
+    /// 返された [`CommandGroup`] に [`subcommand`](CommandGroup::subcommand) を登録します。
+    /// 同じ名前の普通のコマンドがあるとき、またはグループがすでにあるときは失敗します。
+    /// Discord の制約で、サブコマンドを持つコマンド自体は、実行できません。
+    ///
+    /// # エラー
+    ///
+    /// 名前や説明が Discord の制約に合わない場合と、重複した名前を拒否します。
+    pub fn group(&mut self, name: &str, description: &str) -> Result<CommandGroup<'_>> {
+        command::chat_input_name(name)?;
+        command::description(description)?;
+        match self.entries.entry(name.into()) {
+            Entry::Vacant(entry) => {
+                let definition = entry.insert(Definition {
+                    description: description.into(),
+                    options: Vec::new(),
+                    default_permissions: None,
+                    handler: None,
+                    children: BTreeMap::new(),
+                });
+                Ok(CommandGroup {
+                    root: definition,
+                    group: None,
+                })
             }
             Entry::Occupied(_) => Err(RegistrationError::Duplicate {
                 kind: HandlerKind::SlashCommand,
@@ -247,12 +284,13 @@ impl SlashCommands {
                     name: name.clone(),
                     source,
                 };
+                let options = definition.option_tree();
                 let command = match self.scope {
                     Scope::Guild(guild_id) => {
                         let mut request = client
                             .create_guild_command(guild_id)
                             .chat_input(name, &definition.description)
-                            .command_options(&definition.options);
+                            .command_options(&options);
                         if let Some(permissions) = definition.default_permissions {
                             request = request.default_member_permissions(permissions);
                         }
@@ -262,7 +300,7 @@ impl SlashCommands {
                         let mut request = client
                             .create_global_command()
                             .chat_input(name, &definition.description)
-                            .command_options(&definition.options);
+                            .command_options(&options);
                         if let Some(permissions) = definition.default_permissions {
                             request = request.default_member_permissions(permissions);
                         }
@@ -305,7 +343,7 @@ impl SlashCommands {
                     name: name.clone(),
                     name_localizations: None,
                     nsfw: None,
-                    options: definition.options.clone(),
+                    options: definition.option_tree(),
                     version: Id::new(1),
                 };
                 command::command(&command)?;
@@ -337,7 +375,7 @@ impl SlashCommands {
                 .remove(&name)
                 .ok_or_else(|| CommandSyncError::UnexpectedName { name: name.clone() })?;
             if let std::collections::hash_map::Entry::Vacant(entry) = handlers.entry(id) {
-                entry.insert(definition.handler);
+                entry.insert(definition.into_route());
             } else {
                 return Err(CommandSyncError::DuplicateId { name }.into());
             }
@@ -350,16 +388,271 @@ impl SlashCommands {
     }
 }
 
+/// サブコマンドを登録する先です。[`SlashCommands::group`] で作ります。
+///
+/// Discord では、`コマンド` → `グループ` → `サブコマンド` の最大 3 段まで作れます。
+///
+/// ```
+/// use disnana_akari::{Result, SlashCommands, SlashContext};
+///
+/// async fn set(ctx: &mut SlashContext<'_>) -> Result<()> {
+///     ctx.reply("設定しました").await
+/// }
+///
+/// # fn main() -> Result<()> {
+/// let mut slash = SlashCommands::global();
+/// let mut config = slash.group("config", "設定を変更します")?;
+/// config.subcommand("set", "値を設定します", vec![], set)?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug)]
+pub struct CommandGroup<'a> {
+    root: &'a mut Definition,
+    /// サブコマンドをまとめるグループの中にいるときの、そのグループ名。
+    group: Option<String>,
+}
+
+impl std::fmt::Debug for Definition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Definition")
+            .field("description", &self.description)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CommandGroup<'_> {
+    /// サブコマンドを登録します。
+    ///
+    /// # エラー
+    ///
+    /// Discord の制約に合わない定義や、同じ階層で重複した名前を拒否します。
+    pub fn subcommand<E>(
+        &mut self,
+        name: &str,
+        description: &str,
+        options: Vec<CommandOption>,
+        handler: impl AsyncFn(&mut SlashContext<'_>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        command::chat_input_name(name)?;
+        command::description(description)?;
+        command::options(&options)?;
+        let definition = SubDefinition {
+            description: description.into(),
+            options,
+            handler: Box::new(adapt_handler!(handler, ctx: &mut SlashContext<'_>)),
+        };
+        let siblings = match &self.group {
+            None => &mut self.root.children,
+            Some(group) => match self.root.children.get_mut(group) {
+                Some(Child::Group { subs, .. }) => return insert_sub(subs, name, definition),
+                _ => unreachable!("グループは作成時に登録済み"),
+            },
+        };
+        match siblings.entry(name.into()) {
+            Entry::Vacant(entry) => {
+                entry.insert(Child::Sub(definition));
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(duplicate_sub(name)),
+        }
+    }
+
+    /// サブコマンドをまとめるグループを作ります。`/config advanced set` の `advanced` にあたります。
+    ///
+    /// グループの中に、さらにグループは作れません。
+    ///
+    /// # エラー
+    ///
+    /// 名前や説明が Discord の制約に合わない場合、重複した名前、グループの中でさらにグループを
+    /// 作ろうとした場合に失敗します。
+    pub fn group(&mut self, name: &str, description: &str) -> Result<CommandGroup<'_>> {
+        if self.group.is_some() {
+            return Err(RegistrationError::NestedGroup {
+                name: name.to_owned(),
+            }
+            .into());
+        }
+        command::chat_input_name(name)?;
+        command::description(description)?;
+        match self.root.children.entry(name.into()) {
+            Entry::Vacant(entry) => {
+                entry.insert(Child::Group {
+                    description: description.into(),
+                    subs: BTreeMap::new(),
+                });
+            }
+            Entry::Occupied(_) => return Err(duplicate_sub(name)),
+        }
+        Ok(CommandGroup {
+            root: &mut *self.root,
+            group: Some(name.to_owned()),
+        })
+    }
+}
+
+fn insert_sub(
+    subs: &mut BTreeMap<String, SubDefinition>,
+    name: &str,
+    definition: SubDefinition,
+) -> Result<()> {
+    match subs.entry(name.into()) {
+        Entry::Vacant(entry) => {
+            entry.insert(definition);
+            Ok(())
+        }
+        Entry::Occupied(_) => Err(duplicate_sub(name)),
+    }
+}
+
+fn duplicate_sub(name: &str) -> Error {
+    RegistrationError::Duplicate {
+        kind: HandlerKind::SlashCommand,
+        name: name.to_owned(),
+    }
+    .into()
+}
+
+/// コマンド名に、呼ばれたサブコマンドとグループの名前を続けた経路。
+fn command_path(data: &CommandData) -> Vec<&str> {
+    let mut path = vec![data.name.as_str()];
+    let mut options = data.options.as_slice();
+    while let [option] = options {
+        match &option.value {
+            CommandOptionValue::SubCommand(inner) | CommandOptionValue::SubCommandGroup(inner) => {
+                path.push(option.name.as_str());
+                options = inner;
+            }
+            _ => break,
+        }
+    }
+    path
+}
+
+/// サブコマンドの入れ子をたどった先の、実際の引数。
+fn leaf_options(mut options: &[CommandDataOption]) -> &[CommandDataOption] {
+    while let [option] = options {
+        match &option.value {
+            CommandOptionValue::SubCommand(inner) | CommandOptionValue::SubCommandGroup(inner) => {
+                options = inner;
+            }
+            _ => break,
+        }
+    }
+    options
+}
+
 struct Definition {
     description: String,
     options: Vec<CommandOption>,
     default_permissions: Option<Permissions>,
+    /// サブコマンドを持たない、普通のコマンドの関数。
+    handler: Option<Box<dyn SlashHandler>>,
+    /// サブコマンドと、そのグループ。持つ場合、`options` と `handler` は使わない。
+    children: BTreeMap<String, Child>,
+}
+
+enum Child {
+    Sub(SubDefinition),
+    Group {
+        description: String,
+        subs: BTreeMap<String, SubDefinition>,
+    },
+}
+
+struct SubDefinition {
+    description: String,
+    options: Vec<CommandOption>,
     handler: Box<dyn SlashHandler>,
+}
+
+impl Definition {
+    /// Discord に送る引数の一覧。サブコマンドを持つ場合は、その入れ子を作る。
+    fn option_tree(&self) -> Vec<CommandOption> {
+        if self.children.is_empty() {
+            return self.options.clone();
+        }
+        let nested = |kind, name: &String, description: &str, options: Vec<CommandOption>| {
+            let mut option = SlashCommands::typed_option(kind, name, description, false);
+            option.required = None;
+            option.options = Some(options);
+            option
+        };
+        self.children
+            .iter()
+            .map(|(name, child)| match child {
+                Child::Sub(sub) => nested(
+                    CommandOptionType::SubCommand,
+                    name,
+                    &sub.description,
+                    sub.options.clone(),
+                ),
+                Child::Group { description, subs } => nested(
+                    CommandOptionType::SubCommandGroup,
+                    name,
+                    description,
+                    subs.iter()
+                        .map(|(name, sub)| {
+                            nested(
+                                CommandOptionType::SubCommand,
+                                name,
+                                &sub.description,
+                                sub.options.clone(),
+                            )
+                        })
+                        .collect(),
+                ),
+            })
+            .collect()
+    }
+
+    /// 受信側で、呼ぶ関数を引くための表に変える。
+    fn into_route(self) -> Route {
+        let mut subs = HashMap::new();
+        for (name, child) in self.children {
+            match child {
+                Child::Sub(sub) => {
+                    subs.insert(vec![name], sub.handler);
+                }
+                Child::Group { subs: inner, .. } => {
+                    for (sub_name, sub) in inner {
+                        subs.insert(vec![name.clone(), sub_name], sub.handler);
+                    }
+                }
+            }
+        }
+        Route {
+            root: self.handler,
+            subs,
+        }
+    }
+}
+
+/// 一つのコマンドについて、サブコマンドの経路ごとの関数。
+struct Route {
+    root: Option<Box<dyn SlashHandler>>,
+    subs: HashMap<Vec<String>, Box<dyn SlashHandler>>,
+}
+
+impl Route {
+    fn find(&self, path: &[&str]) -> Option<&dyn SlashHandler> {
+        if path.is_empty() {
+            return self.root.as_deref();
+        }
+        let key: Vec<String> = path.iter().map(|part| (*part).to_owned()).collect();
+        self.subs.get(&key).map(AsRef::as_ref)
+    }
 }
 
 pub(crate) struct ActiveSlashCommands {
     scope: Scope,
-    handlers: HashMap<Id<CommandMarker>, Box<dyn SlashHandler>>,
+    handlers: HashMap<Id<CommandMarker>, Route>,
 }
 
 impl ActiveSlashCommands {
@@ -399,14 +692,20 @@ impl ActiveSlashCommands {
         let Some(data) = self.command_data(interaction) else {
             return;
         };
-        let name = Some(data.name.as_str());
+        let path = command_path(data);
+        let full_name = path.join(" ");
+        let name = Some(full_name.as_str());
         let initial = InitialResponder {
             http,
             interaction,
             timing,
             info: &hooks.info,
         };
-        let Some(handler) = self.handlers.get(&data.id) else {
+        let Some(handler) = self
+            .handlers
+            .get(&data.id)
+            .and_then(|route| route.find(&path[1..]))
+        else {
             hooks
                 .reporter
                 .report(ErrorSource::SlashCommand, name, &Error::CommandUnavailable);
@@ -541,12 +840,20 @@ impl<'a> SlashContext<'a> {
     }
 
     /// 指定した名前の引数を Twilight の値として返します。
+    ///
+    /// サブコマンドで呼ばれたときは、その引数を探します。
     pub fn option(&self, name: &str) -> Option<&'a CommandOptionValue> {
-        self.data
-            .options
+        leaf_options(&self.data.options)
             .iter()
             .find(|option| option.name == name)
             .map(|option| &option.value)
+    }
+
+    /// コマンド名と、サブコマンドの名前を、呼ばれた順に返します。
+    ///
+    /// `/config set` なら `["config", "set"]`、サブコマンドのないコマンドなら `["ping"]` です。
+    pub fn command_path(&self) -> Vec<&'a str> {
+        command_path(self.data)
     }
 
     /// 文字列の引数を借ります。未入力または別の型なら `None` を返します。
@@ -993,10 +1300,11 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        ActiveSlashCommands, AllowedMentions, CommandOptionType, CommandType, GuildMarker, Id,
-        InitialResponse, Interaction, InteractionResponseType, MessageFlags, Permissions,
-        ReplyAction, ResponseState, Result, Scope, SlashCommands, SlashContext, SlashHandler,
-        initial_response, v2_update_response,
+        ActiveSlashCommands, AllowedMentions, CommandData, CommandDataOption, CommandOptionType,
+        CommandOptionValue, CommandType, GuildMarker, Id, InitialResponse, Interaction,
+        InteractionResponseType, MessageFlags, Permissions, ReplyAction, ResponseState, Result,
+        Route, Scope, SlashCommands, SlashContext, command_path, initial_response, leaf_options,
+        v2_update_response,
     };
     use crate::ui::{Button, ComponentsV2, Embed, UiMessage};
 
@@ -1078,10 +1386,15 @@ mod tests {
     }
 
     fn active(scope: Scope) -> ActiveSlashCommands {
-        let mut handlers: HashMap<_, Box<dyn SlashHandler>> = HashMap::new();
+        let mut handlers = HashMap::new();
         handlers.insert(
             Id::new(5),
-            Box::new(async |_: &mut SlashContext<'_>| -> Result<()> { Ok(()) }),
+            Route {
+                root: Some(Box::new(async |_: &mut SlashContext<'_>| -> Result<()> {
+                    Ok(())
+                })),
+                subs: HashMap::new(),
+            },
         );
         ActiveSlashCommands { scope, handlers }
     }
@@ -1126,6 +1439,112 @@ mod tests {
             commands[0].default_member_permissions,
             Some(Permissions::BAN_MEMBERS)
         );
+        Ok(())
+    }
+
+    fn option(name: &str, value: CommandOptionValue) -> CommandDataOption {
+        CommandDataOption {
+            name: name.into(),
+            value,
+        }
+    }
+
+    #[test]
+    fn groups_build_a_nested_option_tree_and_route_to_the_right_handler() -> Result<()> {
+        let mut slash = SlashCommands::for_guild(Id::new(1));
+        {
+            let mut config = slash.group("config", "設定")?;
+            config.subcommand(
+                "set",
+                "値を設定",
+                vec![SlashCommands::string_option("value", "値", true)],
+                handler,
+            )?;
+            assert!(config.subcommand("set", "重複", vec![], handler).is_err());
+            let mut advanced = config.group("advanced", "詳細")?;
+            advanced.subcommand("reset", "初期化", vec![], handler)?;
+            // グループの中に、さらにグループは作れない。
+            assert!(advanced.group("deeper", "もっと").is_err());
+        }
+        // 同じ名前の普通のコマンドや、グループは作れない。
+        assert!(slash.register("config", "重複", vec![], handler).is_err());
+        assert!(slash.group("config", "重複").is_err());
+
+        let commands = {
+            let mut replacing = slash;
+            replacing.replace = true;
+            replacing.replacement_commands()?
+        };
+        let options = commands[0].options.clone();
+        let names: Vec<_> = options.iter().map(|o| (o.name.as_str(), o.kind)).collect();
+        assert_eq!(
+            names,
+            [
+                ("advanced", CommandOptionType::SubCommandGroup),
+                ("set", CommandOptionType::SubCommand)
+            ]
+        );
+        let set = &options[1];
+        assert_eq!(set.required, None);
+        assert_eq!(set.options.as_ref().map(Vec::len), Some(1));
+        let reset = &options[0].options.as_ref().unwrap()[0];
+        assert_eq!(
+            (reset.name.as_str(), reset.kind),
+            ("reset", CommandOptionType::SubCommand)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn subcommand_path_and_options_are_read_through_the_nesting() {
+        let inner = vec![option("value", CommandOptionValue::String("x".into()))];
+        let group = vec![option("set", CommandOptionValue::SubCommand(inner))];
+        let options = vec![option(
+            "advanced",
+            CommandOptionValue::SubCommandGroup(group),
+        )];
+        let data = CommandData {
+            guild_id: None,
+            id: Id::new(1),
+            kind: CommandType::ChatInput,
+            name: "config".into(),
+            options,
+            resolved: None,
+            target_id: None,
+        };
+        assert_eq!(command_path(&data), ["config", "advanced", "set"]);
+        let leaf = leaf_options(&data.options);
+        assert_eq!(leaf.len(), 1);
+        assert_eq!(leaf[0].name, "value");
+
+        let plain = CommandData {
+            options: vec![option("value", CommandOptionValue::Integer(3))],
+            ..data
+        };
+        assert_eq!(command_path(&plain), ["config"]);
+        assert_eq!(leaf_options(&plain.options).len(), 1);
+    }
+
+    #[test]
+    fn route_finds_subcommands_by_path_and_keeps_the_root_separate() -> Result<()> {
+        let mut slash = SlashCommands::for_guild(Id::new(1));
+        {
+            let mut config = slash.group("config", "設定")?;
+            config.subcommand("set", "値を設定", vec![], handler)?;
+        }
+        slash.register("ping", "応答", vec![], handler)?;
+        let mut routes: HashMap<_, _> = slash
+            .entries
+            .into_iter()
+            .map(|(name, definition)| (name, definition.into_route()))
+            .collect();
+        let config = routes.remove("config").unwrap();
+        assert!(config.find(&[]).is_none());
+        assert!(config.find(&["set"]).is_some());
+        assert!(config.find(&["missing"]).is_none());
+        let ping = routes.remove("ping").unwrap();
+        assert!(ping.find(&[]).is_some());
+        assert!(ping.find(&["set"]).is_none());
         Ok(())
     }
 
