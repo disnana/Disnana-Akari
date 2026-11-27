@@ -13,7 +13,7 @@ use twilight_model::{
             CommandOptionType, CommandType,
         },
         interaction::{
-            Interaction, InteractionData, InteractionType,
+            Interaction, InteractionData, InteractionDataResolved, InteractionType,
             application_command::{CommandData, CommandDataOption, CommandOptionValue},
         },
     },
@@ -466,6 +466,16 @@ impl SlashCommands {
     /// チャンネルの選択肢を、チャンネル ID として受け取るための引数を作ります。
     pub fn channel_option(name: &str, description: &str, required: bool) -> CommandOption {
         Self::typed_option(CommandOptionType::Channel, name, description, required)
+    }
+
+    /// ユーザーまたはロールを一つ選ぶ引数を作ります。
+    pub fn mentionable_option(name: &str, description: &str, required: bool) -> CommandOption {
+        Self::typed_option(CommandOptionType::Mentionable, name, description, required)
+    }
+
+    /// 添付ファイルを受け取る引数を作ります。
+    pub fn attachment_option(name: &str, description: &str, required: bool) -> CommandOption {
+        Self::typed_option(CommandOptionType::Attachment, name, description, required)
     }
 
     fn typed_option(
@@ -1502,6 +1512,11 @@ impl<'a> SlashContext<'a> {
 
     pub(crate) fn leaf_options(&self) -> &'a [CommandDataOption] {
         leaf_options(&self.data.options)
+    }
+
+    /// Discord がこのコマンドと一緒に送った、解決済みの添付ファイルやユーザーなどの情報を借ります。
+    pub fn resolved(&self) -> Option<&'a InteractionDataResolved> {
+        self.data.resolved.as_ref()
     }
 
     /// コマンド名と、サブコマンドの名前を、呼ばれた順に返します。
@@ -3161,10 +3176,11 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn registered_hybrid_group_dispatches_aliased_nested_and_fallback_routes() -> Result<()> {
         use crate::{
-            CommandSource, Commands, Context, HybridArguments, HybridContext,
+            CommandSource, Commands, Context, HybridArguments, HybridContext, Mentionable,
             permissions::PermissionResolver, register_hybrid_group_with_aliases, timing::Pending,
         };
         use std::sync::{Arc, Mutex};
+        use twilight_model::application::interaction::InteractionDataResolved;
 
         let mut text = Commands::new("!")?;
         let mut slash = SlashCommands::global();
@@ -3183,7 +3199,7 @@ pub(crate) mod tests {
                     async move |ctx: &mut HybridContext<'_>,
                                 _: HybridArguments<'_>|
                                 -> Result<()> {
-                        seen.lock().unwrap().push((ctx.source(), None));
+                        seen.lock().unwrap().push((ctx.source(), None, None, None));
                         Ok(())
                     },
                 )?;
@@ -3193,13 +3209,20 @@ pub(crate) mod tests {
                     "set",
                     "変更",
                     &["s"],
-                    vec![SlashCommands::integer_option("count", "個数", true)],
+                    vec![
+                        SlashCommands::attachment_option("file", "添付", true),
+                        SlashCommands::integer_option("count", "個数", true),
+                        SlashCommands::mentionable_option("actor", "対象", true),
+                    ],
                     async move |ctx: &mut HybridContext<'_>,
                                 args: HybridArguments<'_>|
                                 -> Result<()> {
-                        seen.lock()
-                            .unwrap()
-                            .push((ctx.source(), args.integer("count")));
+                        seen.lock().unwrap().push((
+                            ctx.source(),
+                            args.integer("count"),
+                            args.attachment("file").map(|attachment| attachment.id),
+                            args.mentionable("actor"),
+                        ));
                         Ok(())
                     },
                 )
@@ -3209,8 +3232,23 @@ pub(crate) mod tests {
         let http = Client::new("test".into());
         let permissions = PermissionResolver::new(None);
         let (_, timing) = Pending::new((), None).begin();
-        for content in ["!c a s 2", "!c unknown", "!c a missing 2", "!c show", "!c"] {
-            let message = test_command_message(content)?;
+        let resolved: InteractionDataResolved = serde_json::from_value(serde_json::json!({
+            "attachments": {"17": {"id":"17", "filename":"test.txt", "size":2,
+                "url":"https://example.test/file", "proxy_url":"https://example.test/file"}},
+            "users": {"19": {"id":"19", "username":"member", "discriminator":"0"}}
+        }))
+        .map_err(Error::handler)?;
+        for content in [
+            "!c a s 2 <@19>",
+            "!c unknown",
+            "!c a missing 2",
+            "!c show",
+            "!c",
+        ] {
+            let mut message = test_command_message(content)?;
+            message
+                .attachments
+                .extend(resolved.attachments.values().cloned());
             text.dispatch(Context {
                 http: &http,
                 message: &message,
@@ -3241,10 +3279,11 @@ pub(crate) mod tests {
                 "advanced",
                 CommandOptionValue::SubCommandGroup(vec![option(
                     "set",
-                    CommandOptionValue::SubCommand(vec![option(
-                        "count",
-                        CommandOptionValue::Integer(2),
-                    )]),
+                    CommandOptionValue::SubCommand(vec![
+                        option("count", CommandOptionValue::Integer(2)),
+                        option("actor", CommandOptionValue::Mentionable(Id::new(19))),
+                        option("file", CommandOptionValue::Attachment(Id::new(17))),
+                    ]),
                 )]),
             )],
             vec![option("show", CommandOptionValue::SubCommand(Vec::new()))],
@@ -3256,15 +3295,26 @@ pub(crate) mod tests {
             };
             data.name = "config".into();
             data.options = options;
+            data.resolved = Some(resolved.clone());
             active.dispatch(&http, &interaction, timing, &hooks).await;
         }
         assert_eq!(
             *calls.lock().unwrap(),
             [
-                (CommandSource::Text, Some(2)),
-                (CommandSource::Text, None),
-                (CommandSource::Slash, Some(2)),
-                (CommandSource::Slash, None),
+                (
+                    CommandSource::Text,
+                    Some(2),
+                    Some(Id::new(17)),
+                    Some(Mentionable::User(Id::new(19)))
+                ),
+                (CommandSource::Text, None, None, None),
+                (
+                    CommandSource::Slash,
+                    Some(2),
+                    Some(Id::new(17)),
+                    Some(Mentionable::User(Id::new(19)))
+                ),
+                (CommandSource::Slash, None, None, None),
             ]
         );
         Ok(())

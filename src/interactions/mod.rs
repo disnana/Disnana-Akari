@@ -358,7 +358,7 @@ fn parse_mentionables(
     parse_select_values(values, |id| resolve_mentionable(id, resolved))
 }
 
-fn resolve_mentionable(
+pub(crate) fn resolve_mentionable(
     id: Id<GenericMarker>,
     resolved: Option<&InteractionDataResolved>,
 ) -> Result<Mentionable> {
@@ -805,7 +805,7 @@ pub type RoleSelectContext<'a> = EntitySelectContext<'a, RoleMarker>;
 /// チャンネルセレクトが選択されたときの情報です。
 pub type ChannelSelectContext<'a> = EntitySelectContext<'a, ChannelMarker>;
 
-/// メンショナブルセレクトで選択できるユーザーまたはロールです。
+/// セレクトメニューやコマンドの引数で指定できるユーザーまたはロールです。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 #[non_exhaustive]
 pub enum Mentionable {

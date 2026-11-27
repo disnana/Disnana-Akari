@@ -5,15 +5,22 @@ use twilight_model::{
         command::{
             CommandOption, CommandOptionChoiceValue, CommandOptionType, CommandOptionValue as Bound,
         },
-        interaction::application_command::{CommandDataOption, CommandOptionValue},
+        interaction::{
+            InteractionDataResolved,
+            application_command::{CommandDataOption, CommandOptionValue},
+        },
     },
+    channel::Attachment,
     id::{
         Id,
-        marker::{ChannelMarker, RoleMarker, UserMarker},
+        marker::{ChannelMarker, GenericMarker, RoleMarker, UserMarker},
     },
 };
 
-use crate::{ArgumentError, Arguments, RegistrationError, Result};
+use crate::{
+    ArgumentError, Arguments, Mentionable, RegistrationError, Result,
+    interactions::resolve_mentionable,
+};
 
 /// 型付きハイブリッドコマンドが受け取った引数のエラーです。
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +39,12 @@ pub enum HybridArgumentError {
         name: String,
         /// 定義にある引数の種類です。
         kind: CommandOptionType,
+    },
+    /// ユーザーとロールのどちらを指すか一意に判定できませんでした。
+    #[error("引数 `{name}` のユーザーとロールを判別できません")]
+    AmbiguousMentionable {
+        /// 対象の引数名です。
+        name: String,
     },
     /// テキスト入力のクォートに問題がありました。
     #[error("引数 `{name}` の構文が無効です")]
@@ -62,8 +75,8 @@ pub struct HybridArguments<'a> {
     values: Vec<(&'a str, Value<'a>)>,
 }
 
-impl HybridArguments<'_> {
-    fn get(&self, name: &str) -> Option<&Value<'_>> {
+impl<'a> HybridArguments<'a> {
+    fn get(&self, name: &str) -> Option<&Value<'a>> {
         self.values
             .iter()
             .find_map(|(key, value)| (*key == name).then_some(value))
@@ -124,6 +137,22 @@ impl HybridArguments<'_> {
             _ => None,
         }
     }
+
+    /// ユーザーまたはロールの ID を、種類を区別して返します。
+    pub fn mentionable(&self, name: &str) -> Option<Mentionable> {
+        match self.get(name)? {
+            Value::Mentionable(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// 添付ファイルの情報を借ります。ファイル本体はダウンロードしません。
+    pub fn attachment(&self, name: &str) -> Option<&'a Attachment> {
+        match self.get(name)? {
+            Value::Attachment(value) => Some(*value),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -135,6 +164,8 @@ enum Value<'a> {
     User(Id<UserMarker>),
     Role(Id<RoleMarker>),
     Channel(Id<ChannelMarker>),
+    Mentionable(Mentionable),
+    Attachment(&'a Attachment),
 }
 
 impl<'a> Value<'a> {
@@ -147,6 +178,7 @@ impl<'a> Value<'a> {
             CommandOptionType::User => Self::User(parse_id(&token, &["<@!", "<@"])?),
             CommandOptionType::Role => Self::Role(parse_id(&token, &["<@&"])?),
             CommandOptionType::Channel => Self::Channel(parse_id(&token, &["<#"])?),
+            CommandOptionType::Mentionable => Self::Mentionable(parse_mentionable(&token)?),
             _ => return None,
         })
     }
@@ -215,6 +247,16 @@ fn parse_id<M>(token: &str, mention_prefixes: &[&str]) -> Option<Id<M>> {
     Id::new_checked(digits.parse().ok()?)
 }
 
+fn parse_mentionable(token: &str) -> Option<Mentionable> {
+    if token.starts_with("<@&") {
+        parse_id(token, &["<@&"]).map(Mentionable::Role)
+    } else if token.starts_with("<@") {
+        parse_id(token, &["<@!", "<@"]).map(Mentionable::User)
+    } else {
+        None
+    }
+}
+
 pub(super) struct HybridSchema {
     options: Vec<CommandOption>,
     bounds: Vec<Bounds>,
@@ -238,9 +280,17 @@ impl HybridSchema {
         &self.options
     }
 
-    pub(super) fn bind_text<'a>(&'a self, input: &'a str) -> Result<HybridArguments<'a>> {
+    pub(super) fn bind_text<'a>(
+        &'a self,
+        input: &'a str,
+        attachments: &'a [Attachment],
+    ) -> Result<HybridArguments<'a>> {
         let mut arguments = Arguments::new(input);
+        let mut files = attachments.iter();
         let values = self.bind(|option| {
+            if option.kind == CommandOptionType::Attachment {
+                return Ok(files.next().map(Value::Attachment));
+            }
             let Some(token) = arguments.next() else {
                 return Ok(None);
             };
@@ -248,6 +298,11 @@ impl HybridSchema {
                 name: option.name.clone(),
                 source,
             })?;
+            if option.kind == CommandOptionType::Mentionable
+                && parse_id::<GenericMarker>(&token, &[]).is_some()
+            {
+                return Err(ambiguous_mentionable(option));
+            }
             Value::from_text(option.kind, token)
                 .map(Some)
                 .ok_or_else(|| invalid_value(option))
@@ -261,14 +316,13 @@ impl HybridSchema {
     pub(super) fn bind_slash<'a>(
         &'a self,
         input: &'a [CommandDataOption],
+        resolved: Option<&'a InteractionDataResolved>,
     ) -> Result<HybridArguments<'a>> {
         let values = self.bind(|option| {
             let Some(value) = input.iter().find(|value| value.name == option.name) else {
                 return Ok(None);
             };
-            Value::from_slash(option.kind, &value.value)
-                .map(Some)
-                .ok_or_else(|| invalid_value(option))
+            slash_value(option, &value.value, resolved).map(Some)
         })?;
         if values.values.len() != input.len() {
             return Err(HybridArgumentError::UnexpectedArguments.into());
@@ -306,6 +360,32 @@ impl HybridSchema {
             }
         }
         Ok(HybridArguments { values })
+    }
+}
+
+fn slash_value<'a>(
+    option: &CommandOption,
+    value: &'a CommandOptionValue,
+    resolved: Option<&'a InteractionDataResolved>,
+) -> std::result::Result<Value<'a>, HybridArgumentError> {
+    match (option.kind, value) {
+        (CommandOptionType::Attachment, CommandOptionValue::Attachment(id)) => resolved
+            .and_then(|data| data.attachments.get(id))
+            .filter(|attachment| attachment.id == *id)
+            .map(Value::Attachment)
+            .ok_or_else(|| invalid_value(option)),
+        (CommandOptionType::Mentionable, CommandOptionValue::Mentionable(id)) => {
+            resolve_mentionable(*id, resolved)
+                .map(Value::Mentionable)
+                .map_err(|_| ambiguous_mentionable(option))
+        }
+        _ => Value::from_slash(option.kind, value).ok_or_else(|| invalid_value(option)),
+    }
+}
+
+fn ambiguous_mentionable(option: &CommandOption) -> HybridArgumentError {
+    HybridArgumentError::AmbiguousMentionable {
+        name: option.name.clone(),
     }
 }
 
@@ -390,7 +470,9 @@ impl Bounds {
             CommandOptionType::Boolean
             | CommandOptionType::User
             | CommandOptionType::Role
-            | CommandOptionType::Channel => Self::None,
+            | CommandOptionType::Channel
+            | CommandOptionType::Mentionable
+            | CommandOptionType::Attachment => Self::None,
             _ => return None,
         };
 
@@ -426,6 +508,7 @@ impl Bounds {
 mod tests {
     use super::*;
     use crate::{Error, SlashCommands};
+    use serde_json::json;
     use twilight_model::channel::ChannelType;
 
     fn option(name: &str, value: CommandOptionValue) -> CommandDataOption {
@@ -433,6 +516,149 @@ mod tests {
             name: name.into(),
             value,
         }
+    }
+
+    fn attachment(id: u64) -> Result<Attachment> {
+        serde_json::from_value(json!({
+            "id": id.to_string(), "filename": format!("{id}.txt"), "size": 3,
+            "url": "https://example.test/file", "proxy_url": "https://example.test/file"
+        }))
+        .map_err(Error::handler)
+    }
+
+    #[test]
+    fn attachments_follow_upload_order_without_consuming_tokens_and_resolve_by_slash_id()
+    -> Result<()> {
+        let schema = HybridSchema::new(vec![
+            SlashCommands::attachment_option("first", "添付", true),
+            SlashCommands::integer_option("count", "件数", true),
+            SlashCommands::attachment_option("second", "追加添付", false),
+            SlashCommands::string_option("note", "備考", false),
+        ])?;
+        let files = [attachment(7)?, attachment(8)?, attachment(9)?];
+        let text = schema.bind_text(r#"3 "hello world""#, &files)?;
+        assert!(std::ptr::eq(text.attachment("first").unwrap(), &files[0]));
+        assert!(std::ptr::eq(text.attachment("second").unwrap(), &files[1]));
+        assert_eq!(text.integer("count"), Some(3));
+        assert_eq!(text.string("note"), Some("hello world"));
+        assert!(
+            schema
+                .bind_text("3", &files[..1])?
+                .attachment("second")
+                .is_none()
+        );
+        assert!(
+            matches!(schema.bind_text("3", &[]), Err(Error::HybridArgument(HybridArgumentError::Missing { name })) if name == "first")
+        );
+        assert!(matches!(
+            schema.bind_text("3 note trailing", &files),
+            Err(Error::HybridArgument(
+                HybridArgumentError::UnexpectedArguments
+            ))
+        ));
+
+        let mut resolved: InteractionDataResolved =
+            serde_json::from_value(json!({})).map_err(Error::handler)?;
+        resolved.attachments = files.iter().cloned().map(|file| (file.id, file)).collect();
+        let input = [
+            option("second", CommandOptionValue::Attachment(Id::new(7))),
+            option("count", CommandOptionValue::Integer(3)),
+            option("first", CommandOptionValue::Attachment(Id::new(8))),
+        ];
+        let slash = schema.bind_slash(&input, Some(&resolved))?;
+        assert_eq!(
+            slash.attachment("first").map(|file| file.id),
+            Some(Id::new(8))
+        );
+        assert_eq!(
+            slash.attachment("second").map(|file| file.id),
+            Some(Id::new(7))
+        );
+        assert_eq!(slash.integer("count"), Some(3));
+        assert_eq!(slash.string("note"), None);
+        assert!(
+            schema
+                .bind_slash(&input[1..], Some(&resolved))?
+                .attachment("second")
+                .is_none()
+        );
+        assert!(
+            matches!(schema.bind_slash(&input, None), Err(Error::HybridArgument(HybridArgumentError::InvalidValue { name, kind: CommandOptionType::Attachment })) if name == "first")
+        );
+        resolved.attachments.insert(Id::new(8), attachment(99)?);
+        assert!(schema.bind_slash(&input, Some(&resolved)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn mentionable_requires_an_explicit_text_kind_or_one_matching_resolved_entity() -> Result<()> {
+        let schema = HybridSchema::new(vec![SlashCommands::mentionable_option(
+            "target", "対象", false,
+        )])?;
+        assert_eq!(schema.bind_text("", &[])?.mentionable("target"), None);
+        assert_eq!(
+            schema.bind_text("<@!8>", &[])?.mentionable("target"),
+            Some(Mentionable::User(Id::new(8)))
+        );
+        assert_eq!(
+            schema.bind_text("<@&8>", &[])?.mentionable("target"),
+            Some(Mentionable::Role(Id::new(8)))
+        );
+        assert!(
+            matches!(schema.bind_text("8", &[]), Err(Error::HybridArgument(HybridArgumentError::AmbiguousMentionable { name })) if name == "target")
+        );
+        assert!(matches!(
+            schema.bind_text("<#8>", &[]),
+            Err(Error::HybridArgument(HybridArgumentError::InvalidValue {
+                kind: CommandOptionType::Mentionable,
+                ..
+            }))
+        ));
+
+        let mut resolved: InteractionDataResolved = serde_json::from_value(json!({
+            "users": {"8": {"id":"8", "username":"member", "discriminator":"0"}},
+            "roles": {"9": {"id":"9", "name":"role", "color":0,
+                "colors":{"primary_color":0}, "flags":0, "hoist":false, "managed":false,
+                "mentionable":true, "permissions":"0", "position":0}}
+        }))
+        .map_err(Error::handler)?;
+        let user = [option(
+            "target",
+            CommandOptionValue::Mentionable(Id::new(8)),
+        )];
+        let role = [option(
+            "target",
+            CommandOptionValue::Mentionable(Id::new(9)),
+        )];
+        assert_eq!(
+            schema
+                .bind_slash(&user, Some(&resolved))?
+                .mentionable("target"),
+            Some(Mentionable::User(Id::new(8)))
+        );
+        assert_eq!(
+            schema
+                .bind_slash(&role, Some(&resolved))?
+                .mentionable("target"),
+            Some(Mentionable::Role(Id::new(9)))
+        );
+        assert_eq!(schema.bind_slash(&[], None)?.mentionable("target"), None);
+        assert!(matches!(
+            schema.bind_slash(&user, None),
+            Err(Error::HybridArgument(
+                HybridArgumentError::AmbiguousMentionable { .. }
+            ))
+        ));
+        let mut duplicate = resolved.roles[&Id::new(9)].clone();
+        duplicate.id = Id::new(8);
+        resolved.roles.insert(duplicate.id, duplicate);
+        assert!(matches!(
+            schema.bind_slash(&user, Some(&resolved)),
+            Err(Error::HybridArgument(
+                HybridArgumentError::AmbiguousMentionable { .. }
+            ))
+        ));
+        Ok(())
     }
 
     #[test]
@@ -447,7 +673,7 @@ mod tests {
             SlashCommands::string_option("label", "ラベル", true),
             SlashCommands::string_option("note", "備考", false),
         ])?;
-        let text = schema.bind_text(r#"3 0.5 YeS <@!11> <@&22> <#33> 「こん にちは」"#)?;
+        let text = schema.bind_text(r#"3 0.5 YeS <@!11> <@&22> <#33> 「こん にちは」"#, &[])?;
         let payload = [
             option("label", CommandOptionValue::String("こん にちは".into())),
             option("channel", CommandOptionValue::Channel(Id::new(33))),
@@ -457,7 +683,7 @@ mod tests {
             option("ratio", CommandOptionValue::Number(0.5)),
             option("count", CommandOptionValue::Integer(3)),
         ];
-        let slash = schema.bind_slash(&payload)?;
+        let slash = schema.bind_slash(&payload, None)?;
         for args in [text, slash] {
             assert_eq!(args.integer("count"), Some(3));
             assert_eq!(args.number("ratio"), Some(0.5));
@@ -469,7 +695,7 @@ mod tests {
             assert_eq!(args.string("note"), None);
             assert_eq!(args.user_id("role"), None);
         }
-        let text = schema.bind_text(r#"3 0.5 off 11 22 33 "" "escaped \"quote\"""#)?;
+        let text = schema.bind_text(r#"3 0.5 off 11 22 33 "" "escaped \"quote\"""#, &[])?;
         assert_eq!(text.string("label"), Some(""));
         assert_eq!(text.string("note"), Some(r#"escaped "quote""#));
         assert_eq!(text.boolean("loud"), Some(false));
@@ -480,36 +706,39 @@ mod tests {
     fn rejects_missing_invalid_and_unexpected_values() -> Result<()> {
         let schema = HybridSchema::new(vec![SlashCommands::user_option("user", "利用者", true)])?;
         assert!(matches!(
-            schema.bind_text(""),
+            schema.bind_text("", &[]),
             Err(Error::HybridArgument(HybridArgumentError::Missing { .. }))
         ));
         assert!(matches!(
-            schema.bind_slash(&[]),
+            schema.bind_slash(&[], None),
             Err(Error::HybridArgument(HybridArgumentError::Missing { .. }))
         ));
         for input in ["0", "<@&3>", "<#3>", "not-a-user", "18446744073709551616"] {
             assert!(matches!(
-                schema.bind_text(input),
+                schema.bind_text(input, &[]),
                 Err(Error::HybridArgument(
                     HybridArgumentError::InvalidValue { .. }
                 ))
             ));
         }
         assert!(matches!(
-            schema.bind_text("\"13"),
+            schema.bind_text("\"13", &[]),
             Err(Error::HybridArgument(HybridArgumentError::Syntax {
                 source: ArgumentError::UnclosedQuote,
                 ..
             }))
         ));
         assert!(matches!(
-            schema.bind_slash(&[option("user", CommandOptionValue::Role(Id::new(3)))]),
+            schema.bind_slash(
+                &[option("user", CommandOptionValue::Role(Id::new(3)))],
+                None
+            ),
             Err(Error::HybridArgument(
                 HybridArgumentError::InvalidValue { .. }
             ))
         ));
         assert!(matches!(
-            schema.bind_text("1 2"),
+            schema.bind_text("1 2", &[]),
             Err(Error::HybridArgument(
                 HybridArgumentError::UnexpectedArguments
             ))
@@ -520,7 +749,7 @@ mod tests {
                 option(field, CommandOptionValue::User(Id::new(4))),
             ];
             assert!(matches!(
-                schema.bind_slash(&payload),
+                schema.bind_slash(&payload, None),
                 Err(Error::HybridArgument(
                     HybridArgumentError::UnexpectedArguments
                 ))
@@ -539,7 +768,7 @@ mod tests {
         label.min_length = Some(1);
         label.max_length = Some(2);
         let schema = HybridSchema::new(vec![count, label])?;
-        assert!(schema.bind_text("3 日本").is_ok());
+        assert!(schema.bind_text("3 日本", &[]).is_ok());
         for (input, expected) in [
             ("0 日", "count"),
             ("4 日", "count"),
@@ -547,7 +776,7 @@ mod tests {
             ("3 \"\"", "label"),
         ] {
             assert!(
-                matches!(schema.bind_text(input), Err(Error::HybridArgument(HybridArgumentError::OutOfRange {name})) if name == expected)
+                matches!(schema.bind_text(input, &[]), Err(Error::HybridArgument(HybridArgumentError::OutOfRange {name})) if name == expected)
             );
         }
         for (count, label, expected) in [(4, "日", "count"), (3, "日本語", "label")] {
@@ -556,23 +785,23 @@ mod tests {
                 option("label", CommandOptionValue::String(label.into())),
             ];
             assert!(
-                matches!(schema.bind_slash(&payload), Err(Error::HybridArgument(HybridArgumentError::OutOfRange {name})) if name == expected)
+                matches!(schema.bind_slash(&payload, None), Err(Error::HybridArgument(HybridArgumentError::OutOfRange {name})) if name == expected)
             );
         }
         let number = HybridSchema::new(vec![SlashCommands::number_option("n", "数", true)])?;
-        assert!(number.bind_text("9007199254740992").is_ok());
+        assert!(number.bind_text("9007199254740992", &[]).is_ok());
         for input in ["NaN", "inf", "-inf", "9007199254740994"] {
             assert!(matches!(
-                number.bind_text(input),
+                number.bind_text(input, &[]),
                 Err(Error::HybridArgument(
                     HybridArgumentError::OutOfRange { .. }
                 ))
             ));
         }
         let integer = HybridSchema::new(vec![SlashCommands::integer_option("n", "整数", true)])?;
-        assert!(integer.bind_text("9007199254740991").is_ok());
+        assert!(integer.bind_text("9007199254740991", &[]).is_ok());
         assert!(matches!(
-            integer.bind_text("9007199254740992"),
+            integer.bind_text("9007199254740992", &[]),
             Err(Error::HybridArgument(
                 HybridArgumentError::OutOfRange { .. }
             ))

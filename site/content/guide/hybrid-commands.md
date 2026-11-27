@@ -86,6 +86,33 @@ async fn repeat(ctx: &mut HybridContext<'_>, args: HybridArguments<'_>) -> Resul
 
 テキストでは定義の順に値を入力します。空白を含む値は引用符で囲み、省略可能な引数は末尾から省略します。文字列、整数、小数、真偽値、ユーザー・ロール・チャンネル ID に対応します。ID は数字または種類の合うメンションで指定できます。引数を読み取れない場合は、ハンドラーを実行する前に `Error::HybridArgument` を既存のエラー処理へ渡します。
 
+### 添付とメンションを受け取る
+
+添付は `attachment_option` で登録します。たとえばテキストでは `!inspect` の投稿にファイルを付け、スラッシュでは `/inspect file:` にファイルを指定します。
+
+```rust
+use disnana_akari::{
+    Commands, HybridArguments, HybridContext, Result, SlashCommands, register_typed_hybrid,
+};
+
+fn register(text: &mut Commands, slash: &mut SlashCommands) -> Result<()> {
+    register_typed_hybrid(
+        text, Some(slash), "inspect", "添付のファイル名を表示します",
+        vec![SlashCommands::attachment_option("file", "調べるファイル", true)],
+        inspect,
+    )
+}
+
+async fn inspect(ctx: &mut HybridContext<'_>, args: HybridArguments<'_>) -> Result<()> {
+    if let Some(file) = args.attachment("file") {
+        ctx.reply(&format!("添付ファイルは {} です。", file.filename)).await?;
+    }
+    Ok(())
+}
+```
+
+テキスト側に複数の添付引数がある場合、添付は投稿順に対応します。添付は本文の引数を消費しません。`mentionable_option` は、テキストではユーザーやロールのメンションを受け入れます。`args.mentionable(name)` で `Mentionable::User` または `Mentionable::Role` を受け取ります。メンションの種類を特定できない数字だけの ID はエラーになります。
+
 ## グループを両方に登録する
 
 ```rust

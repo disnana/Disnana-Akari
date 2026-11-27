@@ -30,9 +30,12 @@ pub use groups::{HybridCommandGroup, register_hybrid_group, register_hybrid_grou
 /// 省略できる引数は必須の引数より後ろに置きます。テキストで省略できるのは末尾からです。
 /// スラッシュでは Discord が送った名前で引数を照合します。
 ///
-/// 文字列・整数・数値・真偽値・ユーザー・ロール・チャンネルに対応します。
+/// 文字列・整数・数値・真偽値・ユーザー・ロール・チャンネルに加え、
+/// ユーザーまたはロールを選ぶ引数と、添付ファイルに対応します。
 /// 真偽値は `true/false` や `yes/no`、ID は数字または種類に合う Discord のメンションで
-/// 入力できます。ID の変換に Discord との通信は発生しません。チャンネル種類の指定には対応していません。
+/// 入力できます。ユーザーとロールのどちらでも受け取る引数は、種類を区別できるメンションを指定してください。
+/// テキスト側の添付引数は、投稿にアップロードしたファイルを定義順に受け取り、本文は消費しません。
+/// 変換に Discord との通信は発生しません。チャンネルやファイルの種類の指定には対応していません。
 ///
 /// `slash` が `None` のときはテキストだけに登録します。入力が不正な場合はハンドラーを実行せず、
 /// [`Error::HybridArgument`] を既存のエラー処理へ渡します。引数は [`HybridArguments`] から取得します。
@@ -100,7 +103,9 @@ impl<F> TypedHandler<F> {
         ) -> std::result::Result<(), E>,
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let arguments = self.schema.bind_text(ctx.args())?;
+        let arguments = self
+            .schema
+            .bind_text(ctx.args(), &ctx.context().message().attachments)?;
         let mut ctx = HybridContext {
             inner: SourceContext::Text {
                 ctx,
@@ -120,7 +125,7 @@ impl<F> TypedHandler<F> {
         ) -> std::result::Result<(), E>,
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let arguments = self.schema.bind_slash(ctx.leaf_options())?;
+        let arguments = self.schema.bind_slash(ctx.leaf_options(), ctx.resolved())?;
         let mut ctx = HybridContext {
             inner: SourceContext::Slash(ctx.reborrow()),
         };
@@ -491,8 +496,8 @@ mod tests {
             Ok(())
         })?;
 
-        let mut unsupported = SlashCommands::string_option("file", "添付", true);
-        unsupported.kind = CommandOptionType::Attachment;
+        let mut unsupported = SlashCommands::attachment_option("file", "添付", true);
+        unsupported.file_types = Some(vec![".png".into()]);
         assert!(
             register_typed_hybrid(
                 &mut text,
