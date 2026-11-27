@@ -286,3 +286,20 @@ fn enable_seed(bot: Bot, guild: Id<GuildMarker>, page: NonZeroU16)
 ```
 
 キャッシュの空きだけを使います。取得中に Gateway から更新・退出が届いたメンバーは、その REST 結果で上書き・再追加しません。全件同期が必要な処理では、取得前後の変化も考慮して別途設計してください。[Discord の List Guild Members](https://docs.discord.com/developers/resources/guild#list-guild-members)
+
+## ボイスチャンネルの効果音とサウンドボード
+
+`Events::on_voice_channel_effect_send` は、VC の絵文字アニメーションやサウンドボードで音が鳴った通知を受け取ります。`GUILD_VOICE_STATES` Intent を指定します。
+
+```rust
+use disnana_akari::{Events, Result, VoiceChannelEffectSend};
+
+fn listen(events: &mut Events) {
+    events.on_voice_channel_effect_send(async |event: &VoiceChannelEffectSend| -> Result<()> {
+        println!("チャンネル {} で効果音イベントを受信", event.channel_id);
+        Ok(())
+    });
+}
+```
+
+サーバーのサウンドボード素材の作成・更新・削除は、`on_guild_soundboard_sound_create`、`on_guild_soundboard_sound_update`、`on_guild_soundboard_sound_delete` で受け取ります。複数の更新は `on_guild_soundboard_sounds_update` です。これらの通知には Twilight の `GUILD_EMOJIS_AND_STICKERS` Intent が必要です。`on_soundboard_sounds` は Gateway の一覧取得に対する応答を受け取ります。[Discord の Gateway イベント仕様](https://docs.discord.com/developers/events/gateway-events#voice-channel-effect-send)

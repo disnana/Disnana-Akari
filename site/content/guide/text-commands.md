@@ -253,3 +253,22 @@ fn configure_hooks(commands: &mut Commands) {
 ```
 
 実行前フックが失敗するとハンドラーの実行を取りやめます。実行後フックには、ハンドラーの結果に応じてエラーが渡ります。実行後フックも失敗した場合はハンドラー側のエラーを優先します。タスクのキャンセル時にも確実に解放したい値は、所有と Drop で管理してください。[discord.py の実行フック](https://discordpy.readthedocs.io/en/stable/ext/commands/api.html#discord.ext.commands.Bot.after_invoke)
+
+## テキスト引数を型に変換する
+
+`ctx.arguments()` から `parse_required` や `parse_next` で数値などを読み取れます。必須値の欠落、クォートの構文エラー、型への変換失敗は、`ArgumentValueError` の別の項目です。独自の変換には `convert_next` を使います。
+
+```rust
+use disnana_akari::{CommandContext, Error, Result};
+
+async fn count(ctx: CommandContext<'_>) -> Result<()> {
+    let mut args = ctx.arguments();
+    let count = args.parse_required::<u32>().map_err(Error::handler)?;
+    let label = args.parse_next::<String>().map_err(Error::handler)?;
+    ctx.reply(&format!("{} {}", count, label.as_deref().unwrap_or("件"))).await
+}
+```
+
+## コマンド名の英字の大小を区別しない
+
+`Commands::enable_case_insensitive()` を呼ぶと、コマンド名と別名にある ASCII 英字の大小を区別しなくなります。`!Ping` と `!ping` は同じ処理を呼びます。プレフィックスの照合は従来どおりで、正式名と入力された名前はそれぞれ保持されます。登録済みの名前が衝突する場合は設定が失敗し、元の状態が残ります。

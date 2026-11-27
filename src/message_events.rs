@@ -218,12 +218,14 @@ pub(crate) enum IncomingEvent {
     ReactionRemoveEmoji(ReactionRemoveEmoji),
     ModalWithRadio(Box<InteractionCreate>, Vec<RadioSubmission>),
     MemberUpdate(Box<MemberUpdate>, Option<MemberUpdateFields>),
+    VoiceNotification(crate::events::VoiceNotification),
 }
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct GatewayDecodeOptions {
     pub(crate) capture_modal_radios: bool,
     pub(crate) capture_member_fields: bool,
+    pub(crate) voice_notifications: crate::events::VoiceNotificationTypes,
 }
 
 #[derive(Deserialize)]
@@ -329,7 +331,7 @@ pub(crate) fn decode_text(
         types,
         GatewayDecodeOptions {
             capture_modal_radios: capture_radios,
-            capture_member_fields: false,
+            ..GatewayDecodeOptions::default()
         },
     )
 }
@@ -341,7 +343,10 @@ pub(crate) fn decode_text_with_options(
 ) -> Option<Result<IncomingEvent>> {
     let capture_members =
         options.capture_member_fields && types.contains(EventTypeFlags::MEMBER_UPDATE);
-    if (types.intersects(CUSTOM_DISPATCHES) || options.capture_modal_radios || capture_members)
+    if (types.intersects(CUSTOM_DISPATCHES)
+        || options.capture_modal_radios
+        || capture_members
+        || !options.voice_notifications.is_empty())
         && let Some(header) = GatewayEventDeserializer::from_json(&json)
         && header.op() == OpCode::Dispatch as u8
     {
@@ -389,6 +394,11 @@ pub(crate) fn decode_text_with_options(
                         })
                         .map_err(Error::from)
                 });
+            }
+            Some(name) if !options.voice_notifications.is_empty() => {
+                if let Some(event) = options.voice_notifications.decode(name, &json) {
+                    return Some(event.map(IncomingEvent::VoiceNotification));
+                }
             }
             _ => {}
         }

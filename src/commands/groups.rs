@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use super::{
     CommandContext, CommandHandler, CommandInfo, CommandMetadata, Invocation, duplicate_command,
@@ -9,7 +12,7 @@ use crate::{RegistrationError, Result};
 /// テキストコマンドをグループにまとめます。
 ///
 /// たとえば `config` の `set` というサブコマンドは `!config set` で実行します。
-/// 別名は、それぞれのグループ内で使えます。名前と別名は大文字・小文字を区別します。
+/// 別名は、それぞれのグループ内で使えます。名前の大文字・小文字はコマンド一覧の設定に従います。
 pub struct TextCommandGroup<'a> {
     tree: &'a mut CommandTree,
 }
@@ -149,6 +152,7 @@ impl TextCommandGroup<'_> {
 #[derive(Default)]
 pub(super) struct CommandTree {
     entries: HashMap<String, CommandEntry>,
+    ascii_names: Option<HashMap<String, String>>,
     metadata: HashMap<String, CommandMetadata>,
     path: Box<str>,
     fallback: Option<Box<dyn CommandHandler>>,
@@ -164,6 +168,62 @@ enum CommandEntry {
 }
 
 impl CommandTree {
+    pub(super) fn enable_case_insensitive(&mut self) -> Result<()> {
+        if self.ascii_names.is_none() {
+            self.validate_case_insensitive()?;
+            self.install_ascii_names();
+        }
+        Ok(())
+    }
+
+    fn validate_case_insensitive(&self) -> Result<()> {
+        let mut names = HashSet::with_capacity(self.entries.len());
+        for (name, entry) in &self.entries {
+            if !names.insert(ascii_lowercase(name)) {
+                return Err(duplicate_command(&self.qualify(name)));
+            }
+            if let CommandEntry::Group(group) = entry {
+                group.validate_case_insensitive()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn install_ascii_names(&mut self) {
+        self.ascii_names = Some(
+            self.entries
+                .keys()
+                .map(|name| (name.to_ascii_lowercase(), name.clone()))
+                .collect(),
+        );
+        for entry in self.entries.values_mut() {
+            if let CommandEntry::Group(group) = entry {
+                group.install_ascii_names();
+            }
+        }
+    }
+
+    pub(super) fn empty_like(&self) -> Self {
+        Self {
+            ascii_names: self.ascii_names.as_ref().map(|_| HashMap::new()),
+            ..Self::default()
+        }
+    }
+
+    fn comparison_key<'a>(&self, name: &'a str) -> Cow<'a, str> {
+        if self.ascii_names.is_some() {
+            ascii_lowercase(name)
+        } else {
+            Cow::Borrowed(name)
+        }
+    }
+
+    fn register_name(&mut self, name: &str) {
+        if let Some(names) = &mut self.ascii_names {
+            names.insert(name.to_ascii_lowercase(), name.to_owned());
+        }
+    }
+
     pub(super) fn names(&self) -> impl Iterator<Item = &str> {
         self.entries.keys().map(String::as_str)
     }
@@ -180,7 +240,7 @@ impl CommandTree {
         if name.is_empty() || name.chars().any(char::is_whitespace) {
             return Err(RegistrationError::InvalidCommandName.into());
         }
-        if self.entries.contains_key(name) {
+        if self.lookup(name).is_some() {
             return Err(duplicate_command(&self.qualify(name)));
         }
         Ok(())
@@ -188,10 +248,12 @@ impl CommandTree {
 
     pub(super) fn validate_names(&self, name: &str, aliases: &[&str]) -> Result<()> {
         self.ensure_available(name)?;
+        let primary = self.comparison_key(name);
         let mut seen = HashSet::with_capacity(aliases.len());
         for &alias in aliases {
             self.ensure_available(alias)?;
-            if alias == name || !seen.insert(alias) {
+            let key = self.comparison_key(alias);
+            if key == primary || !seen.insert(key) {
                 return Err(duplicate_command(&self.qualify(alias)));
             }
         }
@@ -201,6 +263,9 @@ impl CommandTree {
     pub(super) fn append(&mut self, staged: Self) {
         self.entries.extend(staged.entries);
         self.metadata.extend(staged.metadata);
+        if let Some((index, added)) = self.ascii_names.as_mut().zip(staged.ascii_names) {
+            index.extend(added);
+        }
     }
 
     pub(super) fn set_metadata(&mut self, path: &str, metadata: CommandMetadata) -> Option<()> {
@@ -307,6 +372,7 @@ impl CommandTree {
         for &alias in aliases {
             self.entries
                 .insert(alias.into(), CommandEntry::Alias(name.into()));
+            self.register_name(alias);
         }
     }
 
@@ -320,6 +386,7 @@ impl CommandTree {
         let path = (!self.path.is_empty()).then(|| self.qualify(name));
         self.entries
             .insert(name.into(), CommandEntry::Command { handler, path });
+        self.register_name(name);
         self.insert_aliases(name, aliases);
         Ok(())
     }
@@ -328,12 +395,15 @@ impl CommandTree {
         self.validate_names(name, aliases)?;
         let path = self.qualify(name);
         self.insert_aliases(name, aliases);
-        let entry = self.entries.entry(name.into()).or_insert_with(|| {
-            CommandEntry::Group(Box::new(Self {
-                path,
-                ..Self::default()
-            }))
-        });
+        self.register_name(name);
+        let group = Self {
+            path,
+            ..self.empty_like()
+        };
+        let entry = self
+            .entries
+            .entry(name.into())
+            .or_insert_with(|| CommandEntry::Group(Box::new(group)));
         let CommandEntry::Group(tree) = entry else {
             return Err(duplicate_command(name));
         };
@@ -341,7 +411,7 @@ impl CommandTree {
     }
 
     fn find(&self, name: &str) -> Option<(&str, &CommandEntry)> {
-        let (canonical, entry) = self.entries.get_key_value(name)?;
+        let (canonical, entry) = self.lookup(name)?;
         if let CommandEntry::Alias(target) = entry {
             self.entries
                 .get(target.as_ref())
@@ -349,6 +419,14 @@ impl CommandTree {
         } else {
             Some((canonical.as_str(), entry))
         }
+    }
+
+    fn lookup(&self, name: &str) -> Option<(&String, &CommandEntry)> {
+        self.entries.get_key_value(name).or_else(|| {
+            let index = self.ascii_names.as_ref()?;
+            let registered = index.get(ascii_lowercase(name).as_ref())?;
+            self.entries.get_key_value(registered)
+        })
     }
 
     pub(super) fn resolve<'a>(
@@ -386,5 +464,13 @@ impl CommandTree {
                 args,
             });
         }
+    }
+}
+
+fn ascii_lowercase(name: &str) -> Cow<'_, str> {
+    if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Cow::Owned(name.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(name)
     }
 }

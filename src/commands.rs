@@ -6,7 +6,7 @@ mod help;
 mod invoke;
 mod prefix;
 mod workers;
-pub use arguments::{ArgumentError, Arguments};
+pub use arguments::{ArgumentError, ArgumentValueError, Arguments};
 use groups::CommandTree;
 pub use groups::TextCommandGroup;
 pub use help::{CommandInfo, CommandMetadata};
@@ -79,6 +79,16 @@ impl std::fmt::Debug for Commands {
 }
 
 impl Commands {
+    /// コマンド名、別名、グループ名の照合で ASCII の英字の大文字・小文字を同一視します。
+    /// プレフィックスと ASCII 以外の文字は入力どおりに比較します。
+    /// 登録済みの正式名や別名の表記はそのまま保持します。
+    ///
+    /// # エラー
+    /// どこかの階層で名前または別名が衝突する場合に失敗し、照合の設定は変わりません。
+    pub fn enable_case_insensitive(&mut self) -> Result<()> {
+        self.entries.enable_case_insensitive()
+    }
+
     /// コマンドやグループのヘルプ用設定を置き換えます。
     ///
     /// `path` はプレフィックスを付けず、正式名を空白でつなぎます。
@@ -222,7 +232,7 @@ impl Commands {
 
     /// 正式名と別名をまとめて登録し、どの名前からも同じ関数を実行します。
     ///
-    /// 正式名と別名はどちらも大文字・小文字を区別します。
+    /// 既定では大文字・小文字を区別します。[`enable_case_insensitive`](Self::enable_case_insensitive) で変更できます。
     ///
     /// # エラー
     ///
@@ -285,7 +295,7 @@ impl Commands {
     pub(crate) fn stage_group(&self) -> Self {
         Self {
             prefixes: self.prefixes.clone(),
-            entries: CommandTree::default(),
+            entries: self.entries.empty_like(),
             checks: Vec::new(),
             invocation_hooks: InvocationHooks::default(),
         }
@@ -680,6 +690,112 @@ mod tests {
         assert!(commands.matches_message("!p"));
         assert!(commands.matches_message("!ポン"));
         assert!(!commands.matches_message("!P"));
+        Ok(())
+    }
+
+    #[test]
+    fn ascii_case_insensitive_lookup_keeps_original_names_and_prefixes() -> Result<()> {
+        let mut commands = Commands::new("Akari.")?;
+        let mut root = commands.group_with_aliases("Config", &["Cfg"])?;
+        root.group_with_aliases("Advanced", &["Adv"])?
+            .subcommand_with_aliases("Set", &["Put"], command)?;
+        commands.register("Café", command)?;
+        assert!(commands.resolve("Akari.CFG adv PUT 変更").is_none());
+
+        commands.enable_case_insensitive()?;
+        commands.enable_case_insensitive()?;
+        let resolved = commands.resolve("Akari.CFG adv PUT 変更").unwrap();
+        assert_eq!(resolved.command_name, "Set");
+        assert_eq!(resolved.qualified_name, "Config Advanced Set");
+        assert_eq!(resolved.invoked_with, "PUT");
+        assert_eq!(resolved.args, "変更");
+        assert_eq!(
+            commands.command_info("CFG adv put").unwrap().aliases(),
+            ["Put"]
+        );
+        assert!(commands.resolve("akari.Cfg Adv Set").is_none());
+        assert!(commands.resolve("Akari.CAFé").is_some());
+        assert!(commands.resolve("Akari.CAFÉ").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn case_insensitive_activation_is_atomic_when_a_nested_alias_conflicts() -> Result<()> {
+        let mut commands = Commands::new("!")?;
+        commands.register("Ping", command)?;
+        let mut group = commands.group("group")?;
+        group.subcommand_with_aliases("first", &["SAME"], command)?;
+        group.subcommand_with_aliases("second", &["same"], command)?;
+
+        assert!(matches!(
+            commands.enable_case_insensitive(),
+            Err(Error::Registration(RegistrationError::Duplicate {
+                kind: HandlerKind::TextCommand,
+                ..
+            }))
+        ));
+        assert!(commands.resolve("!PING").is_none());
+        assert!(commands.resolve("!group SaMe").is_none());
+        assert_eq!(
+            commands.resolve("!group SAME").unwrap().command_name,
+            "first"
+        );
+        assert_eq!(
+            commands.resolve("!group same").unwrap().command_name,
+            "second"
+        );
+        commands.register("PING", command)?;
+        Ok(())
+    }
+
+    #[test]
+    fn enabled_case_insensitivity_applies_to_new_and_staged_hybrid_groups() -> Result<()> {
+        use crate::{HybridArguments, HybridContext, register_hybrid_group_with_aliases};
+
+        let mut commands = Commands::new("!")?;
+        commands.enable_case_insensitive()?;
+        commands.register_with_aliases("Ping", &["P"], command)?;
+        assert!(commands.register("p", command).is_err());
+        assert!(
+            commands
+                .register_with_aliases("Echo", &["e", "E"], command)
+                .is_err()
+        );
+        assert!(
+            commands
+                .register_with_aliases("Echo", &["ECHO"], command)
+                .is_err()
+        );
+        assert!(commands.resolve("!echo").is_none());
+        assert!(commands.resolve("!E").is_none());
+        register_hybrid_group_with_aliases(
+            &mut commands,
+            None,
+            "config",
+            "設定",
+            &["CFG"],
+            |group| {
+                let callback = async |_: &mut HybridContext<'_>,
+                                      _: HybridArguments<'_>|
+                       -> Result<()> { Ok(()) };
+                group.subcommand_with_aliases("first", "最初", &["Set"], vec![], callback)?;
+                assert!(
+                    group
+                        .subcommand_with_aliases("second", "二番目", &["SET"], vec![], callback)
+                        .is_err()
+                );
+                group.subcommand_with_aliases("second", "二番目", &["Write"], vec![], callback)
+            },
+        )?;
+        assert_eq!(
+            commands.resolve("!cfg SET").unwrap().qualified_name,
+            "config first"
+        );
+        assert_eq!(
+            commands.resolve("!CfG WRITE").unwrap().qualified_name,
+            "config second"
+        );
+        assert!(commands.register("CFG", command).is_err());
         Ok(())
     }
 

@@ -158,6 +158,15 @@ pub enum Error {
     /// Gateway から受信した絵文字リアクションの一括除去の読み取りに失敗しました。
     #[error("Gateway の絵文字リアクション除去を読み取れませんでした")]
     ReactionRemoveEmojiDecode(#[source] serde_json::Error),
+    /// 購読している Gateway 通知のペイロードを読み取れませんでした。
+    #[error("Gateway の `{event}` 通知を読み取れませんでした")]
+    GatewayNotificationDecode {
+        /// Discord のイベント名。
+        event: &'static str,
+        /// ペイロードのデコードエラー。
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 impl Error {

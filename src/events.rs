@@ -11,6 +11,7 @@ mod cached_messages;
 mod dynamic_interactions;
 mod gateway;
 mod reactions;
+mod voice_notifications;
 pub(crate) use activity::ActivityEvent;
 use activity::ActivityHandlers;
 pub use activity::{MessagePollVoteAdd, MessagePollVoteRemove, TypingStart};
@@ -21,6 +22,13 @@ pub use gateway::GatewayPayload;
 pub(crate) use reactions::ReactionEvent;
 use reactions::ReactionHandlers;
 pub use reactions::{ReactionAdd, ReactionRemove, ReactionRemoveAll, ReactionRemoveEmoji};
+use voice_notifications::VoiceNotificationHandlers;
+pub use voice_notifications::{
+    GuildSoundboardSoundCreate, GuildSoundboardSoundDelete, GuildSoundboardSoundUpdate,
+    GuildSoundboardSoundsUpdate, SoundboardSound, SoundboardSoundId, SoundboardSoundMarker,
+    SoundboardSounds, VoiceChannelEffectSend, VoiceEffectAnimation,
+};
+pub(crate) use voice_notifications::{VoiceNotification, VoiceNotificationTypes};
 
 use crate::{
     ButtonContext, CachedMessageEdit, ChannelSelectContext, ErrorSource, MentionableSelectContext,
@@ -41,6 +49,7 @@ pub struct Events {
     reactions: ReactionHandlers,
     activity: ActivityHandlers,
     gateway: GatewayHandlers,
+    voice_notifications: VoiceNotificationHandlers,
     pub(crate) interaction_handlers: InteractionHandlers,
 }
 
@@ -58,6 +67,7 @@ impl std::fmt::Debug for Events {
             .field("reaction_handlers", &self.reactions)
             .field("activity_handlers", &self.activity)
             .field("gateway_handlers", &self.gateway)
+            .field("voice_notification_handlers", &self.voice_notifications)
             .field("cached_message_types", &self.cached_message_types())
             .field("interaction_handlers", &self.interaction_handlers)
             .finish()
@@ -342,6 +352,17 @@ impl Events {
 
     pub(crate) async fn gateway(&self, event: &Event, reporter: &Reporter) {
         self.gateway.dispatch(event, reporter).await;
+    }
+
+    pub(crate) fn voice_notification_types(
+        &self,
+        intents: Intents,
+    ) -> Result<VoiceNotificationTypes> {
+        self.voice_notifications.types(intents)
+    }
+
+    pub(crate) async fn voice_notification(&self, event: &VoiceNotification, reporter: &Reporter) {
+        self.voice_notifications.dispatch(event, reporter).await;
     }
 
     pub(crate) async fn message_update(&self, event: &MessageUpdate, reporter: &Reporter) {

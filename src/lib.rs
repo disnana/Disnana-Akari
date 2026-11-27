@@ -32,7 +32,7 @@ mod work_queue;
 
 use std::{env, fmt, num::NonZeroU16, sync::Arc, time::Duration};
 
-use events::{ActivityEvent, ReactionEvent};
+use events::{ActivityEvent, ReactionEvent, VoiceNotification};
 use gateway_runtime::GatewayPlan;
 use member_cache::{
     BootstrapConfig, BootstrapWorker, CachedMemberEvent, MemberCacheRoute, MemberCacheRuntime,
@@ -58,8 +58,8 @@ use twilight_model::{
 pub use autocomplete::AutocompleteContext;
 pub use command_check::{CommandCheck, CommandCheckContext, CommandCheckSource};
 pub use commands::{
-    ArgumentError, Arguments, CommandContext, CommandInfo, CommandMetadata, CommandPrefixes,
-    Commands, TextCommandGroup,
+    ArgumentError, ArgumentValueError, Arguments, CommandContext, CommandInfo, CommandMetadata,
+    CommandPrefixes, Commands, TextCommandGroup,
 };
 pub use concurrency::{ConcurrencyLimit, ConcurrencyPermit};
 pub use cooldown::Cooldown;
@@ -68,9 +68,11 @@ pub use error::{
     ResponseStateError, SelectionError,
 };
 pub use events::{
-    Events, GatewayPayload, MessageDelete, MessageDeleteBulk, MessagePollVoteAdd,
-    MessagePollVoteRemove, ReactionAdd, ReactionRemove, ReactionRemoveAll, ReactionRemoveEmoji,
-    Ready, TypingStart,
+    Events, GatewayPayload, GuildSoundboardSoundCreate, GuildSoundboardSoundDelete,
+    GuildSoundboardSoundUpdate, GuildSoundboardSoundsUpdate, MessageDelete, MessageDeleteBulk,
+    MessagePollVoteAdd, MessagePollVoteRemove, ReactionAdd, ReactionRemove, ReactionRemoveAll,
+    ReactionRemoveEmoji, Ready, SoundboardSound, SoundboardSoundId, SoundboardSoundMarker,
+    SoundboardSounds, TypingStart, VoiceChannelEffectSend, VoiceEffectAnimation,
 };
 pub use gateway_status::{
     GatewayShardState, GatewayShardStatus, GatewayStatusHandle, GatewayStatusUpdates,
@@ -519,6 +521,7 @@ impl Bot {
         let intents = intents.unwrap_or_else(Intents::empty) | additional_intents;
         check_intents(intents, needs_messages)?;
         let handler_events = handler_event_types(&events, intents)?;
+        let voice_notifications = events.voice_notification_types(intents)?;
         let message_cache = MessageCacheRuntime::prepare(message_cache_capacity, &events, intents)?;
         let member_cache = MemberCacheRuntime::prepare(
             member_cache_capacity,
@@ -527,11 +530,7 @@ impl Bot {
             member_cache_handle,
             member_cache_bootstrap,
         )?;
-        if voice_gateway.is_some() && !intents.contains(Intents::GUILD_VOICE_STATES) {
-            return Err(Error::MissingEventIntents {
-                any_of: Intents::GUILD_VOICE_STATES,
-            });
-        }
+        check_voice_gateway_intents(intents, voice_gateway.is_some())?;
         limits.validate()?;
 
         let http = Client::new(token.clone());
@@ -612,6 +611,7 @@ impl Bot {
             GatewayDecodeOptions {
                 capture_modal_radios: events.interaction_handlers.has_modals(),
                 capture_member_fields: member_cache.is_some(),
+                voice_notifications,
             },
             |shard| gateway_lost(shard, &permissions, member_cache.as_ref()),
             |gateway, event| {
@@ -794,6 +794,15 @@ fn gateway_event_types(
     events
 }
 
+fn check_voice_gateway_intents(intents: Intents, voice_enabled: bool) -> Result<()> {
+    if voice_enabled && !intents.contains(Intents::GUILD_VOICE_STATES) {
+        return Err(Error::MissingEventIntents {
+            any_of: Intents::GUILD_VOICE_STATES,
+        });
+    }
+    Ok(())
+}
+
 fn gateway_lost(
     shard: ShardId,
     permissions: &PermissionResolver,
@@ -855,6 +864,7 @@ enum MessageEvent {
     Reaction(ReactionEvent),
     Activity(ActivityEvent),
     Gateway(Box<Event>),
+    VoiceNotification(VoiceNotification),
     CachedMember(Box<CachedMemberEvent>, Option<Box<Event>>),
 }
 
@@ -1010,6 +1020,10 @@ fn forward_lifecycle_event(
             MessageEvent::Activity(ActivityEvent::Typing(typing)),
             "TYPING_START",
         ),
+        Ok(IncomingEvent::VoiceNotification(event)) => {
+            let name = event.name();
+            (MessageEvent::VoiceNotification(event), name)
+        }
         Ok(IncomingEvent::Standard(event)) => return Some((event, Vec::new())),
         Ok(IncomingEvent::MemberUpdate(member, _)) => {
             return Some((Event::MemberUpdate(member), Vec::new()));
@@ -1075,6 +1089,9 @@ async fn dispatch_events(
             MessageEvent::Reaction(reaction) => events.reaction(&reaction, &hooks.reporter).await,
             MessageEvent::Activity(activity) => events.activity(&activity, &hooks.reporter).await,
             MessageEvent::Gateway(event) => events.gateway(&event, &hooks.reporter).await,
+            MessageEvent::VoiceNotification(event) => {
+                events.voice_notification(&event, &hooks.reporter).await;
+            }
             MessageEvent::CachedMember(cached, raw) => {
                 if let Some(raw) = raw {
                     events.gateway(&raw, &hooks.reporter).await;
