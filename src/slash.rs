@@ -881,25 +881,25 @@ impl ActiveSlashCommands {
             data,
             response_state: &mut response_state,
         };
-        let mut failed_text = &hooks.messages.slash_command_failed;
-        if let Err(error) = handler.call(&mut ctx).await {
-            hooks
-                .reporter
-                .report(ErrorSource::SlashCommand, name, &error);
-            if matches!(error, Error::Check(_)) {
-                failed_text = &hooks.messages.check_failed;
+        let check_failed = match handler.call(&mut ctx).await {
+            Ok(()) => false,
+            Err(error) => {
+                hooks
+                    .reporter
+                    .report(ErrorSource::SlashCommand, name, &error);
+                matches!(error, Error::Check(_))
             }
-        }
+        };
+        let failed_text = if check_failed {
+            &hooks.messages.check_failed
+        } else {
+            &hooks.messages.slash_command_failed
+        };
         // 応答が済んでいない（エラー、または応答の忘れ）ときは、文言が設定されていれば知らせる。
         let Some(text) = failed_text else {
             return;
         };
-        let fallback = match *ctx.response_state {
-            ResponseState::Pending => ctx.reply_ephemeral(text).await,
-            ResponseState::Deferred { .. } => ctx.reply(text).await,
-            ResponseState::Replied | ResponseState::ModalOpened => Ok(()),
-        };
-        if let Err(error) = fallback {
+        if let Err(error) = ctx.reply_fallback(text, check_failed).await {
             hooks.reporter.report(ErrorSource::Response, name, &error);
         }
     }
@@ -924,6 +924,20 @@ impl std::fmt::Debug for SlashContext<'_> {
 }
 
 impl<'a> SlashContext<'a> {
+    async fn reply_fallback(&mut self, text: &str, check_failed: bool) -> Result<()> {
+        match *self.response_state {
+            ResponseState::Pending => self.reply_ephemeral(text).await,
+            ResponseState::Deferred { ephemeral: false } if check_failed => {
+                // Discord は遅延応答直後の追加応答を元のメッセージの編集として扱うことがある。
+                // 公開の応答を先に完了させ、拒否文は非公開の追加応答として送る。
+                self.reply("処理を終了しました。").await?;
+                self.followup_ephemeral(text).await
+            }
+            ResponseState::Deferred { .. } => self.reply(text).await,
+            ResponseState::Replied | ResponseState::ModalOpened => Ok(()),
+        }
+    }
+
     /// コマンドを呼び出したユーザーの ID を返します。
     pub fn author_id(&self) -> Option<Id<UserMarker>> {
         self.initial.interaction.author_id()
@@ -1557,6 +1571,86 @@ mod tests {
             },
         );
         ActiveSlashCommands { scope, handlers }
+    }
+
+    #[tokio::test]
+    async fn a_failed_check_after_public_defer_sends_the_reason_only_in_a_private_followup()
+    -> Result<()> {
+        use std::time::Duration;
+        use tokio::{
+            io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+            net::TcpListener,
+            time::timeout,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(Error::handler)?;
+        let http = twilight_http::Client::builder()
+            .proxy(
+                listener.local_addr().map_err(Error::handler)?.to_string(),
+                true,
+            )
+            .build();
+        let mut commands = active(Scope::Global);
+        commands.handlers.get_mut(&Id::new(5)).unwrap().root =
+            Some(Box::new(async |ctx: &mut SlashContext<'_>| -> Result<()> {
+                ctx.defer().await?;
+                ctx.require_permissions(Permissions::MANAGE_MESSAGES)
+            }));
+        let mut interaction = command_interaction(None, None, 5);
+        interaction.token = "test-token".into();
+        let mut hooks = crate::hooks::Hooks::default();
+        hooks.messages.check_failed = Some("private check failure".into());
+        let (_, timing) = crate::timing::Pending::new((), None).begin();
+
+        let server = async {
+            for (method, contains_denial, private) in [
+                ("POST", false, false),
+                ("PATCH", false, false),
+                ("POST", true, true),
+            ] {
+                let (stream, _) = listener.accept().await?;
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await?;
+                assert_eq!(line.split_whitespace().next(), Some(method));
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    if stream.read_line(&mut line).await? == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).await?;
+                let body = String::from_utf8(body).unwrap();
+                assert_eq!(body.contains("private check failure"), contains_denial);
+                assert_eq!(body.contains("\"flags\":64"), private);
+                if method == "PATCH" {
+                    assert!(body.contains("処理を終了しました。"));
+                }
+                stream
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                    .await?;
+            }
+            Ok::<_, std::io::Error>(())
+        };
+        let (_, server) = timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                commands.dispatch(&http, &interaction, timing, &hooks),
+                server
+            )
+        })
+        .await
+        .map_err(Error::handler)?;
+        server.map_err(Error::handler)
     }
 
     #[test]

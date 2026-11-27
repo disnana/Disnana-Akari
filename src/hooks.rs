@@ -122,6 +122,7 @@ pub struct Messages {
     pub slash_command_unavailable: Option<String>,
     /// 実行前の確認（権限など）に通らなかったときに、本人にだけ送る文言です。
     /// ハンドラーが `require_*` で返した [`CheckFailure`](crate::CheckFailure) に使います。
+    /// 公開の遅延応答がある場合は、固定文言で待機表示を終了してから、本人への追加応答で送ります。
     /// テキストコマンドでは、元の投稿への返信になります（送らない場合は `None` にします）。
     pub check_failed: Option<String>,
     /// ボタンの関数がエラーを返したときに、本人にだけ送る文言です。
