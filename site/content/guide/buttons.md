@@ -36,7 +36,7 @@ async fn about(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 ## ボタンを付ける
 
-ボタンには、押されたときに Akari へ届く目印 `custom_id` を付けます。同じ文字列で `events.on_button` に関数を登録すると、押されたときにその関数が呼ばれます。
+Akari の処理を呼ぶボタンには `custom_id` を付けます。同じ文字列で `events.on_button` に関数を登録すると、押されたときにその関数が呼ばれます。
 
 ```rust
 use disnana_akari::ui::{Button, Embed, UiMessage};
@@ -85,6 +85,7 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 | `Button::success(id, label)` | 緑（確認、完了） |
 | `Button::danger(id, label)` | 赤（削除など） |
 | `Button::link(url, label)` | URL を開く。押してもイベントは届きません。 |
+| `Button::premium(sku_id)` | 指定された SKU の購入画面を開く。Discord が表示と購入操作を扱います。 |
 
 ```rust
 use disnana_akari::model::channel::message::EmojiReactionType;
@@ -103,6 +104,19 @@ fn buttons() -> Vec<Button> {
 - `.emoji(...)` で絵文字を付けられます。
 - `.disabled(true)` で、押せない状態にします。
 - リンクボタンの URL は、512 文字以内の絶対 HTTP(S) です。
+
+### 購入ボタン
+
+購入できるアプリの SKU を、`Id<SkuMarker>` で渡します。購入ボタンは従来形式と Components V2 の両方で使えます。ボタンを押すと Discord が購入画面を開きます。
+
+```rust
+use disnana_akari::model::id::{Id, marker::SkuMarker};
+use disnana_akari::ui::{Button, UiMessage};
+
+fn purchase(sku_id: Id<SkuMarker>) -> UiMessage {
+    UiMessage::new().buttons(vec![Button::premium(sku_id)])
+}
+```
 
 ## ボタンのメッセージを書き換える
 

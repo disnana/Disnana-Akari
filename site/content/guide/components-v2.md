@@ -107,3 +107,24 @@ Twilight の型で部品の数値 `id` を指定する場合、0 以外の値は
 - 既に Components V2 になっているメッセージは、`update_v2` で更新します。
 
 送信前に、これらの制限が検証されます。違反しているときは、Discord へ送らず `Err` を返します。
+
+
+## 添付のサイズや件数をアプリで制限する
+
+同じ設定を複数の送信経路で使うときは、`AttachmentLimits` を共有します。件数には編集時に残すファイルも含み、バイト数は新規アップロード分に適用します。
+
+```rust
+use disnana_akari::{ui::ComponentsV2, validation::AttachmentLimits};
+
+fn document() -> disnana_akari::Result<ComponentsV2> {
+    let limits = AttachmentLimits::default()
+        .max_files(Some(4))
+        .max_file_bytes(Some(4 * 1024 * 1024))
+        .max_total_bytes(Some(8 * 1024 * 1024));
+    let message = ComponentsV2::new().attachment_limits(limits).text("資料");
+    message.validate()?;
+    Ok(message)
+}
+```
+
+各設定の `None` はその項目のアプリ独自の検査を解除します。スラッシュ応答などでは Discord が通知したファイル上限も確認します。通常メッセージでは、添付データだけで HTTP リクエスト全体の上限 25 MiB に達する場合も送信前に拒否します。multipart のヘッダーや JSON もリクエストのサイズに含まれます。[Discord のファイルアップロード仕様](https://docs.discord.com/developers/reference#uploading-files) · [Create Message の制限](https://docs.discord.com/developers/resources/message#create-message)

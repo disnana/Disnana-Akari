@@ -537,7 +537,7 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 
 ## 送信前の検証
 
-`validation::message_content`、`attachment_count`、`attachment_sizes` で、本文の文字数、保持分を含む添付件数、Discord が通知した1ファイルのバイト上限を確認します。本文は上限超過を検出した時点で走査を打ち切ります。`UiMessage::validate`、`ComponentsV2::validate`、`Modal::validate` は各ビルダーの構成を検証します。
+`validation::message_content`、`attachment_count`、`attachment_sizes` で、本文の文字数、保持分を含む添付件数、Discord が通知した1ファイルのバイト上限を確認します。本文は上限超過を検出した時点で走査を打ち切ります。 `AttachmentLimits` では、保持分を含む件数、1 ファイルのサイズ、新規送信分の合計サイズにアプリ独自の上限を設定できます。値を `None` にすると、その項目のアプリ独自の検査を外します。`ComponentsV2::attachment_limits` で返信と編集に適用できます。`UiMessage::validate`、`ComponentsV2::validate`、`Modal::validate` は各ビルダーの構成を検証します。
 
 ## テキストコマンドのメタデータとヘルプ
 
