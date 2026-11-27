@@ -8,12 +8,13 @@ mod hooks;
 mod hybrid;
 mod interactions;
 mod limits;
+mod permissions;
 mod slash;
 mod timing;
 pub mod ui;
 mod work_queue;
 
-use std::{env, fmt, sync::Arc};
+use std::{env, fmt, sync::Arc, time::Duration};
 
 use tokio::sync::mpsc;
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
@@ -24,7 +25,11 @@ use twilight_model::{
         Message,
         message::{AllowedMentions, MessageFlags},
     },
-    id::{Id, marker::UserMarker},
+    guild::Permissions,
+    id::{
+        Id,
+        marker::{GuildMarker, UserMarker},
+    },
 };
 
 pub use commands::{CommandContext, Commands};
@@ -47,6 +52,7 @@ pub use twilight_http as http;
 pub use twilight_model as model;
 
 use hooks::{Hooks, InfoReporter, Reporter};
+use permissions::{PermissionResolver, check_permissions};
 use timing::Pending;
 
 type NoMessageHandler = fn(Context<'_>) -> std::future::Ready<Result<()>>;
@@ -66,6 +72,7 @@ pub struct Bot {
     messages: Messages,
     include_bots: bool,
     limits: Limits,
+    permission_cache: Option<Duration>,
 }
 
 impl fmt::Debug for Bot {
@@ -80,6 +87,7 @@ impl fmt::Debug for Bot {
             .field("messages", &self.messages)
             .field("include_bots", &self.include_bots)
             .field("limits", &self.limits)
+            .field("permission_cache", &self.permission_cache)
             .finish()
     }
 }
@@ -107,6 +115,7 @@ impl Bot {
             messages: Messages::default(),
             include_bots: false,
             limits: Limits::default(),
+            permission_cache: None,
         })
     }
 
@@ -184,6 +193,18 @@ impl Bot {
     /// 互いに反応し合うループは、アプリ側で防いでください。
     pub fn include_bots(mut self, include: bool) -> Self {
         self.include_bots = include;
+        self
+    }
+
+    /// テキストコマンドの権限確認で取得したサーバーとチャンネルの情報を、指定した期間だけ保存します。
+    ///
+    /// テキストコマンドの権限確認（[`Context::require_permissions`] など）は、メッセージに権限が
+    /// 付いていないため、確認のたびに Discord へ問い合わせます。既定では保存しないので、
+    /// 呼び出しが多い Bot は、期間（数十秒〜数分）を指定すると問い合わせを減らせます。
+    /// 保存中にロールやチャンネルの権限を変えると、期間が過ぎるまで反映されません。
+    /// スラッシュコマンドは Discord が権限を送るため、この設定の影響を受けません。
+    pub fn cache_permissions(mut self, ttl: Duration) -> Self {
+        self.permission_cache = Some(ttl);
         self
     }
 
@@ -276,6 +297,7 @@ impl Bot {
             messages,
             include_bots,
             limits,
+            permission_cache,
         } = self;
         let hooks = Hooks {
             reporter,
@@ -292,6 +314,7 @@ impl Bot {
         limits.validate()?;
 
         let http = Client::new(token.clone());
+        let permissions = PermissionResolver::new(permission_cache);
         let mut event_types = EventTypeFlags::READY;
         if hooks.info.has_hook() {
             event_types |= EventTypeFlags::RESUMED;
@@ -335,6 +358,7 @@ impl Bot {
                                 http: &http,
                                 message: &message,
                                 timing,
+                                permissions: &permissions,
                             };
                             if let Err(error) = handler(context).await {
                                 hooks.reporter.report(ErrorSource::Message, None, &error);
@@ -358,6 +382,7 @@ impl Bot {
                                 http: &http,
                                 message: &message,
                                 timing,
+                                permissions: &permissions,
                             },
                             &hooks,
                         )
@@ -373,6 +398,7 @@ impl Bot {
                     http: &http,
                     message: &message,
                     timing,
+                    permissions: &permissions,
                 };
                 if let Some(text) = &hooks.messages.text_command_busy
                     && let Err(error) = context.reply(text).await
@@ -600,6 +626,7 @@ pub struct Context<'a> {
     http: &'a Client,
     message: &'a Message,
     timing: Timing,
+    permissions: &'a PermissionResolver,
 }
 
 impl<'a> Context<'a> {
@@ -616,6 +643,46 @@ impl<'a> Context<'a> {
     /// 受信した Twilight の [`Message`] を借ります。
     pub fn message(&self) -> &'a Message {
         self.message
+    }
+
+    /// メッセージが送られたサーバーの ID を返します。DM では `None` です。
+    pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
+        self.message.guild_id
+    }
+
+    /// サーバーの中で送られたことを確認し、その ID を返します。
+    ///
+    /// # エラー
+    ///
+    /// DM などで送られた場合は、[`CheckFailure::GuildOnly`] を返します。
+    pub fn require_guild(&self) -> Result<Id<GuildMarker>> {
+        self.guild_id()
+            .ok_or_else(|| CheckFailure::GuildOnly.into())
+    }
+
+    /// メッセージを送った人の、このチャンネルでの権限を計算して返します。
+    ///
+    /// メッセージには権限が付いていないため、サーバーとチャンネルの情報を Discord から取得して
+    /// 計算します。呼び出しが多い場合は、[`Bot::cache_permissions`] で保存する期間を指定できます。
+    ///
+    /// # エラー
+    ///
+    /// DM では [`CheckFailure::GuildOnly`]、送り主のロールが届いていないときは
+    /// [`CheckFailure::PermissionsUnavailable`]、取得に失敗したときは HTTP のエラーを返します。
+    pub async fn permissions(&self) -> Result<Permissions> {
+        self.permissions.resolve(self.http, self.message).await
+    }
+
+    /// メッセージを送った人が、指定した権限をすべて持っていることを確認します。
+    ///
+    /// # エラー
+    ///
+    /// 足りないときは、不足分を入れた [`CheckFailure::MissingPermissions`] を返します。
+    /// そのほかは [`permissions`](Self::permissions) を参照してください。
+    pub async fn require_permissions(&self, required: Permissions) -> Result<()> {
+        let guild_id = self.require_guild()?;
+        let held = self.permissions().await?;
+        check_permissions(Some(guild_id), Some(held), required).map_err(Error::from)
     }
 
     /// 受信したメッセージに返信します。返信元の著者や本文中のメンションへの通知を抑止します。

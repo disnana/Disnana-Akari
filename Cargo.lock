@@ -119,6 +119,7 @@ dependencies = [
  "twilight-gateway",
  "twilight-http",
  "twilight-model",
+ "twilight-util",
  "twilight-validate",
 ]
 
@@ -1052,6 +1053,15 @@ dependencies = [
  "serde-value",
  "serde_repr",
  "time",
+]
+
+[[package]]
+name = "twilight-util"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af846db90ea6db2b2dad6134ff761732bf53f9d05c6f269e81def7121ec68da4"
+dependencies = [
+ "twilight-model",
 ]
 
 [[package]]

@@ -121,7 +121,8 @@ pub struct Messages {
     /// Akari に登録していないスラッシュコマンドが実行されたときに、本人にだけ送る文言です。
     pub slash_command_unavailable: Option<String>,
     /// 実行前の確認（権限など）に通らなかったときに、本人にだけ送る文言です。
-    /// 現在は、スラッシュコマンドの `require_*` が返す [`CheckFailure`](crate::CheckFailure) に使います。
+    /// ハンドラーが `require_*` で返した [`CheckFailure`](crate::CheckFailure) に使います。
+    /// テキストコマンドでは、元の投稿への返信になります（送らない場合は `None` にします）。
     pub check_failed: Option<String>,
     /// ボタンの関数がエラーを返したときに、本人にだけ送る文言です。
     pub button_failed: Option<String>,
