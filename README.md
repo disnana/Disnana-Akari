@@ -1,6 +1,6 @@
 # Disnana Akari
 
-Twilight を土台にした Rust 製 Discord Bot フレームワークです。テキストコマンド、サーバー向けのスラッシュコマンド、Gateway イベントをそれぞれ `async fn` として登録できます。テキストとスラッシュで処理を共通化したい場合は、同じ関数をハイブリッドコマンドとして登録できます。Discord の返信には埋め込みや Components V2 を使え、ボタンや選択メニューから入力フォームも開けます。
+Twilight を土台にした Rust 製 Discord Bot フレームワークです。テキストコマンド、サーバー向けのスラッシュコマンド、Gateway イベントをそれぞれ `async fn` として登録できます。テキストとスラッシュで処理を共通化したい場合は、同じ関数をハイブリッドコマンドとして登録できます。Discord の返信には埋め込みや Components V2 を使え、ボタンや選択メニューから入力フォームも開けます。スラッシュコマンドは、サブコマンド、オートコンプリート、型付きの引数、グローバル登録に対応し、権限の確認は `ctx.require_permissions(..)?` と明示的に呼びます。関連する登録は `Module` にまとめられます。
 
 Akari は、頼まれていないことを、勝手にしません。Intent を自動で追加せず、標準出力にも書かず、エラーは `Bot::on_error` で受け取れます。
 
@@ -33,6 +33,7 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 - [Playground のコードを読む](docs/tutorial.md)
 - [API リファレンス](docs/api.md)
 - [変更履歴](CHANGELOG.md)
+- 0.1 から更新する場合は、変更履歴の「互換性のない変更」と、ドキュメントサイトの「0.1 から 0.2 への移行」を確認してください。
 - [公開前の確認](docs/releasing.md)
 - [セキュリティ報告](SECURITY.md)
 
