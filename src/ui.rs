@@ -1106,6 +1106,9 @@ fn select_row(select: SelectMenu) -> Component {
 }
 
 fn check_row<'a>(row: &'a ActionRow, ids: &mut HashSet<&'a str>) -> Result<()> {
+    if row.components.len() > component::ACTION_ROW_COMPONENT_COUNT {
+        return Err(Error::InvalidUi("1 行の部品は 5 個までです。"));
+    }
     match row.components.as_slice() {
         [] => return Err(Error::InvalidUi("空の行は追加できません。")),
         [Component::SelectMenu(select)] => return check_select(select, ids),
@@ -1124,6 +1127,13 @@ fn check_row<'a>(row: &'a ActionRow, ids: &mut HashSet<&'a str>) -> Result<()> {
 }
 
 fn check_button<'a>(button: &'a RawButton, ids: &mut HashSet<&'a str>) -> Result<()> {
+    if button.label.as_deref().is_some_and(|label| {
+        exceeds_character_limit(label, component::COMPONENT_BUTTON_LABEL_LENGTH)
+    }) {
+        return Err(Error::InvalidUi(
+            "ボタンのラベルは 80 文字以下にしてください。",
+        ));
+    }
     if matches!(&button.emoji, Some(EmojiReactionType::Unicode { name }) if name.trim().is_empty())
     {
         return Err(Error::InvalidUi("Unicode 絵文字を指定してください。"));
@@ -1139,7 +1149,7 @@ fn check_button<'a>(button: &'a RawButton, ids: &mut HashSet<&'a str>) -> Result
     }
     if button.style == ButtonStyle::Link {
         let url = button.url.as_deref().unwrap_or_default();
-        if url.chars().count() > 512 || !is_absolute_http_url(url) {
+        if exceeds_character_limit(url, 512) || !is_absolute_http_url(url) {
             return Err(Error::InvalidUi(
                 "リンクボタンには512文字以内の絶対 HTTP(S) URL を指定してください。",
             ));
@@ -1171,8 +1181,22 @@ fn is_absolute_http_url(url: &str) -> bool {
 
 fn check_select<'a>(select: &'a SelectMenu, ids: &mut HashSet<&'a str>) -> Result<()> {
     check_custom_id(ids, &select.custom_id)?;
+    if select.placeholder.as_deref().is_some_and(|placeholder| {
+        exceeds_character_limit(placeholder, component::SELECT_PLACEHOLDER_LENGTH)
+    }) {
+        return Err(Error::InvalidUi(
+            "選択メニューのプレースホルダーは 150 文字以下にしてください。",
+        ));
+    }
     let min = select.min_values.unwrap_or(1);
     let max = select.max_values.unwrap_or(1);
+    if !(component::SELECT_MAXIMUM_VALUES_REQUIREMENT..=component::SELECT_MAXIMUM_VALUES_LIMIT)
+        .contains(&usize::from(max))
+    {
+        return Err(Error::InvalidUi(
+            "選択できる最大数は 1〜25 にしてください。",
+        ));
+    }
     if min > max {
         return Err(Error::InvalidUi(
             "選択できる最小数は最大数以下にしてください。",
@@ -1180,6 +1204,9 @@ fn check_select<'a>(select: &'a SelectMenu, ids: &mut HashSet<&'a str>) -> Resul
     }
     if select.kind == SelectMenuType::Text {
         let options = select.options.as_deref().unwrap_or_default();
+        if options.len() > component::SELECT_OPTION_COUNT {
+            return Err(Error::InvalidUi("選択肢は 25 個までです。"));
+        }
         if options.is_empty() || usize::from(max) > options.len() {
             return Err(Error::InvalidUi(
                 "選択メニューには選択できる数以上の選択肢が必要です。",
@@ -1188,6 +1215,19 @@ fn check_select<'a>(select: &'a SelectMenu, ids: &mut HashSet<&'a str>) -> Resul
         let mut values = HashSet::new();
         let mut selected = 0;
         for option in options {
+            if exceeds_character_limit(&option.label, component::SELECT_OPTION_LABEL_LENGTH)
+                || exceeds_character_limit(&option.value, component::SELECT_OPTION_VALUE_LENGTH)
+                || option.description.as_deref().is_some_and(|description| {
+                    exceeds_character_limit(
+                        description,
+                        component::SELECT_OPTION_DESCRIPTION_LENGTH,
+                    )
+                })
+            {
+                return Err(Error::InvalidUi(
+                    "選択肢の表示名、値、説明はそれぞれ 100 文字以下にしてください。",
+                ));
+            }
             if option.label.trim().is_empty() || option.value.is_empty() {
                 return Err(Error::InvalidUi("選択肢には空でない表示名と値が必要です。"));
             }
@@ -1252,8 +1292,13 @@ fn check_custom_id<'a>(ids: &mut HashSet<&'a str>, id: &'a str) -> Result<()> {
     Ok(())
 }
 
+fn exceeds_character_limit(value: &str, limit: usize) -> bool {
+    value.len() > limit
+        && (value.len() > limit.saturating_mul(4) || value.chars().nth(limit).is_some())
+}
+
 fn validate_custom_id(id: &str) -> Result<()> {
-    if id.is_empty() || id.chars().count() > component::COMPONENT_CUSTOM_ID_LENGTH {
+    if id.is_empty() || exceeds_character_limit(id, component::COMPONENT_CUSTOM_ID_LENGTH) {
         return Err(Error::InvalidUi(
             "操作部品の ID は 1〜100 文字にしてください。",
         ));

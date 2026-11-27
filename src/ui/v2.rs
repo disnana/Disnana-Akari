@@ -13,13 +13,21 @@ use twilight_model::{
     },
     http::attachment::Attachment,
 };
-use twilight_validate::{component::COMPONENT_V2_COUNT, embed::COLOR_MAXIMUM, message};
+use twilight_validate::{
+    component::{
+        COMPONENT_V2_COUNT, MEDIA_GALLERY_ITEM_DESCRIPTION_LENGTH_MAX, MEDIA_GALLERY_ITEMS_MAX,
+        MEDIA_GALLERY_ITEMS_MIN, SECTION_COMPONENTS_MAX, SECTION_COMPONENTS_MIN,
+        TEXT_DISPLAY_CONTENT_LENGTH_MAX, THUMBNAIL_DESCRIPTION_LENGTH_MAX,
+    },
+    embed::COLOR_MAXIMUM,
+    message,
+};
 
 use crate::{Error, Result};
 
 use super::{
     Button, ChannelSelect, MentionableSelect, RoleSelect, StringSelect, UserSelect, button_row,
-    check_button, check_row, is_absolute_http_url, select_row,
+    check_button, check_row, exceeds_character_limit, is_absolute_http_url, select_row,
 };
 
 const TOTAL_TEXT_LENGTH: usize = 4_000;
@@ -274,6 +282,8 @@ impl ComponentsV2 {
 
     /// 部品の配置、テキスト、追加する添付ファイルの上限やメタデータを送信前に検証します。
     ///
+    /// 明示した数値 ID はメッセージ内で一意にしてください。ID の省略と `0` は Discord が自動採番します。
+    /// 操作用の `custom_id` には独立した重複チェックを行います。
     /// 編集前のメッセージや操作が持つ情報が必要な検証は、実際に送信・編集するときに行います。
     ///
     /// # エラー
@@ -284,11 +294,11 @@ impl ComponentsV2 {
                 "Components V2 には部品が一つ以上必要です。",
             ));
         }
-        message::components(&self.components, true)?;
         let mut limits = Limits::default();
         for component in &self.components {
             limits.check(component)?;
         }
+        message::components(&self.components, true)?;
         self.validate_attachments()
     }
 
@@ -397,37 +407,41 @@ struct Limits<'a> {
     count: usize,
     text_length: usize,
     custom_ids: HashSet<&'a str>,
+    ids: HashSet<i32>,
 }
 
 impl<'a> Limits<'a> {
     fn check(&mut self, component: &'a Component) -> Result<()> {
         self.add_count(1)?;
+        self.check_id(component)?;
 
         match component {
             Component::ActionRow(row) => {
                 self.add_count(row.components.len())?;
                 check_row(row, &mut self.custom_ids)?;
-            }
-            Component::TextDisplay(text) => {
-                let remaining = TOTAL_TEXT_LENGTH - self.text_length;
-                self.text_length += text.content.chars().take(remaining + 1).count();
-                if self.text_length > TOTAL_TEXT_LENGTH {
-                    return Err(Error::InvalidUi(
-                        "テキスト表示の合計は 4000 文字以下にしてください。",
-                    ));
-                }
-                if text.content.trim().is_empty() {
-                    return Err(Error::InvalidUi(
-                        "テキスト表示には空白以外の内容が必要です。",
-                    ));
+                for child in &row.components {
+                    self.check_id(child)?;
                 }
             }
+            Component::TextDisplay(text) => self.check_text(&text.content)?,
             Component::Section(section) => {
+                if !(SECTION_COMPONENTS_MIN..=SECTION_COMPONENTS_MAX)
+                    .contains(&section.components.len())
+                {
+                    return Err(Error::InvalidUi(
+                        "セクションにはテキスト表示を 1〜3 個指定してください。",
+                    ));
+                }
                 self.add_count(1)?; // 横に付けるボタンや画像も部品の個数に含めます。
+                self.check_id(&section.accessory)?;
                 match section.accessory.as_ref() {
                     Component::Button(button) => check_button(button, &mut self.custom_ids)?,
-                    Component::Thumbnail(thumbnail) => check_media_url(&thumbnail.media.url)?,
-                    _ => {} // 配置は先に Twilight が検証します。
+                    Component::Thumbnail(thumbnail) => check_thumbnail(thumbnail)?,
+                    _ => {
+                        return Err(Error::InvalidUi(
+                            "セクションの横に置ける部品はボタンまたはサムネイルです。",
+                        ));
+                    }
                 }
                 for child in &section.components {
                     self.check(child)?;
@@ -457,11 +471,7 @@ impl<'a> Limits<'a> {
                     ));
                 }
             }
-            Component::MediaGallery(gallery) => {
-                for item in &gallery.items {
-                    check_media_url(&item.media.url)?;
-                }
-            }
+            Component::MediaGallery(gallery) => check_gallery(gallery)?,
             Component::File(file) => {
                 if attachment_filename(&file.file.url).is_none() {
                     return Err(Error::InvalidUi(
@@ -478,6 +488,52 @@ impl<'a> Limits<'a> {
         Ok(())
     }
 
+    fn check_id(&mut self, component: &Component) -> Result<()> {
+        let id = match component {
+            Component::ActionRow(value) => value.id,
+            Component::Button(value) => value.id,
+            Component::Container(value) => value.id,
+            Component::File(value) => value.id,
+            Component::MediaGallery(value) => value.id,
+            Component::Section(value) => value.id,
+            Component::SelectMenu(value) => value.id,
+            Component::Separator(value) => value.id,
+            Component::TextDisplay(value) => value.id,
+            Component::Thumbnail(value) => value.id,
+            _ => None, // メッセージ内に置けない型は配置の検証で弾きます。
+        };
+        if let Some(id) = id
+            && id != 0
+            && !self.ids.insert(id)
+        {
+            return Err(Error::InvalidUi(
+                "Components V2 の数値 ID はメッセージ内で重複できません。",
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_text(&mut self, text: &str) -> Result<()> {
+        let remaining = TOTAL_TEXT_LENGTH - self.text_length;
+        let limit = remaining.min(TEXT_DISPLAY_CONTENT_LENGTH_MAX);
+        let count = text.chars().take(limit + 1).count();
+        if count > limit {
+            let reason = if remaining < TEXT_DISPLAY_CONTENT_LENGTH_MAX {
+                "テキスト表示の合計は 4000 文字以下にしてください。"
+            } else {
+                "一つのテキスト表示は 2000 文字以下にしてください。"
+            };
+            return Err(Error::InvalidUi(reason));
+        }
+        if text.trim().is_empty() {
+            return Err(Error::InvalidUi(
+                "テキスト表示には空白以外の内容が必要です。",
+            ));
+        }
+        self.text_length += count;
+        Ok(())
+    }
+
     fn add_count(&mut self, count: usize) -> Result<()> {
         self.count += count;
         if self.count > COMPONENT_V2_COUNT {
@@ -487,6 +543,39 @@ impl<'a> Limits<'a> {
         }
         Ok(())
     }
+}
+
+fn check_gallery(gallery: &MediaGallery) -> Result<()> {
+    if !(MEDIA_GALLERY_ITEMS_MIN..=MEDIA_GALLERY_ITEMS_MAX).contains(&gallery.items.len()) {
+        return Err(Error::InvalidUi(
+            "メディアギャラリーにはメディアを 1〜10 個指定してください。",
+        ));
+    }
+    for item in &gallery.items {
+        if item.description.as_deref().is_some_and(|value| {
+            exceeds_character_limit(value, MEDIA_GALLERY_ITEM_DESCRIPTION_LENGTH_MAX)
+        }) {
+            return Err(Error::InvalidUi(
+                "メディアの代替テキストは 1024 文字以下にしてください。",
+            ));
+        }
+        check_media_url(&item.media.url)?;
+    }
+    Ok(())
+}
+
+fn check_thumbnail(thumbnail: &Thumbnail) -> Result<()> {
+    if thumbnail
+        .description
+        .as_ref()
+        .and_then(|value| value.as_deref())
+        .is_some_and(|value| exceeds_character_limit(value, THUMBNAIL_DESCRIPTION_LENGTH_MAX))
+    {
+        return Err(Error::InvalidUi(
+            "サムネイルの代替テキストは 1024 文字以下にしてください。",
+        ));
+    }
+    check_media_url(&thumbnail.media.url)
 }
 
 #[cfg(test)]
@@ -661,6 +750,84 @@ mod tests {
                     "duplicate",
                     vec![SelectOption::new("青", "blue")]
                 ))
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn nonzero_numeric_ids_are_unique_for_every_message_component() -> crate::Result<()> {
+        use crate::Error;
+        use serde_json::json;
+
+        let components: Vec<Component> = serde_json::from_value(json!([
+            {
+                "type": 17, "id": 12, "components": [
+                    {
+                        "type": 1, "id": 13, "components": [
+                            { "type": 2, "id": 14, "style": 1, "label": "Run", "custom_id": "14" }
+                        ]
+                    },
+                    {
+                        "type": 9, "id": 15, "components": [
+                            { "type": 10, "id": -16, "content": "Preview" }
+                        ],
+                        "accessory": { "type": 11, "id": 17, "media": { "url": "https://example.test/image.webp" } }
+                    },
+                    { "type": 13, "id": 18, "file": { "url": "attachment://manual.pdf" } },
+                    {
+                        "type": 12, "id": 19, "items": [
+                            { "media": { "url": "https://example.test/image.webp" } }
+                        ]
+                    }
+                ]
+            },
+            {
+                "type": 1, "components": [
+                    { "type": 5, "id": 20, "custom_id": "select" }
+                ]
+            },
+            { "type": 14, "id": 21 },
+            { "type": 14, "id": 0 },
+            { "type": 10, "id": 0, "content": "auto" },
+            { "type": 10, "id": 22, "content": "explicit" },
+            { "type": 10, "content": "auto" }
+        ]))
+        .map_err(Error::handler)?;
+        let message = components
+            .into_iter()
+            .fold(ComponentsV2::new(), ComponentsV2::component);
+        message.validate()?;
+        for id in [12, 13, 14, 15, -16, 17, 18, 19, 20, 21, 22] {
+            let duplicate = Component::TextDisplay(super::TextDisplay {
+                id: Some(id),
+                content: "duplicate".into(),
+            });
+            assert!(matches!(
+                message.clone().component(duplicate).validate(),
+                Err(Error::InvalidUi(
+                    "Components V2 の数値 ID はメッセージ内で重複できません。"
+                ))
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn exact_component_and_text_bounds_accept_unicode_and_nested_components() {
+        let contents = (0..39).fold(ComponentsV2::new(), |components, _| components.text("x"));
+        let message = ComponentsV2::new().container(0, contents);
+        assert!(message.validate().is_ok());
+        assert!(message.separator().validate().is_err());
+        assert!(
+            ComponentsV2::new()
+                .text("🦀".repeat(2000))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            ComponentsV2::new()
+                .text("🦀".repeat(2001))
                 .validate()
                 .is_err()
         );

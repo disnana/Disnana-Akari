@@ -96,6 +96,8 @@ async fn send_report(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 ## 制限
 
+Twilight の型で部品の数値 `id` を指定する場合、0 以外の値はメッセージ内で一意にします。コンテナーやセクションに入った子部品も同じ範囲です。0 や省略は Discord が ID を割り当てます。ボタンのルーティングに使う `custom_id` は別に検証します。[Discord の部品 ID 仕様](https://docs.discord.com/developers/components/reference#anatomy-of-a-component)
+
 `ComponentsV2::validate()` を呼ぶと、送信前に部品配置、本文、アップロードするファイル数などを確認できます。アップロードは1メッセージに最大10件で、更新で添付を追加するときは残すファイルも含めて数えます。Interaction への返信では、その呼び出しで Discord が通知した上限と、各ファイルのサイズも照合します。[Discord のメッセージ添付の制限](https://docs.discord.com/developers/topics/opcodes-and-status-codes#json-json-error-codes)
 
 - **本文と Embed は併用できません。** 文章は `.text()` で入れます。従来の本文や Embed が必要なら、[`UiMessage`](buttons.md) を使います。
