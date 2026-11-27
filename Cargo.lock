@@ -116,6 +116,7 @@ dependencies = [
  "rustls",
  "thiserror",
  "tokio",
+ "tracing",
  "twilight-gateway",
  "twilight-http",
  "twilight-model",
