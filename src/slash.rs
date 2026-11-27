@@ -424,7 +424,10 @@ impl SlashCommands {
         Ok(active)
     }
 
-    #[allow(deprecated)] // Twilight の Command モデルに含まれる dm_permission は送信しない。
+    #[allow(
+        deprecated,
+        reason = "Twilight の Command モデルに含まれる dm_permission は送信しない。"
+    )]
     fn replacement_commands(&self) -> Result<Vec<Command>> {
         self.entries
             .iter()
@@ -552,7 +555,13 @@ impl CommandGroup<'_> {
             None => &mut self.root.children,
             Some(group) => match self.root.children.get_mut(group) {
                 Some(Child::Group { subs, .. }) => return insert_sub(subs, name, definition),
-                _ => unreachable!("グループは作成時に登録済み"),
+                // グループは作成時に登録済みなので、通常は来ない。来たときは、黙って捨てずに失敗させる。
+                _ => {
+                    return Err(RegistrationError::UnknownCommand {
+                        name: group.clone(),
+                    }
+                    .into());
+                }
             },
         };
         match siblings.entry(name.into()) {
@@ -617,6 +626,11 @@ fn duplicate_sub(name: &str) -> Error {
         name: name.to_owned(),
     }
     .into()
+}
+
+/// 経路から、先頭のコマンド名を除いた、サブコマンドの部分。
+fn sub_path<'a, 'b>(path: &'a [&'b str]) -> &'a [&'b str] {
+    path.get(1..).unwrap_or_default()
 }
 
 /// コマンド名に、呼ばれたサブコマンドとグループの名前を続けた経路。
@@ -813,7 +827,7 @@ impl ActiveSlashCommands {
         let Some(handler) = self
             .handlers
             .get(&data.id)
-            .and_then(|route| route.find_autocomplete(&path[1..], ctx.focused_name()))
+            .and_then(|route| route.find_autocomplete(sub_path(path), ctx.focused_name()))
         else {
             // 関数のない引数には、候補なしを返して、入力欄を読み込み中のままにしない。
             if let Err(error) = ctx.respond_empty_if_needed().await {
@@ -862,7 +876,7 @@ impl ActiveSlashCommands {
         let Some(handler) = self
             .handlers
             .get(&data.id)
-            .and_then(|route| route.find(&path[1..]))
+            .and_then(|route| route.find(sub_path(&path)))
         else {
             hooks
                 .reporter
@@ -983,7 +997,10 @@ impl<'a> SlashContext<'a> {
 
     /// コマンドが呼ばれたチャンネルの ID を返します。
     /// 古い形式のペイロードでは、チャンネルオブジェクトに代わって送られる ID を使います。
-    #[allow(deprecated)]
+    #[allow(
+        deprecated,
+        reason = "古い形式のペイロードでは、channel の代わりに channel_id が送られる。"
+    )]
     pub fn channel_id(&self) -> Option<Id<ChannelMarker>> {
         self.initial
             .interaction
@@ -1512,7 +1529,10 @@ mod tests {
         assert!(ResponseState::ModalOpened.reply_action(false).is_err());
     }
 
-    #[allow(deprecated)]
+    #[allow(
+        deprecated,
+        reason = "テスト用の Interaction を組み立てるために、非推奨のフィールドを埋める。"
+    )]
     fn command_interaction(
         interaction_guild: Option<Id<GuildMarker>>,
         command_guild: Option<Id<GuildMarker>>,
@@ -1865,7 +1885,7 @@ mod tests {
         let client = twilight_http::Client::new("dummy-token".to_owned());
         let info = crate::hooks::InfoReporter::default();
         let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
-            unreachable!();
+            panic!("想定外の構造");
         };
         let mut ctx = AutocompleteContext {
             initial: InitialResponder {

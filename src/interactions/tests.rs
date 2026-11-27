@@ -37,7 +37,10 @@ async fn submit(_: &mut ModalContext<'_>) -> Result<()> {
     Ok(())
 }
 
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    reason = "テスト用の値を組み立てるために、非推奨のフィールドを埋める。"
+)]
 fn interaction(kind: InteractionType, data: InteractionData) -> Interaction {
     Interaction {
         app_permissions: None,
@@ -380,7 +383,10 @@ fn mentionable_values_preserve_order_and_require_exactly_one_matching_entity() -
     Ok(())
 }
 
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    reason = "テスト用の値を組み立てるために、非推奨のフィールドを埋める。"
+)]
 fn role(id: u64) -> Role {
     Role {
         color: 0,
@@ -559,7 +565,10 @@ fn user(id: u64, bot: bool) -> User {
     }
 }
 
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    reason = "テスト用の値を組み立てるために、非推奨のフィールドを埋める。"
+)]
 fn message(id: u64, author: User) -> Message {
     Message {
         activity: None,
