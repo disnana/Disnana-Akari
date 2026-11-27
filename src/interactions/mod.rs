@@ -25,7 +25,8 @@ use twilight_model::{
 mod owner;
 
 use crate::{
-    Error, ErrorSource, Messages, Result, Timing,
+    Error, ErrorSource, HandlerKind, Messages, RegistrationError, ResponseStateError, Result,
+    SelectionError, Timing,
     hooks::Hooks,
     slash::{
         InitialResponder, ResponseState, edit_ui_response, edit_v2_response, send_followup_message,
@@ -65,7 +66,12 @@ impl InteractionHandlers {
         custom_id: &str,
         handler: impl AsyncFn(&mut ButtonContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        register_handler(&mut self.buttons, "ボタン", custom_id, Box::new(handler))
+        register_handler(
+            &mut self.buttons,
+            HandlerKind::Button,
+            custom_id,
+            Box::new(handler),
+        )
     }
 
     pub(crate) fn register_select(
@@ -73,7 +79,12 @@ impl InteractionHandlers {
         custom_id: &str,
         handler: impl AsyncFn(&mut SelectContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        register_handler(&mut self.selects, "セレクト", custom_id, Box::new(handler))
+        register_handler(
+            &mut self.selects,
+            HandlerKind::Select,
+            custom_id,
+            Box::new(handler),
+        )
     }
 
     pub(crate) fn register_user_select(
@@ -83,7 +94,7 @@ impl InteractionHandlers {
     ) -> Result<()> {
         register_handler(
             &mut self.user_selects,
-            "ユーザーセレクト",
+            HandlerKind::UserSelect,
             custom_id,
             Box::new(handler),
         )
@@ -96,7 +107,7 @@ impl InteractionHandlers {
     ) -> Result<()> {
         register_handler(
             &mut self.role_selects,
-            "ロールセレクト",
+            HandlerKind::RoleSelect,
             custom_id,
             Box::new(handler),
         )
@@ -109,7 +120,7 @@ impl InteractionHandlers {
     ) -> Result<()> {
         register_handler(
             &mut self.channel_selects,
-            "チャンネルセレクト",
+            HandlerKind::ChannelSelect,
             custom_id,
             Box::new(handler),
         )
@@ -122,7 +133,7 @@ impl InteractionHandlers {
     ) -> Result<()> {
         register_handler(
             &mut self.mentionable_selects,
-            "メンショナブルセレクト",
+            HandlerKind::MentionableSelect,
             custom_id,
             Box::new(handler),
         )
@@ -133,7 +144,12 @@ impl InteractionHandlers {
         custom_id: &str,
         handler: impl AsyncFn(&mut ModalContext<'_>) -> Result<()> + Send + Sync + 'static,
     ) -> Result<()> {
-        register_handler(&mut self.modals, "モーダル", custom_id, Box::new(handler))
+        register_handler(
+            &mut self.modals,
+            HandlerKind::Modal,
+            custom_id,
+            Box::new(handler),
+        )
     }
 
     pub(crate) fn has_handlers(&self) -> bool {
@@ -306,7 +322,7 @@ async fn reject_selection(ctx: &mut ButtonContext<'_>, hooks: &Hooks) {
     hooks.reporter.report(
         ErrorSource::Select,
         name,
-        &Error::InvalidSelection("Discord が送った選択内容を読み取れませんでした"),
+        &Error::from(SelectionError::Unreadable),
     );
     if let Some(text) = &hooks.messages.select_failed
         && let Err(error) = ctx.reply_ephemeral(text).await
@@ -324,23 +340,17 @@ fn parse_select_values<T: Eq>(
     resolve: impl Fn(Id<GenericMarker>) -> Result<T>,
 ) -> Result<Vec<T>> {
     if values.len() > 25 {
-        return Err(Error::InvalidSelection(
-            "セレクトの選択数が上限を超えています",
-        ));
+        return Err(SelectionError::TooMany.into());
     }
     let mut selections = Vec::with_capacity(values.len());
     for value in values {
         if value.starts_with('0') || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(Error::InvalidSelection(
-                "セレクトの値が Discord ID ではありません",
-            ));
+            return Err(SelectionError::NotAnId.into());
         }
-        let id = value
-            .parse()
-            .map_err(|_| Error::InvalidSelection("セレクトの値が Discord ID ではありません"))?;
+        let id = value.parse().map_err(|_| SelectionError::NotAnId)?;
         let selection = resolve(id)?;
         if selections.contains(&selection) {
-            return Err(Error::InvalidSelection("セレクトの値が重複しています"));
+            return Err(SelectionError::Duplicate.into());
         }
         selections.push(selection);
     }
@@ -352,17 +362,13 @@ fn parse_mentionables(
     resolved: Option<&InteractionDataResolved>,
 ) -> Result<Vec<Mentionable>> {
     parse_select_values(values, |id| {
-        let resolved = resolved.ok_or(Error::InvalidSelection(
-            "メンショナブルの解決済みデータがありません",
-        ))?;
+        let resolved = resolved.ok_or(SelectionError::MissingResolved)?;
         let user_id = id.cast();
         let role_id = id.cast();
         match (resolved.users.get(&user_id), resolved.roles.get(&role_id)) {
             (Some(user), None) if user.id == user_id => Ok(Mentionable::User(user_id)),
             (None, Some(role)) if role.id == role_id => Ok(Mentionable::Role(role_id)),
-            _ => Err(Error::InvalidSelection(
-                "メンショナブルの値をユーザーまたはロールの一方に特定できません",
-            )),
+            _ => Err(SelectionError::AmbiguousMention.into()),
         }
     })
 }
@@ -387,23 +393,23 @@ fn modal_fallback(
 
 fn register_handler<T: ?Sized>(
     handlers: &mut HashMap<String, Box<T>>,
-    label: &str,
+    kind: HandlerKind,
     custom_id: &str,
     handler: Box<T>,
 ) -> Result<()> {
     if !(1..=100).contains(&custom_id.chars().count()) {
-        return Err(Error::InvalidRegistration(format!(
-            "{label} ID は 1 文字以上 100 文字以下で指定してください"
-        )));
+        return Err(RegistrationError::InvalidCustomId { kind }.into());
     }
     match handlers.entry(custom_id.into()) {
         Entry::Vacant(entry) => {
             entry.insert(handler);
             Ok(())
         }
-        Entry::Occupied(_) => Err(Error::InvalidRegistration(format!(
-            "{label} ID `{custom_id}` は登録済みです"
-        ))),
+        Entry::Occupied(_) => Err(RegistrationError::Duplicate {
+            kind,
+            name: custom_id.to_owned(),
+        }
+        .into()),
     }
 }
 
@@ -595,9 +601,7 @@ impl<'a> ButtonContext<'a> {
     pub async fn update_message(&mut self, message: &UiMessage) -> Result<()> {
         let action = self.response.update_action()?;
         if self.uses_components_v2() {
-            return Err(Error::InvalidResponseState(
-                "Components V2 のメッセージには update_v2 を使ってください",
-            ));
+            return Err(ResponseStateError::UseUpdateV2.into());
         }
         message.validate()?;
         match action {
@@ -620,9 +624,7 @@ impl<'a> ButtonContext<'a> {
     pub async fn update_v2(&mut self, message: &ComponentsV2) -> Result<()> {
         let action = self.response.update_action()?;
         if !self.uses_components_v2() {
-            return Err(Error::InvalidResponseState(
-                "Components V2 で作られた元メッセージが必要です",
-            ));
+            return Err(ResponseStateError::NeedsV2Message.into());
         }
         message.validate()?;
         match action {
@@ -673,9 +675,7 @@ impl<'a> ButtonContext<'a> {
 
     async fn send_followup(&self, content: &str, ephemeral: bool) -> Result<()> {
         if self.response == ButtonResponse::Pending {
-            return Err(Error::InvalidResponseState(
-                "追加メッセージを送る前にボタン操作に応答してください",
-            ));
+            return Err(ResponseStateError::FollowupBeforeResponse.into());
         }
         send_followup_message(
             self.initial.http,
@@ -1065,9 +1065,7 @@ impl ButtonResponse {
         if self == Self::Pending {
             Ok(())
         } else {
-            Err(Error::InvalidResponseState(
-                "この操作にはすでに初回応答を送りました",
-            ))
+            Err(ResponseStateError::AlreadyResponded.into())
         }
     }
 
@@ -1075,9 +1073,7 @@ impl ButtonResponse {
         match self {
             Self::Pending => Ok(UpdateAction::Initial),
             Self::DeferredUpdate => Ok(UpdateAction::Edit),
-            Self::Sent => Err(Error::InvalidResponseState(
-                "この操作では元のメッセージを更新できません",
-            )),
+            Self::Sent => Err(ResponseStateError::CannotUpdate.into()),
         }
     }
 }

@@ -105,7 +105,7 @@ fn duplicate_names_are_still_rejected_for_any_error_type() -> Result<()> {
     commands.register("same", parse_error)?;
     assert!(matches!(
         commands.register("same", io_error),
-        Err(Error::InvalidRegistration(_))
+        Err(Error::Registration(_))
     ));
     Ok(())
 }

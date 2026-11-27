@@ -24,7 +24,8 @@ use twilight_model::{
 use twilight_validate::command;
 
 use crate::{
-    Error, ErrorSource, InfoEvent, Result, Timing,
+    CommandSyncError, Error, ErrorSource, HandlerKind, InfoEvent, RegistrationError,
+    ResponseStateError, Result, Timing,
     error::adapt_handler,
     hooks::{Hooks, InfoReporter},
     ui::{ComponentsV2, Modal, UiMessage},
@@ -96,9 +97,11 @@ impl SlashCommands {
                 });
                 Ok(())
             }
-            Entry::Occupied(_) => Err(Error::InvalidRegistration(format!(
-                "スラッシュコマンド `/{name}` は登録済みです"
-            ))),
+            Entry::Occupied(_) => Err(RegistrationError::Duplicate {
+                kind: HandlerKind::SlashCommand,
+                name: name.to_owned(),
+            }
+            .into()),
         }
     }
 
@@ -199,33 +202,30 @@ impl SlashCommands {
 
     fn bind(mut self, registered: Vec<Command>) -> Result<ActiveSlashCommands> {
         if registered.len() != self.entries.len() {
-            return Err(Error::InvalidCommandSync(
-                "Discord が返したコマンド件数が登録件数と一致しません".to_owned(),
-            ));
+            return Err(CommandSyncError::CountMismatch {
+                expected: self.entries.len(),
+                returned: registered.len(),
+            }
+            .into());
         }
 
         let mut handlers = HashMap::with_capacity(registered.len());
         for command in registered {
             let name = command.name;
             if command.kind != CommandType::ChatInput {
-                return Err(Error::InvalidCommandSync(format!(
-                    "`/{name}` の登録結果がスラッシュコマンドではありません"
-                )));
+                return Err(CommandSyncError::NotChatInput { name }.into());
             }
-            let id = command.id.ok_or_else(|| {
-                Error::InvalidCommandSync(format!("`/{name}` の登録結果に ID がありません"))
-            })?;
-            let definition = self.entries.remove(&name).ok_or_else(|| {
-                Error::InvalidCommandSync(format!(
-                    "`/{name}` の登録結果が重複しているか、登録要求に含まれていません"
-                ))
-            })?;
+            let id = command
+                .id
+                .ok_or_else(|| CommandSyncError::MissingId { name: name.clone() })?;
+            let definition = self
+                .entries
+                .remove(&name)
+                .ok_or_else(|| CommandSyncError::UnexpectedName { name: name.clone() })?;
             if let std::collections::hash_map::Entry::Vacant(entry) = handlers.entry(id) {
                 entry.insert(definition.handler);
             } else {
-                return Err(Error::InvalidCommandSync(format!(
-                    "`/{name}` の登録結果の ID が重複しています"
-                )));
+                return Err(CommandSyncError::DuplicateId { name }.into());
             }
         }
 
@@ -457,9 +457,7 @@ impl<'a> SlashContext<'a> {
     /// 応答済み、無効なフォーム、または Discord が受け付けない場合に失敗します。
     pub async fn show_modal(&mut self, modal: &Modal) -> Result<()> {
         if *self.response_state != ResponseState::Pending {
-            return Err(Error::InvalidResponseState(
-                "フォームはスラッシュコマンドの初回応答で開いてください",
-            ));
+            return Err(ResponseStateError::ModalNotFirstResponse.into());
         }
         let response = modal.response()?;
         self.initial.send(&response).await?;
@@ -567,13 +565,11 @@ impl ResponseState {
     fn reply_action(self, ephemeral: bool) -> Result<ReplyAction> {
         match self {
             Self::Pending => Ok(ReplyAction::Initial),
-            Self::Deferred { ephemeral: false } if ephemeral => Err(Error::InvalidResponseState(
-                "遅延応答の公開範囲は変更できません",
-            )),
+            Self::Deferred { ephemeral: false } if ephemeral => {
+                Err(ResponseStateError::VisibilityLocked.into())
+            }
             Self::Deferred { .. } => Ok(ReplyAction::EditDeferred),
-            Self::Replied | Self::ModalOpened => Err(Error::InvalidResponseState(
-                "この操作にはすでに応答しました",
-            )),
+            Self::Replied | Self::ModalOpened => Err(ResponseStateError::AlreadyResponded.into()),
         }
     }
 
@@ -583,9 +579,7 @@ impl ResponseState {
         ephemeral: bool,
     ) -> Result<()> {
         if *self != Self::Pending {
-            return Err(Error::InvalidResponseState(
-                "この操作にはすでに初回応答を送りました",
-            ));
+            return Err(ResponseStateError::AlreadyResponded.into());
         }
         initial
             .send(&initial_response(InitialResponse::Deferred, ephemeral))
@@ -618,9 +612,7 @@ impl ResponseState {
         ephemeral: bool,
     ) -> Result<()> {
         if *self != Self::Replied {
-            return Err(Error::InvalidResponseState(
-                "追加メッセージを送る前に reply で初回メッセージを送ってください",
-            ));
+            return Err(ResponseStateError::FollowupBeforeResponse.into());
         }
         send_followup_message(http, interaction, content, ephemeral).await
     }

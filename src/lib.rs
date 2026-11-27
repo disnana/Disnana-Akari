@@ -27,7 +27,10 @@ use twilight_model::{
 
 pub use commands::{CommandContext, Commands};
 pub use cooldown::Cooldown;
-pub use error::{Error, HandlerError};
+pub use error::{
+    CommandSyncError, Error, HandlerError, HandlerKind, QueueKind, RegistrationError,
+    ResponseStateError, SelectionError,
+};
 pub use events::{Events, Ready};
 pub use hooks::{ErrorReport, ErrorSource, InfoEvent, Messages};
 pub use hybrid::{CommandSource, HybridContext, register_hybrid};
@@ -409,9 +412,7 @@ impl Bot {
                             hooks.reporter.report(
                                 ErrorSource::QueueFull,
                                 Some("READY"),
-                                &Error::QueueFull(
-                                    "イベントの待ち行列がいっぱいで、処理できませんでした",
-                                ),
+                                &Error::QueueFull(QueueKind::Event),
                             );
                         }
                     }
@@ -436,9 +437,7 @@ impl Bot {
                             hooks.reporter.report(
                                 ErrorSource::QueueFull,
                                 Some("MESSAGE_CREATE"),
-                                &Error::QueueFull(
-                                    "イベントの待ち行列がいっぱいで、処理できませんでした",
-                                ),
+                                &Error::QueueFull(QueueKind::Event),
                             );
                         }
                         if run_command
@@ -502,13 +501,13 @@ fn queue_text_busy(
     hooks.reporter.report(
         ErrorSource::QueueFull,
         Some("テキストコマンド"),
-        &Error::QueueFull("処理枠がいっぱいで、コマンドを実行できませんでした"),
+        &Error::QueueFull(QueueKind::TextCommand),
     );
     if hooks.messages.text_command_busy.is_some() && queue.try_send(pending).is_err() {
         hooks.reporter.report(
             ErrorSource::QueueFull,
             Some("混雑の通知"),
-            &Error::QueueFull("混雑の通知の待ち行列がいっぱいで、返信できませんでした"),
+            &Error::QueueFull(QueueKind::BusyNotice),
         );
     }
 }
@@ -522,13 +521,13 @@ fn queue_busy_response(
     hooks.reporter.report(
         ErrorSource::QueueFull,
         Some("Interaction"),
-        &Error::QueueFull("処理枠がいっぱいで、操作を実行できませんでした"),
+        &Error::QueueFull(QueueKind::Interaction),
     );
     if hooks.messages.interaction_busy.is_some() && queue.try_send(interaction).is_err() {
         hooks.reporter.report(
             ErrorSource::QueueFull,
             Some("混雑の通知"),
-            &Error::QueueFull("混雑の通知の待ち行列がいっぱいで、応答できませんでした"),
+            &Error::QueueFull(QueueKind::BusyNotice),
         );
     }
 }
