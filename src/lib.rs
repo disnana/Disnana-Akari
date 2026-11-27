@@ -302,10 +302,6 @@ impl Bot {
         .await
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "接続の組み立てと、受信と処理の並行実行を、1 か所に集めている。#23 と #24 のマージ後に分割する。"
-    )]
     async fn connect(
         self,
         on_message: Option<impl for<'a> AsyncFn(Context<'a>) -> Result<()>>,
@@ -358,7 +354,7 @@ impl Bot {
             config = config.presence(updates.initial());
         }
         let mut shard = Shard::with_config(ShardId::ONE, config.build());
-        let (event_tx, mut event_queue) = mpsc::channel(limits.queue_capacity);
+        let (event_tx, event_queue) = mpsc::channel(limits.queue_capacity);
         let (text_tx, text_queue) = mpsc::channel::<Pending<Arc<Message>>>(limits.queue_capacity);
         let (text_busy_tx, text_busy_queue) = mpsc::channel(limits.queue_capacity);
         let (interactions, interaction_queue) =
@@ -366,30 +362,14 @@ impl Bot {
         let (busy, busy_queue) = mpsc::channel(limits.queue_capacity);
         let slash = slash.as_ref();
 
-        let handle_events = async {
-            while let Some(event) = event_queue.recv().await {
-                match event {
-                    MessageEvent::Ready(ready) => {
-                        events.ready(&ready, &hooks.reporter).await;
-                    }
-                    MessageEvent::Message(pending) => {
-                        let (message, timing) = pending.begin();
-                        if let Some(handler) = &on_message {
-                            let context = Context {
-                                http: &http,
-                                message: &message,
-                                timing,
-                                permissions: &permissions,
-                            };
-                            if let Err(error) = handler(context).await {
-                                hooks.reporter.report(ErrorSource::Message, None, &error);
-                            }
-                        }
-                        events.message(&message, &hooks.reporter).await;
-                    }
-                }
-            }
-        };
+        let handle_events = dispatch_events(
+            event_queue,
+            on_message,
+            &events,
+            &http,
+            &permissions,
+            &hooks,
+        );
 
         let handle_text = work_queue::dispatch(
             text_queue,
@@ -660,6 +640,36 @@ fn update_permission_cache(permissions: &PermissionResolver, event: &Event) {
 enum MessageEvent {
     Ready(Box<Ready>),
     Message(Pending<Arc<Message>>),
+}
+
+async fn dispatch_events(
+    mut queue: mpsc::Receiver<MessageEvent>,
+    on_message: Option<impl for<'a> AsyncFn(Context<'a>) -> Result<()>>,
+    events: &Events,
+    http: &Client,
+    permissions: &PermissionResolver,
+    hooks: &Hooks,
+) {
+    while let Some(event) = queue.recv().await {
+        match event {
+            MessageEvent::Ready(ready) => events.ready(&ready, &hooks.reporter).await,
+            MessageEvent::Message(pending) => {
+                let (message, timing) = pending.begin();
+                if let Some(handler) = &on_message {
+                    let context = Context {
+                        http,
+                        message: &message,
+                        timing,
+                        permissions,
+                    };
+                    if let Err(error) = handler(context).await {
+                        hooks.reporter.report(ErrorSource::Message, None, &error);
+                    }
+                }
+                events.message(&message, &hooks.reporter).await;
+            }
+        }
+    }
 }
 
 /// テキストコマンドを処理できなかったことを報告し、文言が設定されていれば混雑を返信する。
