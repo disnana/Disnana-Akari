@@ -6,8 +6,8 @@ pub use twilight_model::gateway::payload::incoming::Ready;
 
 use crate::{
     ButtonContext, ChannelSelectContext, ErrorSource, MentionableSelectContext, ModalContext,
-    Result, RoleSelectContext, SelectContext, UserSelectContext, hooks::Reporter,
-    interactions::InteractionHandlers,
+    Result, RoleSelectContext, SelectContext, UserSelectContext, error::adapt_handler,
+    hooks::Reporter, interactions::InteractionHandlers,
 };
 
 /// Gateway イベントごとに非同期ハンドラーを登録します。
@@ -35,19 +35,25 @@ impl Events {
     }
 
     /// 新しい Gateway セッションが準備できたときに呼ばれる関数を追加します。
-    pub fn on_ready(
+    pub fn on_ready<E>(
         &mut self,
-        handler: impl AsyncFn(&Ready) -> Result<()> + Send + Sync + 'static,
-    ) {
-        self.ready.push(Box::new(handler));
+        handler: impl AsyncFn(&Ready) -> std::result::Result<(), E> + Send + Sync + 'static,
+    ) where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.ready
+            .push(Box::new(adapt_handler!(handler, event: &Ready)));
     }
 
     /// サーバーで人が送信した新着メッセージを受け取る関数を追加します。
-    pub fn on_message(
+    pub fn on_message<E>(
         &mut self,
-        handler: impl AsyncFn(&Message) -> Result<()> + Send + Sync + 'static,
-    ) {
-        self.message.push(Box::new(handler));
+        handler: impl AsyncFn(&Message) -> std::result::Result<(), E> + Send + Sync + 'static,
+    ) where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.message
+            .push(Box::new(adapt_handler!(handler, event: &Message)));
     }
 
     /// 指定したカスタム ID のボタンを押したときに呼ぶ関数を登録します。
@@ -55,90 +61,147 @@ impl Events {
     /// # エラー
     ///
     /// ID の長さが 1 文字未満か 100 文字超、または登録済みの場合に失敗します。
-    pub fn on_button(
+    pub fn on_button<E>(
         &mut self,
         custom_id: &str,
-        handler: impl AsyncFn(&mut ButtonContext<'_>) -> Result<()> + Send + Sync + 'static,
-    ) -> Result<()> {
-        self.interaction_handlers
-            .register_button(custom_id, handler)
+        handler: impl AsyncFn(&mut ButtonContext<'_>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.interaction_handlers.register_button(
+            custom_id,
+            adapt_handler!(handler, ctx: &mut ButtonContext<'_>),
+        )
     }
 
     /// 指定した ID の文字列 Select Menu が選択されたときに呼ぶ関数を登録します。
     ///
     /// # エラー
     /// ID が無効、または同じ Select Menu ID を登録済みの場合に失敗します。
-    pub fn on_select(
+    pub fn on_select<E>(
         &mut self,
         custom_id: &str,
-        handler: impl AsyncFn(&mut SelectContext<'_>) -> Result<()> + Send + Sync + 'static,
-    ) -> Result<()> {
-        self.interaction_handlers
-            .register_select(custom_id, handler)
+        handler: impl AsyncFn(&mut SelectContext<'_>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.interaction_handlers.register_select(
+            custom_id,
+            adapt_handler!(handler, ctx: &mut SelectContext<'_>),
+        )
     }
 
     /// 指定した ID のユーザー選択を処理する関数を登録します。
     ///
     /// # エラー
     /// ID が無効、または同じユーザー Select ID を登録済みの場合に失敗します。
-    pub fn on_user_select(
+    pub fn on_user_select<E>(
         &mut self,
         custom_id: &str,
-        handler: impl AsyncFn(&mut UserSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
-    ) -> Result<()> {
-        self.interaction_handlers
-            .register_user_select(custom_id, handler)
+        handler: impl AsyncFn(&mut UserSelectContext<'_>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.interaction_handlers.register_user_select(
+            custom_id,
+            adapt_handler!(handler, ctx: &mut UserSelectContext<'_>),
+        )
     }
 
     /// 指定した ID のロール選択を処理する関数を登録します。
     ///
     /// # エラー
     /// ID が無効、または同じロール Select ID を登録済みの場合に失敗します。
-    pub fn on_role_select(
+    pub fn on_role_select<E>(
         &mut self,
         custom_id: &str,
-        handler: impl AsyncFn(&mut RoleSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
-    ) -> Result<()> {
-        self.interaction_handlers
-            .register_role_select(custom_id, handler)
+        handler: impl AsyncFn(&mut RoleSelectContext<'_>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.interaction_handlers.register_role_select(
+            custom_id,
+            adapt_handler!(handler, ctx: &mut RoleSelectContext<'_>),
+        )
     }
 
     /// 指定した ID のチャンネル選択を処理する関数を登録します。
     ///
     /// # エラー
     /// ID が無効、または同じチャンネル Select ID を登録済みの場合に失敗します。
-    pub fn on_channel_select(
+    pub fn on_channel_select<E>(
         &mut self,
         custom_id: &str,
-        handler: impl AsyncFn(&mut ChannelSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
-    ) -> Result<()> {
-        self.interaction_handlers
-            .register_channel_select(custom_id, handler)
+        handler: impl AsyncFn(&mut ChannelSelectContext<'_>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.interaction_handlers.register_channel_select(
+            custom_id,
+            adapt_handler!(handler, ctx: &mut ChannelSelectContext<'_>),
+        )
     }
 
     /// 指定した ID のメニューでユーザーやロールを選んだときに呼ぶ関数を登録します。
     ///
     /// # エラー
     /// ID が無効、または同じ Mentionable Select ID を登録済みの場合に失敗します。
-    pub fn on_mentionable_select(
+    pub fn on_mentionable_select<E>(
         &mut self,
         custom_id: &str,
-        handler: impl AsyncFn(&mut MentionableSelectContext<'_>) -> Result<()> + Send + Sync + 'static,
-    ) -> Result<()> {
-        self.interaction_handlers
-            .register_mentionable_select(custom_id, handler)
+        handler: impl AsyncFn(&mut MentionableSelectContext<'_>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.interaction_handlers.register_mentionable_select(
+            custom_id,
+            adapt_handler!(handler, ctx: &mut MentionableSelectContext<'_>),
+        )
     }
 
     /// 指定した ID の Modal が送信されたときに呼ぶ関数を登録します。
     ///
     /// # エラー
     /// ID が無効、または同じ Modal ID を登録済みの場合に失敗します。
-    pub fn on_modal(
+    pub fn on_modal<E>(
         &mut self,
         custom_id: &str,
-        handler: impl AsyncFn(&mut ModalContext<'_>) -> Result<()> + Send + Sync + 'static,
-    ) -> Result<()> {
-        self.interaction_handlers.register_modal(custom_id, handler)
+        handler: impl AsyncFn(&mut ModalContext<'_>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.interaction_handlers.register_modal(
+            custom_id,
+            adapt_handler!(handler, ctx: &mut ModalContext<'_>),
+        )
     }
 
     pub(crate) fn has_message_handlers(&self) -> bool {

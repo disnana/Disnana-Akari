@@ -51,7 +51,7 @@ const GATEWAY_QUEUE_CAPACITY: usize = 64;
 type NoMessageHandler = fn(Context<'_>) -> std::future::Ready<Result<()>>;
 
 /// Akari とメッセージハンドラーで使う結果型です。
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// テスト用サーバー向けの、単一シャードの Discord Bot です。
 pub struct Bot {
@@ -221,11 +221,18 @@ impl Bot {
     /// let bot = Bot::new("test-token").unwrap();
     /// assert_send(bot.run(handle_message));
     /// ```
-    pub async fn run(
+    pub async fn run<E>(
         self,
-        on_message: impl for<'a> AsyncFn(Context<'a>) -> Result<()>,
-    ) -> Result<()> {
-        self.connect(Some(on_message), None).await
+        on_message: impl for<'a> AsyncFn(Context<'a>) -> std::result::Result<(), E>,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.connect(
+            Some(error::adapt_handler!(on_message, ctx: Context<'_>)),
+            None,
+        )
+        .await
     }
 
     async fn connect(

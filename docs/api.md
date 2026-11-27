@@ -395,9 +395,27 @@ fn build() -> Result<Bot> {
 
 `Bot::run` が返す Future は `Send` ではありません。実行中のタスクで直接 `.await` するか、Tokio の `LocalSet` を使ってください。
 
-`Result<T>` は `std::result::Result<T, Error>` の別名です。`Error::MissingIntents` は不足している Intent を保持し、`Error::Http` や `Error::CommandRegistration` は Twilight の原因を保持します。`Error`、`CommandSource`、`Mentionable` は `#[non_exhaustive]` です。外部のクレートで `match` を書く場合は `_` の分岐を付けてください。
+`Result<T, E = Error>` は `std::result::Result<T, E>` の別名で、エラー型の既定は Akari の `Error` です。`Error::MissingIntents` は不足している Intent を保持し、`Error::Http` や `Error::CommandRegistration` は Twilight の原因を保持します。`Error`、`CommandSource`、`Mentionable` は `#[non_exhaustive]` です。外部のクレートで `match` を書く場合は `_` の分岐を付けてください。
 
-Akari が返したエラーは `?` でそのまま伝播します。アプリ固有のエラーは `.map_err(Error::handler)?` で `Error::Handler` に包みます。`Box<dyn std::error::Error + Send + Sync>` を返す処理には直接 `?` を使えます。`Error::Handler` は元のエラーを保持するため、`std::error::Error::source` で原因を取得できます。
+### ハンドラーが返せるエラー
+
+コマンド、スラッシュコマンド、イベント、ボタン、選択メニュー、フォーム、`Bot::run` のハンドラーは、`Result<(), E>` を返せます。`E` は `Into<Box<dyn std::error::Error + Send + Sync>>` を満たす型なら何でもよく、標準のエラー（`io::Error`、`ParseIntError` など）、自作のエラー型、`Box<dyn Error + Send + Sync>` に、そのまま `?` を使えます。
+
+```rust
+use disnana_akari::CommandContext;
+
+// 標準のエラー（ParseIntError）と、Akari のエラー（reply の失敗）の両方に ? を使える
+async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let n: i64 = ctx.args().parse()?;
+    ctx.reply(&(n * 2).to_string()).await?;
+    Ok(())
+}
+```
+
+- Akari が返したエラー（`ctx.reply(...).await?` など）は、`Result<()>`（`Result<(), Error>`）を返すハンドラーなら、そのまま `?` で伝播し、`Error` のバリアントも保たれます。標準のエラーと Akari のエラーの両方に `?` を使いたいときは、`Box<dyn Error + Send + Sync>` を返すと便利です。ハンドラーが特定の型（`io::Error` など）を返す場合、Akari の `Error` からの変換はないので、`ctx.reply(...).await` の結果は自分で扱ってください。
+- 標準のエラーなどは、Akari が `Error::Handler` で包んで `on_error` に報告します。`Error::Handler` は元のエラーを保持します。
+- メッセージだけのエラーは `Error::msg("使い方: !echo 文章")` で作れます。`Error::handler(e)` は、任意のエラーを `Error::Handler` に包みます。
+- **クロージャ**は、末尾が関数呼び出しなら、そのまま渡せます。`Ok(())` で終わるときは、戻り値の型を書きます: `async move |ctx: CommandContext<'_>| -> Result<()> { ...; Ok(()) }`。書かないと、エラー型を決められずに `type annotations needed` になります。
 
 ## Twilight の型と REST クライアントを使う
 

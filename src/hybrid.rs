@@ -10,6 +10,7 @@ use twilight_model::{
 
 use crate::{
     CommandContext, Commands, Cooldown, Error, Result, SlashCommands, SlashContext, Timing,
+    error::handler_error,
     ui::{ComponentsV2, UiMessage},
 };
 
@@ -23,14 +24,17 @@ use crate::{
 ///
 /// 既に使われている名前や登録対象の形式に合わない定義はエラーになります。
 /// エラーの場合は、どちらの一覧にも新しいコマンドを追加しません。
-pub fn register_hybrid(
+pub fn register_hybrid<E>(
     commands: &mut Commands,
     slash: Option<&mut SlashCommands>,
     name: &str,
     description: &str,
     options: Vec<CommandOption>,
-    handler: impl AsyncFn(&mut HybridContext<'_>) -> Result<()> + Send + Sync + 'static,
-) -> Result<()> {
+    handler: impl AsyncFn(&mut HybridContext<'_>) -> std::result::Result<(), E> + Send + Sync + 'static,
+) -> Result<()>
+where
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
     commands.ensure_available(name)?;
     let text_option = first_text_option(&options).map(str::to_owned);
     let handler = Arc::new(handler);
@@ -45,7 +49,7 @@ pub fn register_hybrid(
                 let mut ctx = HybridContext {
                     inner: SourceContext::Slash(ctx.reborrow()),
                 };
-                handler.as_ref()(&mut ctx).await
+                handler.as_ref()(&mut ctx).await.map_err(handler_error)
             },
         )?;
     }
@@ -58,7 +62,7 @@ pub fn register_hybrid(
                 option_name: text_option.as_deref(),
             },
         };
-        handler.as_ref()(&mut ctx).await
+        handler.as_ref()(&mut ctx).await.map_err(handler_error)
     })
 }
 
@@ -259,7 +263,7 @@ mod tests {
     fn existing_slash_command_leaves_text_registry_unchanged() -> Result<()> {
         let mut text = Commands::new("!")?;
         let mut slash = SlashCommands::for_guild(Id::new(1));
-        slash.register("ping", "説明", vec![], async |_| Ok(()))?;
+        slash.register("ping", "説明", vec![], async |_| -> Result<()> { Ok(()) })?;
 
         let result = register_hybrid(&mut text, Some(&mut slash), "ping", "説明", vec![], handler);
         assert!(result.is_err());
@@ -274,6 +278,6 @@ mod tests {
 
         let result = register_hybrid(&mut text, Some(&mut slash), "ping", "説明", vec![], handler);
         assert!(result.is_err());
-        slash.register("ping", "説明", vec![], async |_| Ok(()))
+        slash.register("ping", "説明", vec![], async |_| -> Result<()> { Ok(()) })
     }
 }

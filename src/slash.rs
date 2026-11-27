@@ -25,6 +25,7 @@ use twilight_validate::command;
 
 use crate::{
     Error, ErrorSource, InfoEvent, Result, Timing,
+    error::adapt_handler,
     hooks::{Hooks, InfoReporter},
     ui::{ComponentsV2, Modal, UiMessage},
 };
@@ -70,13 +71,19 @@ impl SlashCommands {
     /// # エラー
     ///
     /// Discord の制約に合わない定義や、重複した名前を拒否します。
-    pub fn register(
+    pub fn register<E>(
         &mut self,
         name: &str,
         description: &str,
         options: Vec<CommandOption>,
-        handler: impl AsyncFn(&mut SlashContext<'_>) -> Result<()> + Send + Sync + 'static,
-    ) -> Result<()> {
+        handler: impl AsyncFn(&mut SlashContext<'_>) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
         command::chat_input_name(name)?;
         command::description(description)?;
         command::options(&options)?;
@@ -85,7 +92,7 @@ impl SlashCommands {
                 entry.insert(Definition {
                     description: description.into(),
                     options,
-                    handler: Box::new(handler),
+                    handler: Box::new(adapt_handler!(handler, ctx: &mut SlashContext<'_>)),
                 });
                 Ok(())
             }

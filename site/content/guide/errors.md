@@ -2,6 +2,48 @@
 
 Akari は、頼まれていないことを勝手にしません。標準出力には何も書かず、エラーは **あなたが受け取る** 形にしています。
 
+## ハンドラーが返せるエラー
+
+ハンドラーは、`Result<(), E>` を返せます。`E` は、標準のエラー、自作のエラー型、`Box<dyn Error + Send + Sync>` など、何でもかまいません。`?` をそのまま使えます。
+
+```rust
+use disnana_akari::CommandContext;
+
+// 標準のエラー（ParseIntError）と、Akari のエラー（reply の失敗）の両方に ? を使える
+async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let n: i64 = ctx.args().parse()?;
+    ctx.reply(&(n * 2).to_string()).await?;
+    Ok(())
+}
+```
+
+```rust
+use disnana_akari::{CommandContext, Error, Result};
+
+// メッセージだけのエラーは Error::msg
+async fn echo(ctx: CommandContext<'_>) -> Result<()> {
+    if ctx.args().is_empty() {
+        return Err(Error::msg("使い方: !echo 文章"));
+    }
+    ctx.reply(ctx.args()).await
+}
+```
+
+- `Result<()>`（Akari の `Error`）を返すハンドラーは、Akari のエラーを `?` でそのまま伝えられます。
+- ハンドラーが返したエラーは、`Bot::on_error` に報告されます。標準のエラーなどは、`Error::Handler` に包まれ、元のエラーは取り出せます。
+- **クロージャ**は、末尾が関数呼び出しなら、そのまま渡せます。`Ok(())` で終わるときは、戻り値の型を書きます。書かないと、`type annotations needed` になります。
+
+```rust
+use disnana_akari::{CommandContext, Commands, Result};
+
+fn register(commands: &mut Commands) -> Result<()> {
+    commands.register("ping", async move |ctx: CommandContext<'_>| -> Result<()> {
+        ctx.reply("Pong!").await?;
+        Ok(())
+    })
+}
+```
+
 ## エラーを受け取る
 
 `Bot::on_error` に関数を渡すと、Akari の内部で起きたエラーを、一件ずつ受け取れます。
