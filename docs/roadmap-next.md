@@ -125,13 +125,13 @@ d.py では、`Permissions` の `manage_messages` のような名前、`Permissi
 <!-- no-check -->
 ```rust
 // 読む: チャンネルの上書き設定
-let overwrite = ctx.overwrite_of(channel_id, Target::Role(role_id)).await?;   // Option<Overwrite>
+let overwrite = ctx.overwrite_of(channel_id, OverwriteTarget::Role(role_id)).await?;   // Option<Overwrite>
 overwrite.state(Permissions::SEND_MESSAGES);   // Tri::Allow / Tri::Deny / Tri::Inherit
 
 // 変える: 1 つの対象の上書きを、許可、拒否、継承で指定する
 ctx.set_overwrite(
     channel_id,
-    Target::Role(role_id),
+    OverwriteTarget::Role(role_id),
     Overwrite::new()
         .allow(Permissions::VIEW_CHANNEL)
         .deny(Permissions::SEND_MESSAGES)
@@ -288,7 +288,7 @@ let channel = ctx.manage().create_channel(
         .user_limit(10)
         .bitrate(64_000)
         .category(category_id)
-        .overwrite(Target::Role(members), Overwrite::new().deny(Permissions::CONNECT)),
+        .overwrite(OverwriteTarget::Role(members), Overwrite::new().deny(Permissions::CONNECT)),
     "新しい雑談用の VC",       // 監査ログの理由（必須）
 ).await?;
 ```

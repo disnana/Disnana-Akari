@@ -68,6 +68,28 @@ impl GuildInfo {
             .unwrap_or(0)
             .max(0)
     }
+
+    /// メンバーの、サーバー全体の権限（チャンネルの上書きを含まない）。
+    /// 所有者と管理者は、すべての権限を持つ。
+    pub(crate) fn root_permissions(
+        &self,
+        guild_id: Id<GuildMarker>,
+        user_id: Id<UserMarker>,
+        member_roles: &[Id<RoleMarker>],
+    ) -> Permissions {
+        let everyone = self
+            .roles
+            .get(&Id::new(guild_id.get()))
+            .copied()
+            .unwrap_or_else(Permissions::empty);
+        let roles: Vec<_> = member_roles
+            .iter()
+            .filter_map(|id| self.roles.get(id).map(|permissions| (*id, *permissions)))
+            .collect();
+        PermissionCalculator::new(guild_id, user_id, everyone, &roles)
+            .owner_id(self.owner_id)
+            .root()
+    }
 }
 
 #[derive(Debug)]
