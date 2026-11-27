@@ -1,5 +1,6 @@
 #![doc = include_str!("../docs/api.md")]
 
+mod autocomplete;
 mod commands;
 mod cooldown;
 mod error;
@@ -32,6 +33,7 @@ use twilight_model::{
     },
 };
 
+pub use autocomplete::AutocompleteContext;
 pub use commands::{CommandContext, Commands};
 pub use cooldown::Cooldown;
 pub use error::{

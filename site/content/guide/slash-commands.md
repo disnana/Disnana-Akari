@@ -128,6 +128,40 @@ async fn double(ctx: &mut SlashContext<'_>) -> std::result::Result<(), Box<dyn s
 
 テキストとスラッシュを兼ねる[ハイブリッドコマンド](hybrid-commands.md)でも、`ctx.parse::<T>(name)` を同じように使えます（文字列の引数が対象です）。
 
+## 入力中の候補を出す（オートコンプリート）
+
+引数を入力している途中に、候補を表示できます。コマンドを登録したあとに `SlashCommands::autocomplete` で、コマンド名（サブコマンドなら経路）と引数名を指定して関数を付けます。Akari が、その引数の `autocomplete` を自動で有効にします。
+
+```rust
+use disnana_akari::{AutocompleteContext, Result, SlashCommands, SlashContext};
+
+fn register(slash: &mut SlashCommands) -> Result<()> {
+    let color = SlashCommands::string_option("color", "好きな色", true);
+    slash.register("paint", "色を選びます", vec![color], paint)?;
+    slash.autocomplete(&["paint"], "color", suggest_color)
+}
+
+async fn suggest_color(ctx: &mut AutocompleteContext<'_>) -> Result<()> {
+    let typed = ctx.focused().to_lowercase();
+    let choices = ["red", "green", "blue"]
+        .into_iter()
+        .filter(|name| name.contains(&typed))
+        .map(|name| SlashCommands::string_choice(name, name))
+        .collect();
+    ctx.respond(choices).await
+}
+
+async fn paint(ctx: &mut SlashContext<'_>) -> Result<()> {
+    let color = ctx.string("color").unwrap_or("red");
+    ctx.reply(color).await
+}
+```
+
+- `ctx.focused()` は、いま入力している途中の文字列です。`ctx.string(name)` で、同じコマンドの入力済みの文字列の引数も読めます。
+- 候補は最大 25 件で、`ctx.respond` は一度だけ呼べます。候補は `string_choice`、`integer_choice`、`number_choice` で作ります。
+- 付けられるのは、文字列、整数、数値の引数で、選択肢（`choices`）を持たないものだけです。
+- 関数が候補を返さずに終わったときは、入力欄が読み込み中のままにならないよう、空の候補を返します。エラーは `Bot::on_error` に報告します。
+
 ## サブコマンドにまとめる
 
 `/config set`、`/config advanced reset` のように、コマンドをまとめるには `SlashCommands::group` を使います。返された `CommandGroup` に `subcommand` を登録します。グループの中にグループ（`group`）も作れますが、Discord の制約で最大 3 段（コマンド → グループ → サブコマンド）までです。
