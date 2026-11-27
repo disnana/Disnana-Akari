@@ -104,6 +104,32 @@ impl Commands {
         })
     }
 
+    /// コマンドの実行に必要な権限を宣言します。ハンドラーの前に、実行者と Bot の権限を確認します。
+    ///
+    /// 足りなければ、ハンドラーを実行せず、[`CheckFailure::MissingPermissions`](crate::CheckFailure::MissingPermissions)
+    /// か [`CheckFailure::BotMissingPermissions`](crate::CheckFailure::BotMissingPermissions) で失敗します。
+    /// グループを指定すると、その配下のコマンドにも適用されます。
+    /// 空白区切りの正式名または別名で指定します。
+    ///
+    /// # エラー
+    ///
+    /// 登録されていないコマンドを指定した場合に失敗します。
+    pub fn require(&mut self, path: &str, needs: crate::Needs) -> Result<()> {
+        let info = self
+            .entries
+            .info(path)
+            .ok_or_else(|| RegistrationError::UnknownCommand {
+                name: path.to_owned(),
+            })?;
+        let canonical = info
+            .qualified_name()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        self.checks.push(needs.into_check(canonical));
+        Ok(())
+    }
+
     /// 空白区切りの正式名または別名から、該当する登録情報を取得します。非表示のコマンドも取得できます。
     pub fn command_info(&self, path: &str) -> Option<CommandInfo<'_>> {
         self.entries.info(path)
@@ -1025,6 +1051,79 @@ mod tests {
             commands.dispatch(ctx).await,
             Err(Error::HandlerPanic { .. })
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn require_uses_the_canonical_path_for_aliases_and_covers_children() -> Result<()> {
+        use crate::{CheckFailure, Needs};
+        use twilight_model::guild::Permissions;
+
+        let mut commands = Commands::new("!")?;
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&ran);
+        commands
+            .group_with_aliases("config", &["c"])?
+            .subcommand_with_aliases(
+                "echo",
+                &["e"],
+                async move |_: CommandContext<'_>| -> Result<()> {
+                    log.lock().unwrap().push("config echo");
+                    Ok(())
+                },
+            )?;
+        let log = Arc::clone(&ran);
+        commands.register("ping", async move |_: CommandContext<'_>| -> Result<()> {
+            log.lock().unwrap().push("ping");
+            Ok(())
+        })?;
+
+        // 存在しないコマンドは、確認が効かないまま見逃さず、登録の時点で失敗する。
+        assert!(
+            commands
+                .require("nope", Needs::new().author(Permissions::BAN_MEMBERS))
+                .is_err()
+        );
+        assert!(
+            commands
+                .require("c missing", Needs::new().author(Permissions::BAN_MEMBERS))
+                .is_err()
+        );
+        // 別名で宣言しても、グループの配下を含めて、別名でも正式名でも呼び出しに適用される。
+        commands.require("c", Needs::new().author(Permissions::BAN_MEMBERS))?;
+
+        let http = Client::new("test".into());
+        let permissions = PermissionResolver::new(None);
+        let (_, timing) = Pending::new((), None).begin();
+        for content in ["!c e", "!config echo"] {
+            let message = command_message(content)?;
+            let result = commands
+                .dispatch(Context {
+                    http: &http,
+                    message: &message,
+                    timing,
+                    permissions: &permissions,
+                })
+                .await;
+            // DM では権限を確認できないので、ハンドラーを実行せず失敗する。
+            assert!(
+                matches!(result, Err(Error::Check(CheckFailure::GuildOnly))),
+                "{content}: {result:?}"
+            );
+        }
+        assert!(ran.lock().unwrap().is_empty());
+
+        // 宣言していないコマンドは、そのまま実行される。
+        let message = command_message("!ping")?;
+        commands
+            .dispatch(Context {
+                http: &http,
+                message: &message,
+                timing,
+                permissions: &permissions,
+            })
+            .await?;
+        assert_eq!(*ran.lock().unwrap(), ["ping"]);
         Ok(())
     }
 }

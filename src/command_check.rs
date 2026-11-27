@@ -10,7 +10,7 @@ use twilight_model::{
 };
 
 use crate::{
-    CheckFailure, Context, Result,
+    Access, CheckFailure, Context, Result,
     error::adapt_handler,
     permissions::check_permissions,
     slash::{interaction_channel_id, interaction_permissions},
@@ -93,6 +93,7 @@ enum Origin<'a> {
     },
     Application {
         interaction: &'a Interaction,
+        access: Access<'a>,
         kind: CommandCheckSource,
         root: &'a str,
         path: &'a [&'a str],
@@ -111,6 +112,7 @@ impl<'a> CommandCheckContext<'a> {
 
     pub(crate) const fn application(
         interaction: &'a Interaction,
+        access: Access<'a>,
         kind: CommandCheckSource,
         root: &'a str,
         path: &'a [&'a str],
@@ -118,6 +120,7 @@ impl<'a> CommandCheckContext<'a> {
         Self {
             origin: Origin::Application {
                 interaction,
+                access,
                 kind,
                 root,
                 path,
@@ -144,6 +147,14 @@ impl<'a> CommandCheckContext<'a> {
             .flat_map(str::split_whitespace)
             .chain(root)
             .chain(path.iter().copied())
+    }
+
+    /// 権限の確認や、Bot とほかのメンバーの権限の取得に使う [`Access`] を返します。
+    pub fn access(&self) -> Access<'a> {
+        match self.origin {
+            Origin::Text { ctx, .. } => ctx.access(),
+            Origin::Application { access, .. } => access,
+        }
     }
 
     /// 呼び出したユーザーです。Interaction にユーザー情報がなければ `None` です。

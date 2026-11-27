@@ -584,7 +584,9 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 
 ## 権限の確認（Access）
 
-`ctx.access()` が返す `Access` で、実行者、Bot、ほかのメンバーの権限を調べ、確認します。`can`、`missing`、`bot_can`、`bot_missing` は調べるだけで、`require_permissions`、`require_bot_permissions`、`require_guild_owner`、`require_role`、`require_any_role`、`require_can_moderate` は、満たさなければ `CheckFailure` で失敗します。`snapshot` は、実行者と Bot の権限と所有者かどうかを、`PermissionSnapshot` にまとめて返します。ロールの階層で断られた理由は、`CheckFailure::Hierarchy` が持つ `HierarchyDenied` で分かります。
+`ctx.access()` が返す `Access` で、実行者、Bot、ほかのメンバーの権限を調べ、確認します。`can`、`missing`、`bot_can`、`bot_missing` は調べるだけで、`require_permissions`、`require_bot_permissions`、`require_guild_owner`、`require_role`、`require_any_role`、`require_can_moderate` は、満たさなければ `CheckFailure` で失敗します。`snapshot` は、実行者と Bot の権限と所有者かどうかを、`PermissionSnapshot` にまとめて返します。
+
+`Needs` は、コマンドの実行に必要な権限を宣言する型です。`Needs::new().author(..).bot(..)` を、`Commands::require` と `SlashCommands::require` に渡すと、ハンドラーの前に、実行者、Bot の順に確認します。宣言は、指定したコマンドとその配下だけに適用し、登録されていない名前は、登録の時点で失敗します。独自のチェックでは、`CommandCheckContext::access()` で `Access` を使えます。ロールの階層で断られた理由は、`CheckFailure::Hierarchy` が持つ `HierarchyDenied` で分かります。
 
 ## 権限やフラグを名前で扱う
 

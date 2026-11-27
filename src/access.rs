@@ -17,7 +17,7 @@ use twilight_model::{
 };
 
 use crate::{
-    CheckFailure, HierarchyDenied, Result,
+    CheckFailure, CommandCheck, CommandCheckContext, HierarchyDenied, Result,
     permissions::{PermissionResolver, check_permissions},
     slash::interaction_channel_id,
 };
@@ -53,6 +53,94 @@ impl std::fmt::Debug for Access<'_> {
             .field("guild_id", &self.guild_id)
             .field("channel_id", &self.channel_id)
             .finish_non_exhaustive()
+    }
+}
+
+/// コマンドの実行に必要な権限を、登録時に宣言するための型です。
+///
+/// [`Commands::require`](crate::Commands::require) や
+/// [`SlashCommands::require`](crate::SlashCommands::require) に渡すと、ハンドラーの前に、
+/// 実行者と Bot の権限を確認します。足りなければ、ハンドラーを実行しません。
+///
+/// ```
+/// use disnana_akari::{Needs, model::guild::Permissions};
+///
+/// let needs = Needs::new()
+///     .author(Permissions::MANAGE_MESSAGES)
+///     .bot(Permissions::MANAGE_MESSAGES | Permissions::READ_MESSAGE_HISTORY);
+/// assert_eq!(needs.author_permissions(), Permissions::MANAGE_MESSAGES);
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Needs {
+    author: Permissions,
+    bot: Permissions,
+}
+
+impl Default for Needs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Needs {
+    /// 何も必要としない宣言を作ります。
+    pub const fn new() -> Self {
+        Self {
+            author: Permissions::empty(),
+            bot: Permissions::empty(),
+        }
+    }
+
+    /// 実行者に必要な権限を指定します。
+    #[must_use]
+    pub const fn author(mut self, permissions: Permissions) -> Self {
+        self.author = permissions;
+        self
+    }
+
+    /// Bot に必要な権限を指定します。
+    #[must_use]
+    pub const fn bot(mut self, permissions: Permissions) -> Self {
+        self.bot = permissions;
+        self
+    }
+
+    /// 実行者に必要な権限を返します。
+    pub const fn author_permissions(&self) -> Permissions {
+        self.author
+    }
+
+    /// Bot に必要な権限を返します。
+    pub const fn bot_permissions(&self) -> Permissions {
+        self.bot
+    }
+
+    /// 実行者、Bot の順に確認する。何も必要としない宣言は、通信も確認もしない。
+    pub(crate) async fn verify(&self, access: &Access<'_>) -> Result<()> {
+        if !self.author.is_empty() {
+            access.require_permissions(self.author).await?;
+        }
+        if !self.bot.is_empty() {
+            access.require_bot_permissions(self.bot).await?;
+        }
+        Ok(())
+    }
+
+    /// 指定したコマンド（とその配下）だけで、確認を行うチェックにする。
+    pub(crate) fn into_check(self, command: Vec<String>) -> CommandCheck {
+        CommandCheck::new(async move |ctx: CommandCheckContext<'_>| {
+            let path: Vec<&str> = ctx.command_path().collect();
+            let applies = path.len() >= command.len()
+                && path
+                    .iter()
+                    .zip(&command)
+                    .all(|(given, wanted)| given == wanted);
+            if applies {
+                self.verify(&ctx.access()).await
+            } else {
+                Ok(())
+            }
+        })
     }
 }
 
@@ -834,5 +922,125 @@ mod tests {
         let access = Access::for_interaction(&http, &resolver, &interaction);
         // サーバーにいないユーザーは、メンバーを取得できず、許可されない。
         assert!(access.require_can_moderate(Id::new(99)).await.is_err());
+    }
+
+    async fn run_needs(
+        interaction: &Interaction,
+        needs: Needs,
+        command: &[&str],
+        invoked: (&str, &[&str]),
+    ) -> Result<()> {
+        use twilight_model::application::command::CommandType;
+
+        let http = offline_http();
+        let resolver = PermissionResolver::default();
+        let access = Access::for_interaction(&http, &resolver, interaction);
+        let check = needs.into_check(command.iter().map(|part| (*part).to_owned()).collect());
+        crate::command_check::run_checks(
+            &[check],
+            CommandCheckContext::application(
+                interaction,
+                access,
+                crate::CommandCheckSource::Application(CommandType::ChatInput),
+                invoked.0,
+                invoked.1,
+            ),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn needs_check_the_author_then_the_bot_before_the_handler() {
+        let interaction = slash_interaction(
+            true,
+            Permissions::MANAGE_MESSAGES.bits(),
+            Permissions::SEND_MESSAGES.bits(),
+        );
+        let ok = Needs::new()
+            .author(Permissions::MANAGE_MESSAGES)
+            .bot(Permissions::SEND_MESSAGES);
+        assert!(
+            run_needs(&interaction, ok, &["purge"], ("purge", &[]))
+                .await
+                .is_ok()
+        );
+
+        let author_short = Needs::new().author(Permissions::BAN_MEMBERS);
+        assert!(matches!(
+            run_needs(&interaction, author_short, &["purge"], ("purge", &[])).await,
+            Err(crate::Error::Check(CheckFailure::MissingPermissions(missing)))
+                if missing == Permissions::BAN_MEMBERS
+        ));
+
+        let bot_short = Needs::new().bot(Permissions::EMBED_LINKS);
+        assert!(matches!(
+            run_needs(&interaction, bot_short, &["purge"], ("purge", &[])).await,
+            Err(crate::Error::Check(CheckFailure::BotMissingPermissions(missing)))
+                if missing == Permissions::EMBED_LINKS
+        ));
+
+        // 実行者と Bot のどちらも足りないときは、実行者の不足を先に伝える。
+        let both = Needs::new()
+            .author(Permissions::BAN_MEMBERS)
+            .bot(Permissions::EMBED_LINKS);
+        assert!(matches!(
+            run_needs(&interaction, both, &["purge"], ("purge", &[])).await,
+            Err(crate::Error::Check(CheckFailure::MissingPermissions(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn needs_apply_to_the_command_and_its_children_only() {
+        let interaction = slash_interaction(true, 0, 0);
+        let needs = Needs::new().author(Permissions::BAN_MEMBERS);
+        // 宣言したコマンドと、その配下には適用する。
+        assert!(
+            run_needs(&interaction, needs, &["config"], ("config", &[]))
+                .await
+                .is_err()
+        );
+        assert!(
+            run_needs(&interaction, needs, &["config"], ("config", &["set"]))
+                .await
+                .is_err()
+        );
+        assert!(
+            run_needs(
+                &interaction,
+                needs,
+                &["config", "set"],
+                ("config", &["set"])
+            )
+            .await
+            .is_err()
+        );
+        // ほかのコマンドと、兄弟のサブコマンドには適用しない。
+        assert!(
+            run_needs(&interaction, needs, &["other"], ("config", &[]))
+                .await
+                .is_ok()
+        );
+        assert!(
+            run_needs(
+                &interaction,
+                needs,
+                &["config", "set"],
+                ("config", &["get"])
+            )
+            .await
+            .is_ok()
+        );
+        // 何も必要としない宣言は、DM でも確認しない。
+        let dm = slash_interaction(false, 0, 0);
+        assert!(
+            run_needs(&dm, Needs::new(), &["config"], ("config", &[]))
+                .await
+                .is_ok()
+        );
+        // 権限を必要とする宣言は、DM では拒否する。
+        assert!(matches!(
+            run_needs(&dm, needs, &["config"], ("config", &[])).await,
+            Err(crate::Error::Check(CheckFailure::GuildOnly))
+        ));
     }
 }
