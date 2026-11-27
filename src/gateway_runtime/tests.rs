@@ -23,6 +23,7 @@ use crate::{
 
 use super::lost_gateway_session;
 
+mod permissions_on_reconnect;
 mod voice_handshake;
 
 const FIXTURE_TOKEN: &str = "local-gateway-fixture";
@@ -253,7 +254,7 @@ async fn recommended_shards_launch_in_waves_and_resume_independently() {
     let (result, (), ()) = timeout(Duration::from_secs(15), async {
         tokio::join!(
             client,
-            respond_to_discovery(http),
+            respond_to_discovery(&http, 1),
             mock_shards(gateway, &url, received, shutdown, &status, &voice)
         )
     })
@@ -276,7 +277,7 @@ async fn recommended_shards_launch_in_waves_and_resume_independently() {
     );
 }
 
-async fn respond_to_discovery(listener: TcpListener) {
+async fn respond_to_discovery(listener: &TcpListener, max_concurrency: u16) {
     let (socket, _) = listener.accept().await.unwrap();
     let mut request = BufReader::new(socket);
     let mut line = String::new();
@@ -289,7 +290,10 @@ async fn respond_to_discovery(listener: TcpListener) {
             break;
         }
     }
-    let body = r#"{"url":"wss://gateway.discord.gg","shards":2,"session_start_limit":{"total":10,"remaining":10,"reset_after":60000,"max_concurrency":1}}"#;
+    let body = json!({
+        "url":"wss://gateway.discord.gg", "shards":2,
+        "session_start_limit":{"total":10, "remaining":10, "reset_after":60000, "max_concurrency":max_concurrency}
+    }).to_string();
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
