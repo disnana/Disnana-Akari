@@ -107,6 +107,9 @@ pub enum Error {
     /// Twilight が操作部品を無効と判定しました。
     #[error(transparent)]
     ComponentValidation(#[from] ComponentValidationError),
+    /// 管理操作に渡した値が、Discord の範囲に入っていません。
+    #[error(transparent)]
+    InvalidArgument(#[from] InvalidArgument),
     /// 利用者が登録したハンドラーから返された、アプリ固有のエラーです。
     #[error(transparent)]
     Handler(#[from] HandlerError),
@@ -403,6 +406,18 @@ pub enum CheckFailure {
     /// ロールの階層により、対象を操作できません。
     #[error("ロールの階層により、操作できません: {0}")]
     Hierarchy(HierarchyDenied),
+}
+
+/// 管理操作に渡した値が、Discord の範囲に入っていない理由です。送る前に検出するので、通信は起きません。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum InvalidArgument {
+    /// タイムアウトの期間が 28 日を超えています。
+    #[error("タイムアウトは 28 日以内にしてください")]
+    TimeoutTooLong,
+    /// BAN と一緒に削除するメッセージの期間が 7 日を超えています。
+    #[error("メッセージを一緒に削除できる期間は 7 日以内です")]
+    BanMessageWindowTooLong,
 }
 
 /// ロールの階層により、対象のメンバーを操作できない理由です。

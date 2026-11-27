@@ -512,6 +512,11 @@ impl<'a> CommandContext<'a> {
         self.ctx.access()
     }
 
+    /// メンバー、ロール、VC の管理操作に使う [`Manage`](crate::Manage) を返します。
+    pub fn manage(&self) -> crate::Manage<'a> {
+        self.ctx.manage()
+    }
+
     /// 送り主の、このチャンネルでの権限を返します。詳細は [`Context::permissions`] を参照してください。
     ///
     /// # エラー

@@ -16,6 +16,7 @@ mod hooks;
 mod hybrid;
 mod interactions;
 mod limits;
+mod manage;
 mod member_cache;
 mod message_cache;
 mod message_events;
@@ -70,8 +71,8 @@ pub use commands::{
 pub use concurrency::{ConcurrencyLimit, ConcurrencyPermit};
 pub use cooldown::Cooldown;
 pub use error::{
-    CheckFailure, CommandSyncError, Error, HandlerError, HandlerKind, HierarchyDenied, QueueKind,
-    RegistrationError, ResponseStateError, SelectionError,
+    CheckFailure, CommandSyncError, Error, HandlerError, HandlerKind, HierarchyDenied,
+    InvalidArgument, QueueKind, RegistrationError, ResponseStateError, SelectionError,
 };
 pub use events::{
     Events, GatewayPayload, GuildSoundboardSoundCreate, GuildSoundboardSoundDelete,
@@ -94,6 +95,7 @@ pub use interactions::{
     MentionableSelectContext, ModalContext, RoleSelectContext, SelectContext, UserSelectContext,
 };
 pub use limits::Limits;
+pub use manage::{MAX_BAN_MESSAGE_DELETE, MAX_TIMEOUT, Manage};
 pub use member_cache::{CachedMemberRemove, CachedMemberUpdate, MemberCacheHandle};
 pub use message_cache::CachedMessageEdit;
 pub use message_events::MessageUpdate;
@@ -1281,6 +1283,11 @@ impl<'a> Context<'a> {
     /// 権限の確認や、ほかのメンバーの権限の取得に使う [`Access`] を返します。
     pub fn access(&self) -> Access<'a> {
         Access::for_message(self.http, self.permissions, self.message)
+    }
+
+    /// メンバー、ロール、VC の管理操作に使う [`Manage`] を返します。
+    pub fn manage(&self) -> Manage<'a> {
+        Manage::new(self.access())
     }
 
     /// メッセージを送った人の、このチャンネルでの権限を計算して返します。

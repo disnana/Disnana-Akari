@@ -289,6 +289,11 @@ impl<'a> HybridContext<'a> {
         }
     }
 
+    /// メンバー、ロール、VC の管理操作に使う [`Manage`](crate::Manage) を返します。
+    pub fn manage(&self) -> crate::Manage<'a> {
+        crate::Manage::new(self.access())
+    }
+
     /// 呼び出した人の、このチャンネルでの権限を返します。
     ///
     /// スラッシュでは Discord が送った値を、テキストでは REST で計算した値を使います
