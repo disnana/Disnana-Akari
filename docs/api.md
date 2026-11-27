@@ -526,7 +526,17 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 
 `voice.set_state(guild_id, VoiceStateChange::join(channel_id)).await` で参加または移動を、`VoiceStateChange::leave()` で退出を担当シャードへ要求します。`self_mute`、`self_deaf` も設定できます。呼び出しの成功は、シャードが送信キューへの追加を受理した時点を示します。
 
+`join(guild_id, channel_id, timeout)` と `leave(guild_id, timeout)` は Discord の確認通知まで待ちます。`VoiceConnection::status()` と `changed().await` は音声サーバーの割り当てと切断を確認するための API です。
+
 音声接続の準備では、Bot 自身の `VoiceStateUpdate` と同じサーバーの `VoiceServerUpdate` を受け取ります。`VoiceServerUpdate` に含まれるトークンは機密情報です。
+
+## 送信前の検証
+
+`validation::message_content`、`attachment_count`、`attachment_sizes` で、本文の文字数、保持分を含む添付件数、Discord が通知した1ファイルのバイト上限を確認します。本文は上限超過を検出した時点で走査を打ち切ります。`UiMessage::validate`、`ComponentsV2::validate`、`Modal::validate` は各ビルダーの構成を検証します。
+
+## テキストコマンドのメタデータとヘルプ
+
+`CommandMetadata` で説明、使い方、標準ヘルプの表示有無を設定できます。`Commands::set_metadata` は正式名または別名から指定し、`command_info(path)` と `command_infos()` で登録情報を参照できます。`Commands::register_help(name)` で一覧と詳細を表示するテキストコマンドを追加します。
 
 ## コマンドの共通チェック
 
