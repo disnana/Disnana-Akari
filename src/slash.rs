@@ -698,38 +698,57 @@ fn duplicate_sub(name: &str) -> Error {
     .into()
 }
 
-/// 経路から、先頭のコマンド名を除いた、サブコマンドの部分。
-fn sub_path<'a, 'b>(path: &'a [&'b str]) -> &'a [&'b str] {
-    path.get(1..).unwrap_or_default()
-}
-
 /// コマンド名に、呼ばれたサブコマンドとグループの名前を続けた経路。
 pub(crate) fn command_path(data: &CommandData) -> Vec<&str> {
     let mut path = vec![data.name.as_str()];
     let mut options = data.options.as_slice();
-    while let [option] = options {
-        match &option.value {
-            CommandOptionValue::SubCommand(inner) | CommandOptionValue::SubCommandGroup(inner) => {
-                path.push(option.name.as_str());
-                options = inner;
-            }
-            _ => break,
-        }
+    while let Some((name, inner)) = next_subcommand(options) {
+        path.push(name);
+        options = inner;
     }
     path
 }
 
 /// サブコマンドの入れ子をたどった先の、実際の引数。
 pub(crate) fn leaf_options(mut options: &[CommandDataOption]) -> &[CommandDataOption] {
-    while let [option] = options {
-        match &option.value {
-            CommandOptionValue::SubCommand(inner) | CommandOptionValue::SubCommandGroup(inner) => {
-                options = inner;
-            }
-            _ => break,
-        }
+    while let Some((_, inner)) = next_subcommand(options) {
+        options = inner;
     }
     options
+}
+
+fn next_subcommand(options: &[CommandDataOption]) -> Option<(&str, &[CommandDataOption])> {
+    let [option] = options else { return None };
+    match &option.value {
+        CommandOptionValue::SubCommand(inner) | CommandOptionValue::SubCommandGroup(inner) => {
+            Some((&option.name, inner))
+        }
+        _ => None,
+    }
+}
+
+fn routing_path<'data, 'path>(
+    mut options: &'data [CommandDataOption],
+    path: &'path mut [&'data str; 2],
+) -> Option<&'path [&'data str]> {
+    // Discord の最上位コマンドからは、グループとサブコマンドの2段までたどれる。
+    let mut depth = 0;
+    while let Some((name, inner)) = next_subcommand(options) {
+        *path.get_mut(depth)? = name;
+        depth += 1;
+        options = inner;
+    }
+    path.get(..depth)
+}
+
+fn report_command_error(hooks: &Hooks, source: ErrorSource, data: &CommandData, error: &Error) {
+    if next_subcommand(&data.options).is_none() {
+        hooks.reporter.report(source, Some(&data.name), error);
+    } else {
+        hooks
+            .reporter
+            .report(source, Some(&command_path(data).join(" ")), error);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -942,7 +961,7 @@ impl ActiveSlashCommands {
         &self,
         initial: InitialResponder<'_>,
         data: &CommandData,
-        path: &[&str],
+        path: Option<&[&str]>,
         hooks: &Hooks,
     ) {
         let mut ctx = AutocompleteContext {
@@ -950,30 +969,20 @@ impl ActiveSlashCommands {
             data,
             responded: false,
         };
-        let name = path.join(" ");
-        let Some(handler) = self
-            .handlers
-            .get(&data.id)
-            .filter(|route| route.permissions.check(initial.interaction).is_ok())
-            .and_then(|route| route.find_autocomplete(sub_path(path), ctx.focused_name()))
-        else {
-            // 権限がない場合や関数がない場合は空の候補を返す。
-            if let Err(error) = ctx.respond_empty_if_needed().await {
-                hooks
-                    .reporter
-                    .report(ErrorSource::Response, Some(&name), &error);
-            }
-            return;
-        };
-        if let Err(error) = handler.call(&mut ctx).await {
-            hooks
-                .reporter
-                .report(ErrorSource::SlashCommand, Some(&name), &error);
+        let handler = path.and_then(|path| {
+            self.handlers
+                .get(&data.id)
+                .filter(|route| route.permissions.check(initial.interaction).is_ok())
+                .and_then(|route| route.find_autocomplete(path, ctx.focused_name()))
+        });
+        if let Some(handler) = handler
+            && let Err(error) = handler.call(&mut ctx).await
+        {
+            report_command_error(hooks, ErrorSource::SlashCommand, data, &error);
         }
+        // 権限や関数がない場合も、空の候補を返す。
         if let Err(error) = ctx.respond_empty_if_needed().await {
-            hooks
-                .reporter
-                .report(ErrorSource::Response, Some(&name), &error);
+            report_command_error(hooks, ErrorSource::Response, data, &error);
         }
     }
 
@@ -987,7 +996,8 @@ impl ActiveSlashCommands {
         let Some(data) = self.command_data(interaction) else {
             return;
         };
-        let path = command_path(data);
+        let mut path_buffer = [""; 2];
+        let path = routing_path(&data.options, &mut path_buffer);
         let initial = InitialResponder {
             http,
             interaction,
@@ -995,24 +1005,24 @@ impl ActiveSlashCommands {
             info: &hooks.info,
         };
         if interaction.kind == InteractionType::ApplicationCommandAutocomplete {
-            self.dispatch_autocomplete(initial, data, &path, hooks)
-                .await;
+            self.dispatch_autocomplete(initial, data, path, hooks).await;
             return;
         }
-        let full_name = path.join(" ");
-        let name = Some(full_name.as_str());
-        let Some((route, handler)) = self
-            .handlers
-            .get(&data.id)
-            .and_then(|route| route.find(sub_path(&path)).map(|handler| (route, handler)))
-        else {
-            hooks
-                .reporter
-                .report(ErrorSource::SlashCommand, name, &Error::CommandUnavailable);
+        let Some((route, handler)) = path.and_then(|path| {
+            self.handlers
+                .get(&data.id)
+                .and_then(|route| route.find(path).map(|handler| (route, handler)))
+        }) else {
+            report_command_error(
+                hooks,
+                ErrorSource::SlashCommand,
+                data,
+                &Error::CommandUnavailable,
+            );
             if let Some(text) = &hooks.messages.slash_command_unavailable
                 && let Err(error) = initial.message(text, true).await
             {
-                hooks.reporter.report(ErrorSource::Response, name, &error);
+                report_command_error(hooks, ErrorSource::Response, data, &error);
             }
             return;
         };
@@ -1030,9 +1040,7 @@ impl ActiveSlashCommands {
         let check_failed = match result {
             Ok(()) => false,
             Err(error) => {
-                hooks
-                    .reporter
-                    .report(ErrorSource::SlashCommand, name, &error);
+                report_command_error(hooks, ErrorSource::SlashCommand, data, &error);
                 matches!(error, Error::Check(_))
             }
         };
@@ -1046,7 +1054,7 @@ impl ActiveSlashCommands {
             return;
         };
         if let Err(error) = ctx.reply_fallback(text, check_failed).await {
-            hooks.reporter.report(ErrorSource::Response, name, &error);
+            report_command_error(hooks, ErrorSource::Response, data, &error);
         }
     }
 }
@@ -1622,7 +1630,7 @@ mod tests {
         InitialResponder, InitialResponse, Interaction, InteractionData, InteractionResponseType,
         MessageFlags, PermissionPolicy, Permissions, ReplyAction, ResponseState,
         ResponseStateError, Result, Route, Scope, SlashCommands, SlashContext, command_path,
-        initial_response, leaf_options, v2_update_response,
+        initial_response, leaf_options, routing_path, v2_update_response,
     };
     use crate::{
         RegistrationError,
@@ -2104,6 +2112,10 @@ mod tests {
             target_id: None,
         };
         assert_eq!(command_path(&data), ["config", "advanced", "set"]);
+        assert_eq!(
+            routing_path(&data.options, &mut [""; 2]),
+            Some(["advanced", "set"].as_slice())
+        );
         let leaf = leaf_options(&data.options);
         assert_eq!(leaf.len(), 1);
         assert_eq!(leaf[0].name, "value");
@@ -2113,7 +2125,23 @@ mod tests {
             ..data
         };
         assert_eq!(command_path(&plain), ["config"]);
+        assert_eq!(
+            routing_path(&plain.options, &mut [""; 2]),
+            Some([].as_slice())
+        );
         assert_eq!(leaf_options(&plain.options).len(), 1);
+
+        let malformed = [option(
+            "one",
+            CommandOptionValue::SubCommandGroup(vec![option(
+                "two",
+                CommandOptionValue::SubCommandGroup(vec![option(
+                    "three",
+                    CommandOptionValue::SubCommand(vec![]),
+                )]),
+            )]),
+        )];
+        assert!(routing_path(&malformed, &mut [""; 2]).is_none());
     }
 
     #[test]
