@@ -4,7 +4,7 @@
 //! Bot の権限をそのまま使い、通信しない。それ以外は、ロールとチャンネルを取得して計算する。
 //! 取得できないとき、判断できないときは、許可せずに失敗する。
 
-use twilight_http::Client;
+use twilight_http::{Client, request::AuditLogReason};
 use twilight_model::{
     application::interaction::Interaction,
     channel::Message,
@@ -18,6 +18,7 @@ use twilight_model::{
 
 use crate::{
     CheckFailure, CommandCheck, CommandCheckContext, HierarchyDenied, Result,
+    overwrite::{Overwrite, OverwriteTarget},
     permissions::{PermissionResolver, check_permissions},
     slash::interaction_channel_id,
 };
@@ -434,6 +435,148 @@ impl<'a> Access<'a> {
         }
     }
 
+    /// Bot の、指定したチャンネルでの権限を返す。呼ばれたチャンネルなら、Discord が送った値を使う。
+    async fn bot_permissions_in(
+        &self,
+        guild_id: Id<GuildMarker>,
+        channel_id: Id<ChannelMarker>,
+    ) -> Result<Permissions> {
+        if self.channel_id == Some(channel_id)
+            && let Some(permissions) = self.app_permissions
+        {
+            return Ok(permissions);
+        }
+        let bot_id = self.resolver.bot_id(self.http).await?;
+        self.member_permissions(guild_id, channel_id, bot_id).await
+    }
+
+    /// チャンネルにある、1 つの対象の権限の上書きを読みます。上書きがなければ `None` です。
+    ///
+    /// キャッシュは使わず、そのときの設定を取得します。
+    ///
+    /// # エラー
+    ///
+    /// チャンネルを取得できないときは、HTTP のエラーを返します。
+    pub async fn overwrite_of(
+        &self,
+        channel_id: Id<ChannelMarker>,
+        target: OverwriteTarget,
+    ) -> Result<Option<Overwrite>> {
+        let channel = self.http.channel(channel_id).await?.model().await?;
+        Ok(channel
+            .permission_overwrites
+            .unwrap_or_default()
+            .iter()
+            .find(|overwrite| {
+                overwrite.id.get() == target.raw_id() && overwrite.kind == target.kind()
+            })
+            .map(Overwrite::from_twilight))
+    }
+
+    /// チャンネルで、1 つの対象の権限の上書きを設定します。ほかの対象の設定は変えません。
+    ///
+    /// 送る前に、Bot が `MANAGE_ROLES` を持つこと、許可または拒否する権限を Bot 自身が持つこと
+    /// （管理者は除く）を確認します。足りなければ、通信せずに失敗します。
+    /// **実行した人に操作してよいかは、確認しません。** 呼ぶ前に、
+    /// [`require_permissions`](Self::require_permissions) などで確認してください。
+    /// `reason` は監査ログに残る理由で、512 文字以内です。
+    ///
+    /// # エラー
+    ///
+    /// Bot の権限が足りないときは [`CheckFailure::BotMissingPermissions`]、理由が長すぎるとき（Twilight の
+    /// 検証）と、送信に失敗したときは、HTTP のエラーを返します。
+    pub async fn set_overwrite(
+        &self,
+        channel_id: Id<ChannelMarker>,
+        target: OverwriteTarget,
+        overwrite: Overwrite,
+        reason: &str,
+    ) -> Result<()> {
+        let guild_id = self.require_guild()?;
+        let held = self.bot_permissions_in(guild_id, channel_id).await?;
+        let required = Permissions::MANAGE_ROLES | overwrite.touched();
+        check_bot_can_grant(held, required)?;
+        self.http
+            .update_channel_permission(channel_id, &overwrite.into_request(target))
+            .reason(reason)
+            .await?;
+        Ok(())
+    }
+
+    /// チャンネルから、1 つの対象の権限の上書きを削除します（すべて継承に戻ります）。
+    ///
+    /// Bot が `MANAGE_ROLES` を持つことを、送る前に確認します。実行した人への確認は、
+    /// [`set_overwrite`](Self::set_overwrite) と同じく、呼ぶ側の責任です。
+    ///
+    /// # エラー
+    ///
+    /// [`set_overwrite`](Self::set_overwrite) と同じです。
+    pub async fn delete_overwrite(
+        &self,
+        channel_id: Id<ChannelMarker>,
+        target: OverwriteTarget,
+        reason: &str,
+    ) -> Result<()> {
+        let guild_id = self.require_guild()?;
+        let held = self.bot_permissions_in(guild_id, channel_id).await?;
+        check_bot_can_grant(held, Permissions::MANAGE_ROLES)?;
+        let request = self.http.delete_channel_permission(channel_id);
+        match target {
+            OverwriteTarget::Role(id) => request.role(id).reason(reason).await?,
+            OverwriteTarget::Member(id) => request.member(id).reason(reason).await?,
+        };
+        Ok(())
+    }
+
+    /// ロールの権限を読みます。キャッシュは使わず、そのときの値を取得します。
+    ///
+    /// # エラー
+    ///
+    /// ロールを取得できないときは、HTTP のエラーを返します。
+    pub async fn role_permissions(&self, role_id: Id<RoleMarker>) -> Result<Permissions> {
+        let guild_id = self.require_guild()?;
+        let role = self.http.role(guild_id, role_id).await?.model().await?;
+        Ok(role.permissions)
+    }
+
+    /// ロールの権限を、指定した値に置き換えます。
+    ///
+    /// 現在の値を読み、足したい権限だけを足して渡してください（[`role_permissions`](Self::role_permissions)）。
+    /// 読んでから書くまでの間に別の変更があると、それを上書きします。
+    /// 送る前に、Bot が `MANAGE_ROLES` を持つこと、対象のロールが Bot の最上位ロールより低いこと、
+    /// 付与する権限を Bot がサーバー全体で持つこと（管理者は除く）を確認します。
+    /// **実行した人に操作してよいかは、確認しません。** 呼ぶ前に確認してください。
+    ///
+    /// # エラー
+    ///
+    /// Bot の権限が足りないときは [`CheckFailure::BotMissingPermissions`]、ロールの位置が足りないときは
+    /// [`CheckFailure::Hierarchy`]、理由が長すぎるとき（Twilight の検証）と、送信に失敗したときは、HTTP のエラーを返します。
+    pub async fn set_role_permissions(
+        &self,
+        role_id: Id<RoleMarker>,
+        permissions: Permissions,
+        reason: &str,
+    ) -> Result<()> {
+        let guild_id = self.require_guild()?;
+        let bot_id = self.resolver.bot_id(self.http).await?;
+        let (info, role, bot_member) = tokio::try_join!(
+            self.resolver.guild_info(self.http, guild_id),
+            async { Ok(self.http.role(guild_id, role_id).await?.model().await?) },
+            fetch_member(self.http, guild_id, bot_id),
+        )?;
+        let root = info.root_permissions(guild_id, bot_id, &bot_member.roles);
+        check_bot_can_grant(root, Permissions::MANAGE_ROLES | permissions)?;
+        if info.top_position(&bot_member.roles) <= role.position {
+            return Err(CheckFailure::Hierarchy(HierarchyDenied::BotTooLow).into());
+        }
+        self.http
+            .update_role(guild_id, role_id)
+            .permissions(permissions)
+            .reason(reason)
+            .await?;
+        Ok(())
+    }
+
     /// ロールの階層から見て、実行した人と Bot が、対象のメンバーを操作できることを確認します。
     ///
     /// サーバーの所有者は操作できません。最上位ロールが対象以上のときも拒否します（同じ位置も拒否）。
@@ -469,6 +612,22 @@ impl<'a> Access<'a> {
             target_top: info.top_position(&target_member.roles),
         })
         .map_err(|denied| CheckFailure::Hierarchy(denied).into())
+    }
+}
+
+/// Bot が持つ権限で、必要な権限をすべて満たせるか。管理者は、すべてを持つ。
+fn check_bot_can_grant(
+    held: Permissions,
+    required: Permissions,
+) -> std::result::Result<(), CheckFailure> {
+    if held.contains(Permissions::ADMINISTRATOR) {
+        return Ok(());
+    }
+    let missing = required - held;
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(CheckFailure::BotMissingPermissions(missing))
     }
 }
 
@@ -733,6 +892,7 @@ mod tests {
     struct Mock {
         port: u16,
         hits: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        bodies: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
     }
 
     impl Mock {
@@ -746,7 +906,9 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{error}"))
                 .port();
             let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let record = std::sync::Arc::clone(&hits);
+            let record_bodies = std::sync::Arc::clone(&bodies);
             tokio::spawn(async move {
                 loop {
                     let Ok((stream, _)) = listener.accept().await else {
@@ -754,12 +916,18 @@ mod tests {
                     };
                     let routes = routes.clone();
                     let record = std::sync::Arc::clone(&record);
+                    let record_bodies = std::sync::Arc::clone(&record_bodies);
                     tokio::spawn(async move {
                         let mut stream = BufReader::new(stream);
                         let mut line = String::new();
                         if stream.read_line(&mut line).await.is_err() {
                             return;
                         }
+                        let method = line
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or_default()
+                            .to_owned();
                         let path = line
                             .split_whitespace()
                             .nth(1)
@@ -768,15 +936,32 @@ mod tests {
                             .next()
                             .unwrap_or_default()
                             .to_owned();
+                        let mut length = 0_usize;
                         loop {
                             line.clear();
                             if stream.read_line(&mut line).await.unwrap_or(0) == 0 || line == "\r\n"
                             {
                                 break;
                             }
+                            if let Some((name, value)) = line.split_once(':')
+                                && name.eq_ignore_ascii_case("content-length")
+                            {
+                                length = value.trim().parse().unwrap_or(0);
+                            }
+                        }
+                        let mut body = vec![0_u8; length];
+                        if length > 0 {
+                            let _ =
+                                tokio::io::AsyncReadExt::read_exact(&mut stream, &mut body).await;
                         }
                         if let Ok(mut hits) = record.lock() {
-                            hits.push(path.clone());
+                            hits.push(format!("{method} {path}"));
+                        }
+                        if let Ok(mut bodies) = record_bodies.lock() {
+                            bodies.push((
+                                format!("{method} {path}"),
+                                String::from_utf8_lossy(&body).into_owned(),
+                            ));
                         }
                         let (status, body) = routes
                             .iter()
@@ -790,7 +975,7 @@ mod tests {
                     });
                 }
             });
-            Self { port, hits }
+            Self { port, hits, bodies }
         }
 
         fn client(&self) -> Client {
@@ -800,27 +985,58 @@ mod tests {
                 .build()
         }
 
+        fn body_of(&self, request: &str) -> Option<serde_json::Value> {
+            let bodies = self.bodies.lock().ok()?;
+            let (_, body) = bodies
+                .iter()
+                .find(|(name, _)| request_matches(name, request))?;
+            serde_json::from_str(body).ok()
+        }
+
+        /// `suffix` は、パスの末尾（`/users/@me`）か、メソッド付き（`PUT /channels/30/...`）。
         fn count(&self, suffix: &str) -> usize {
             self.hits.lock().map_or(0, |hits| {
-                hits.iter().filter(|path| path.ends_with(suffix)).count()
+                hits.iter()
+                    .filter(|request| request_matches(request, suffix))
+                    .count()
             })
         }
     }
 
+    /// 記録した `メソッド パス` が、指定したパス末尾（任意でメソッド付き）に当たるか。
+    fn request_matches(recorded: &str, wanted: &str) -> bool {
+        match wanted.split_once(' ') {
+            Some((method, path)) => recorded
+                .split_once(' ')
+                .is_some_and(|(m, p)| m == method && p.ends_with(path)),
+            None => recorded.ends_with(wanted),
+        }
+    }
+
     fn role_json(id: u64, position: i64) -> String {
+        role_json_with(id, position, Permissions::empty())
+    }
+
+    fn role_json_with(id: u64, position: i64, permissions: Permissions) -> String {
         format!(
             r#"{{"id": "{id}", "name": "r", "color": 0, "colors": {{"primary_color": 0}},
             "hoist": false, "managed": false, "mentionable": false, "position": {position},
-            "flags": 0, "permissions": "0"}}"#
+            "flags": 0, "permissions": "{}"}}"#,
+            permissions.bits()
         )
     }
 
     fn guild_json() -> String {
+        guild_json_with(Permissions::empty())
+    }
+
+    /// Bot のロール（102、位置 9）が持つ権限を指定してサーバーを作る。
+    fn guild_json_with(bot_role: Permissions) -> String {
         let roles = [
             role_json(20, 0),
             role_json(100, 5),
             role_json(101, 3),
-            role_json(102, 9),
+            role_json_with(102, 9, bot_role),
         ];
         format!(
             r#"{{"id": "20", "owner_id": "1", "name": "g", "afk_timeout": 60,
@@ -1042,5 +1258,324 @@ mod tests {
             run_needs(&dm, needs, &["config"], ("config", &[])).await,
             Err(crate::Error::Check(CheckFailure::GuildOnly))
         ));
+    }
+
+    fn channel_json(id: u64, overwrites: &str) -> String {
+        format!(
+            r#"{{"id": "{id}", "type": 0, "guild_id": "20", "permission_overwrites": [{overwrites}]}}"#
+        )
+    }
+
+    /// 呼ばれたチャンネル（30）で、Bot が上書きを管理できるスラッシュコマンド。
+    fn manager_interaction(app_permissions: Permissions) -> Interaction {
+        slash_interaction(true, 0, app_permissions.bits())
+    }
+
+    async fn overwrite_mock(bot_role: Permissions) -> Mock {
+        Mock::start(vec![
+            (
+                "/users/@me".into(),
+                r#"{"id": "3", "username": "bot", "discriminator": "0", "avatar": null,
+                "bot": true, "mfa_enabled": true}"#
+                    .into(),
+            ),
+            ("/guilds/20".into(), guild_json_with(bot_role)),
+            ("/guilds/20/members/3".into(), member_json(3, &[102])),
+            (
+                "/channels/30".into(),
+                channel_json(
+                    30,
+                    r#"{"id": "100", "type": 0, "allow": "1024", "deny": "2048"}"#,
+                ),
+            ),
+            ("/channels/31".into(), channel_json(31, "")),
+            ("/channels/30/permissions/101".into(), "{}".into()),
+            ("/channels/30/permissions/100".into(), "{}".into()),
+            ("/channels/31/permissions/101".into(), "{}".into()),
+        ])
+        .await
+    }
+
+    #[tokio::test]
+    async fn overwrite_of_reads_the_current_settings_for_one_target() {
+        let mock = overwrite_mock(Permissions::empty()).await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let interaction = manager_interaction(Permissions::empty());
+        let access = Access::for_interaction(&http, &resolver, &interaction);
+
+        let found = access
+            .overwrite_of(Id::new(30), OverwriteTarget::Role(Id::new(100)))
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|| panic!("上書きが見つかりません"));
+        assert_eq!(
+            found.state(Permissions::VIEW_CHANNEL),
+            Some(crate::Tri::Allow)
+        );
+        assert_eq!(
+            found.state(Permissions::SEND_MESSAGES),
+            Some(crate::Tri::Deny)
+        );
+        // 種類が違えば、同じ ID でも別の対象。ない対象は None。
+        for target in [
+            OverwriteTarget::Member(Id::new(100)),
+            OverwriteTarget::Role(Id::new(999)),
+        ] {
+            assert!(matches!(
+                access.overwrite_of(Id::new(30), target).await,
+                Ok(None)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn set_overwrite_updates_one_target_after_checking_the_bots_permissions() {
+        let mock = overwrite_mock(Permissions::empty()).await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        // Bot は、呼ばれたチャンネル（30）で MANAGE_ROLES と VIEW_CHANNEL だけを持つ。
+        let interaction =
+            manager_interaction(Permissions::MANAGE_ROLES | Permissions::VIEW_CHANNEL);
+        let access = Access::for_interaction(&http, &resolver, &interaction);
+        let target = OverwriteTarget::Role(Id::new(101));
+
+        // Bot が持つ権限の上書きは、送られる。通信は上書きの 1 回だけで、権限の取得はない。
+        let result = access
+            .set_overwrite(
+                Id::new(30),
+                target,
+                Overwrite::new().allow(Permissions::VIEW_CHANNEL),
+                "理由",
+            )
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(mock.count("PUT /channels/30/permissions/101"), 1);
+        assert_eq!(mock.count("GET /channels/30"), 0);
+        let body = mock
+            .body_of("PUT /channels/30/permissions/101")
+            .unwrap_or_else(|| panic!("本文がありません"));
+        assert_eq!(body["allow"], Permissions::VIEW_CHANNEL.bits().to_string());
+        assert_eq!(body["deny"], "0");
+        assert_eq!(body["type"], 0);
+
+        // Bot が持たない権限は、送る前に断る。
+        let denied = access
+            .set_overwrite(
+                Id::new(30),
+                target,
+                Overwrite::new().deny(Permissions::SEND_MESSAGES),
+                "理由",
+            )
+            .await;
+        assert!(matches!(
+            denied,
+            Err(crate::Error::Check(CheckFailure::BotMissingPermissions(missing)))
+                if missing == Permissions::SEND_MESSAGES
+        ));
+        assert_eq!(mock.count("PUT /channels/30/permissions/101"), 1);
+    }
+
+    #[tokio::test]
+    async fn set_overwrite_needs_manage_roles_and_a_reason_that_fits() {
+        let mock = overwrite_mock(Permissions::empty()).await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let interaction = manager_interaction(Permissions::VIEW_CHANNEL);
+        let access = Access::for_interaction(&http, &resolver, &interaction);
+        let target = OverwriteTarget::Role(Id::new(101));
+
+        let denied = access
+            .set_overwrite(
+                Id::new(30),
+                target,
+                Overwrite::new().allow(Permissions::VIEW_CHANNEL),
+                "理由",
+            )
+            .await;
+        assert!(matches!(
+            denied,
+            Err(crate::Error::Check(CheckFailure::BotMissingPermissions(missing)))
+                if missing == Permissions::MANAGE_ROLES
+        ));
+
+        let managing = manager_interaction(Permissions::MANAGE_ROLES | Permissions::VIEW_CHANNEL);
+        let access = Access::for_interaction(&http, &resolver, &managing);
+        let long_reason = "あ".repeat(513);
+        let too_long = access
+            .set_overwrite(
+                Id::new(30),
+                target,
+                Overwrite::new().allow(Permissions::VIEW_CHANNEL),
+                &long_reason,
+            )
+            .await;
+        assert!(too_long.is_err());
+        assert_eq!(mock.count("PUT /channels/30/permissions/101"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_bot_administrator_can_grant_anything_and_other_channels_are_resolved() {
+        // 呼ばれたのはチャンネル 30。チャンネル 31 の権限は、Bot のロールから計算する。
+        let mock = overwrite_mock(Permissions::MANAGE_ROLES | Permissions::VIEW_CHANNEL).await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let interaction = manager_interaction(Permissions::empty());
+        let access = Access::for_interaction(&http, &resolver, &interaction);
+        let target = OverwriteTarget::Role(Id::new(101));
+
+        let ok = access
+            .set_overwrite(
+                Id::new(31),
+                target,
+                Overwrite::new().deny(Permissions::VIEW_CHANNEL),
+                "理由",
+            )
+            .await;
+        assert!(ok.is_ok(), "{ok:?}");
+        assert_eq!(mock.count("PUT /channels/31/permissions/101"), 1);
+
+        let missing = access
+            .set_overwrite(
+                Id::new(31),
+                target,
+                Overwrite::new().deny(Permissions::SEND_MESSAGES),
+                "理由",
+            )
+            .await;
+        assert!(matches!(
+            missing,
+            Err(crate::Error::Check(CheckFailure::BotMissingPermissions(_)))
+        ));
+
+        let admin = overwrite_mock(Permissions::ADMINISTRATOR).await;
+        let http = admin.client();
+        let access = Access::for_interaction(&http, &resolver, &interaction);
+        let granted = access
+            .set_overwrite(
+                Id::new(31),
+                target,
+                Overwrite::new().allow(Permissions::SEND_MESSAGES),
+                "理由",
+            )
+            .await;
+        assert!(granted.is_ok(), "{granted:?}");
+    }
+
+    #[tokio::test]
+    async fn delete_overwrite_removes_one_target_after_checking_manage_roles() {
+        let mock = overwrite_mock(Permissions::empty()).await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let interaction = manager_interaction(Permissions::MANAGE_ROLES);
+        let access = Access::for_interaction(&http, &resolver, &interaction);
+        let result = access
+            .delete_overwrite(Id::new(30), OverwriteTarget::Role(Id::new(100)), "理由")
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(mock.count("DELETE /channels/30/permissions/100"), 1);
+
+        let none = manager_interaction(Permissions::VIEW_CHANNEL);
+        let access = Access::for_interaction(&http, &resolver, &none);
+        assert!(matches!(
+            access
+                .delete_overwrite(Id::new(30), OverwriteTarget::Role(Id::new(100)), "理由")
+                .await,
+            Err(crate::Error::Check(CheckFailure::BotMissingPermissions(_)))
+        ));
+        assert_eq!(mock.count("DELETE /channels/30/permissions/100"), 1);
+    }
+
+    async fn role_mock(bot_role: Permissions) -> Mock {
+        Mock::start(vec![
+            (
+                "/users/@me".into(),
+                r#"{"id": "3", "username": "bot", "discriminator": "0", "avatar": null,
+                "bot": true, "mfa_enabled": true}"#
+                    .into(),
+            ),
+            ("/guilds/20".into(), guild_json_with(bot_role)),
+            ("/guilds/20/members/3".into(), member_json(3, &[102])),
+            (
+                "/guilds/20/roles/101".into(),
+                role_json_with(101, 3, Permissions::SEND_MESSAGES),
+            ),
+            (
+                "/guilds/20/roles/102".into(),
+                role_json_with(102, 9, Permissions::empty()),
+            ),
+        ])
+        .await
+    }
+
+    #[tokio::test]
+    async fn role_permissions_are_read_fresh_and_written_after_the_bots_checks() {
+        let bot_perms =
+            Permissions::MANAGE_ROLES | Permissions::SEND_MESSAGES | Permissions::VIEW_CHANNEL;
+        let mock = role_mock(bot_perms).await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let interaction = slash_interaction(true, 0, 0);
+        let access = Access::for_interaction(&http, &resolver, &interaction);
+        let role = Id::new(101);
+
+        let current = access
+            .role_permissions(role)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(current, Permissions::SEND_MESSAGES);
+
+        // 現在の値に権限を足して書く。Bot が持つ権限だけなら、通る。
+        let wanted = current | Permissions::VIEW_CHANNEL;
+        let result = access.set_role_permissions(role, wanted, "理由").await;
+        assert!(result.is_ok(), "{result:?}");
+        let body = mock
+            .body_of("PATCH /guilds/20/roles/101")
+            .unwrap_or_else(|| panic!("本文がありません"));
+        assert_eq!(body["permissions"], wanted.bits().to_string());
+
+        // Bot が持たない権限は、付与できない。
+        let beyond = access
+            .set_role_permissions(role, wanted | Permissions::BAN_MEMBERS, "理由")
+            .await;
+        assert!(matches!(
+            beyond,
+            Err(crate::Error::Check(CheckFailure::BotMissingPermissions(missing)))
+                if missing == Permissions::BAN_MEMBERS
+        ));
+        assert_eq!(mock.count("PATCH /guilds/20/roles/101"), 1);
+    }
+
+    #[tokio::test]
+    async fn role_permissions_cannot_be_set_on_a_role_at_or_above_the_bots_top_role() {
+        let mock = role_mock(Permissions::MANAGE_ROLES).await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let interaction = slash_interaction(true, 0, 0);
+        let access = Access::for_interaction(&http, &resolver, &interaction);
+        // ロール 102 は、Bot 自身の最上位ロール（同じ位置）。
+        let result = access
+            .set_role_permissions(Id::new(102), Permissions::MANAGE_ROLES, "理由")
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::Error::Check(CheckFailure::Hierarchy(
+                HierarchyDenied::BotTooLow
+            )))
+        ));
+        assert_eq!(mock.count("PATCH /guilds/20/roles/102"), 0);
+
+        // MANAGE_ROLES がなければ、そもそも断る。
+        let weak = role_mock(Permissions::empty()).await;
+        let http = weak.client();
+        let access = Access::for_interaction(&http, &resolver, &interaction);
+        assert!(matches!(
+            access
+                .set_role_permissions(Id::new(101), Permissions::empty(), "理由")
+                .await,
+            Err(crate::Error::Check(CheckFailure::BotMissingPermissions(missing)))
+                if missing == Permissions::MANAGE_ROLES
+        ));
+        assert_eq!(weak.count("PATCH /guilds/20/roles/101"), 0);
     }
 }

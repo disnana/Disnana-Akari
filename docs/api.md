@@ -586,7 +586,9 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 
 `ctx.access()` が返す `Access` で、実行者、Bot、ほかのメンバーの権限を調べ、確認します。`can`、`missing`、`bot_can`、`bot_missing` は調べるだけで、`require_permissions`、`require_bot_permissions`、`require_guild_owner`、`require_role`、`require_any_role`、`require_can_moderate` は、満たさなければ `CheckFailure` で失敗します。`snapshot` は、実行者と Bot の権限と所有者かどうかを、`PermissionSnapshot` にまとめて返します。
 
-`Needs` は、コマンドの実行に必要な権限を宣言する型です。`Needs::new().author(..).bot(..)` を、`Commands::require` と `SlashCommands::require` に渡すと、ハンドラーの前に、実行者、Bot の順に確認します。宣言は、指定したコマンドとその配下だけに適用し、登録されていない名前は、登録の時点で失敗します。独自のチェックでは、`CommandCheckContext::access()` で `Access` を使えます。ロールの階層で断られた理由は、`CheckFailure::Hierarchy` が持つ `HierarchyDenied` で分かります。
+`Needs` は、コマンドの実行に必要な権限を宣言する型です。`Needs::new().author(..).bot(..)` を、`Commands::require` と `SlashCommands::require` に渡すと、ハンドラーの前に、実行者、Bot の順に確認します。宣言は、指定したコマンドとその配下だけに適用し、登録されていない名前は、登録の時点で失敗します。独自のチェックでは、`CommandCheckContext::access()` で `Access` を使えます。
+
+権限の上書きとロールの権限は、`Access` の `overwrite_of`、`set_overwrite`、`delete_overwrite`、`role_permissions`、`set_role_permissions` で読み書きします。`Overwrite` は、`allow`、`deny`、`inherit` で権限ごとの状態を指定する型で、`state` が `Tri`（`Allow`、`Deny`、`Inherit`）を返します。対象は `OverwriteTarget`（`Role` か `Member`）で指定します。書き込みは、送る前に Bot の権限とロールの位置を確認しますが、実行した人への確認は、呼ぶ側の責任です。ロールの階層で断られた理由は、`CheckFailure::Hierarchy` が持つ `HierarchyDenied` で分かります。
 
 ## 権限やフラグを名前で扱う
 

@@ -20,6 +20,7 @@ mod member_cache;
 mod message_cache;
 mod message_events;
 mod module;
+mod overwrite;
 #[cfg(test)]
 mod permission_cache_tests;
 mod permissions;
@@ -97,6 +98,7 @@ pub use member_cache::{CachedMemberRemove, CachedMemberUpdate, MemberCacheHandle
 pub use message_cache::CachedMessageEdit;
 pub use message_events::MessageUpdate;
 pub use module::{Module, Registry};
+pub use overwrite::{Overwrite, OverwriteTarget, Tri};
 pub use presence::{Presence, PresenceHandle};
 pub use shutdown::ShutdownHandle;
 pub use slash::{
