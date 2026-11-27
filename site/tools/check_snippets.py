@@ -41,6 +41,47 @@ def blocks():
             yield path.relative_to(ROOT), line, body
 
 
+def missing_intents() -> list[str]:
+    """テキストコマンドやメッセージを待つ例が、Intent を指定しているか確認する。
+
+    Akari は Intent を自動で足さないので、指定がない例は、コンパイルできても、起動時にエラーになる。
+    """
+    problems = []
+    for path in documents():
+        text = path.read_text(encoding="utf-8")
+        for match in FENCE.finditer(text):
+            if match.group(1) != "rust":
+                continue
+            body = match.group(2)
+            waits_for_messages = re.search(r"\.run_commands\(|\.on_message\(|\.run\(\s*\w+\s*\)", body)
+            if waits_for_messages and not re.search(r"add_intents|with_intents", body):
+                line = text[: match.start()].count("\n") + 1
+                problems.append(
+                    f"{path.relative_to(ROOT)}:{line}: メッセージを待つ例に、Intent の指定（add_intents / with_intents）がありません"
+                )
+    return problems
+
+
+def undocumented_exports() -> list[str]:
+    """クレート直下の公開名が、どの文書にも出てこないものを探す。"""
+    lib = (ROOT / "src" / "lib.rs").read_text(encoding="utf-8")
+    names = set()
+    for match in re.finditer(r"^pub use ([^;]+);", lib, re.M | re.S):
+        body = match.group(1)
+        if "{" in body:
+            body = body[body.index("{") + 1 : body.rindex("}")]
+        for item in body.split(","):
+            item = item.strip().split(" as ")[-1].strip()
+            if item and re.fullmatch(r"[A-Z][A-Za-z0-9]*", item):
+                names.add(item)
+    corpus = "\n".join(p.read_text(encoding="utf-8") for p in documents())
+    return [
+        f"公開型 {name} がどの文書にも出てきません。docs/api.md などで説明してください"
+        for name in sorted(names)
+        if not re.search(rf"\b{name}\b", corpus)
+    ]
+
+
 def stale_version_pins() -> list[str]:
     """ドキュメントの `disnana-akari = "X.Y"` が、Cargo.toml の版と合っているか確認する。
 
@@ -64,7 +105,7 @@ def stale_version_pins() -> list[str]:
 
 
 def main() -> int:
-    problems = stale_version_pins()
+    problems = stale_version_pins() + missing_intents() + undocumented_exports()
     if problems:
         sys.stderr.write("\n".join(problems) + "\n")
         return 1

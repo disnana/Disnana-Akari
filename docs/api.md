@@ -118,7 +118,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | --- | --- |
 | `SlashCommands::for_guild(guild_id) -> SlashCommands` | Discord のサーバー ID を指定して空のコマンド一覧を作ります。ID の型は `Id<GuildMarker>` です。 |
 | `Registry::new(&mut commands, slash, &mut events).add(&module)?` | `Module` を実装した型の `register(&self, &mut Registry)` を呼び、テキストコマンド、スラッシュコマンド、イベントをまとめて登録します。 |
-| `commands.autocomplete(path, option, handler) -> Result<()>` | 引数に、入力中の候補を返す関数を付けます。`path` はコマンド名（サブコマンドなら経路）、関数は `AutocompleteContext`（`focused()`、`respond(choices)`）を受け取ります。候補は `SlashCommands::{string_choice, integer_choice, number_choice}` で作ります。 |
+| `commands.autocomplete(path, option, handler) -> Result<()>` | 引数に、入力中の候補を返す関数を付けます。`path` はコマンド名（サブコマンドなら経路）、関数は `AutocompleteContext`（入力中の文字列は `focused()`、その引数の名前は `focused_name()`、候補を返すのは `respond(choices)`）を受け取ります。候補は `SlashCommands::{string_choice, integer_choice, number_choice}` で作ります。 |
 | `commands.group(name, description) -> Result<CommandGroup>` | サブコマンドをまとめるコマンドを作ります。`group.subcommand(name, description, options, handler)` と、`group.group(name, description)`（さらに 1 段）で登録します。 |
 | `SlashCommands::global() -> SlashCommands` | アプリ全体（すべてのサーバーと DM）向けに空のコマンド一覧を作ります。Discord 側の反映に時間がかかることがあります。 |
 | `commands.replace_commands() -> SlashCommands` | 起動時に、このアプリの同じ範囲（サーバー、またはグローバル）の全コマンドを、登録した一覧に一括で置き換えます。 |
@@ -365,7 +365,9 @@ async fn confirm(ctx: &mut ButtonContext<'_>) -> Result<()> {
 | `ChannelSelectContext<'_>` | `&[Id<ChannelMarker>]` |
 | `MentionableSelectContext<'_>` | `&[Mentionable]` |
 
-`values()` で対象ごとに型の付いた ID を取得できます。Discord が選択対象の情報を同梱した場合は、`resolved()` で `&InteractionDataResolved` を取得できます。操作への本人宛ての返信には `reply_ephemeral` を使います。上の表の各コンテキストにも `followup_files` と `followup_files_ephemeral` があり、`defer_update` の後にも呼べます。[Playground の選択メニュー実装](../examples/ping/entities.rs)
+`UserSelectContext`、`RoleSelectContext`、`ChannelSelectContext` は、共通の `EntitySelectContext<'_, M>` の別名で、選択対象の種類（`M` は `UserMarker` など）だけが違います。メソッドは共通です。
+
+`values()` で対象ごとに型の付いた ID を取得できます。Discord が選択対象の情報を同梱した場合は、`resolved()` で `&InteractionDataResolved` を取得できます。操作への本人宛ての返信には `reply_ephemeral` を使います。[Playground の選択メニュー実装](../examples/ping/entities.rs)
 
 ユーザーとロールを混ぜたメニューでは、選択された各 ID の種類を Discord の `resolved.users` と `resolved.roles` で判定します。選択があるときに `resolved` が欠けている場合や、ID の種類が一意に決まらない場合は、ハンドラーを呼ばず本人へのエラー応答を試みます。選択数が 0 件なら、`resolved` がなくても空の `values()` を受け取れます。
 
@@ -562,6 +564,23 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 ## テキストコマンドのメタデータとヘルプ
 
 `CommandMetadata` で説明、使い方、標準ヘルプの表示有無を設定できます。`Commands::set_metadata` は正式名または別名から指定し、`command_info(path)` と `command_infos()` で登録情報を参照できます。`Commands::register_help(name)` で一覧と詳細を表示するテキストコマンドを追加します。
+
+## そのほかの公開型
+
+ほかの節で触れていない公開型です。いずれも、対応する機能の戻り値やイベントとして受け取ります。
+
+| 型 | 内容 |
+| --- | --- |
+| `CommandInfo` | 登録済みテキストコマンドの正式名、別名、説明です。`children()`、`is_group()`、`is_hidden()`、`is_invokable()` でグループや非表示の状態を確認できます。 |
+| `CommandCheckSource` | `CommandCheckContext::source()` が返す、チェックの呼び出し元です。 |
+| `HybridArgumentError` | 型付きハイブリッドコマンドが受け取った引数のエラーです。 |
+| `GatewayShardStatus` | 一つのシャードの状態と、ハートビートの計測値です。 |
+| `GatewayStatusUpdates` | Gateway の状態が変化したときに、最新の一覧を受け取ります。 |
+| `VoiceConnectionInfo` | 音声処理ライブラリに渡す一時的な接続情報です。ログや保存先に出さないでください。 |
+| `VoiceConnectionStatus` | 音声サーバーの割り当て状況です。 |
+| `VoiceGatewayError` | 音声操作を完了できなかった理由です。 |
+| `SoundboardSound`、`SoundboardSoundId`、`SoundboardSoundMarker`、`SoundboardSounds`、`VoiceEffectAnimation` | Discord のサウンドボード音とその一覧、再生時の演出です。 |
+| `GuildSoundboardSoundCreate`、`GuildSoundboardSoundUpdate`、`GuildSoundboardSoundDelete`、`GuildSoundboardSoundsUpdate` | サウンドボード音の追加、更新、削除、一括更新の通知です。 |
 
 ## コマンドの共通チェック
 
