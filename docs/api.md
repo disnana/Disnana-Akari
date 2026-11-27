@@ -25,6 +25,8 @@
 
 `PresenceHandle::new(Presence::new(Status::Online))` を作り、クローンを `bot.with_presence(handle.clone())` に渡します。実行中はハンドラーなどから `handle.set(Presence::new(Status::Idle))` を呼びます。`Presence::with_activity` には Twilight の `MinimalActivity` を渡せます。アクティビティを消すときは `Presence::new(status)` だけで作った値を設定します。
 
+現在のアクティビティを保ってオンライン状態だけ変える場合は `handle.set_status(status)`、オンライン状態を保ってアクティビティだけ変える場合は `handle.set_activity(Some(activity))` を使います。`handle.set_activity(None)` でアクティビティだけ消せます。`Status::Offline` を指定すると、Discord には `Status::Invisible` を送ります。
+
 更新は Gateway に送ります。短時間の連続更新は最新の値にまとめ、更新の送信間隔を5秒以上空けます。`set` は Discord での表示完了を待ちません。接続が回復したときは最後に設定した値を送ります。[管理者向けのステータス変更サンプル](../examples/presence/main.rs)
 
 ### Intent

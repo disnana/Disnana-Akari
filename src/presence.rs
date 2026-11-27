@@ -15,13 +15,13 @@ const MIN_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 pub struct Presence(UpdatePresencePayload);
 
 impl Presence {
-    /// アクティビティなしの状態を作ります。
+    /// アクティビティなしの状態を作ります。`Status::Offline` は `Status::Invisible` として送ります。
     pub fn new(status: Status) -> Self {
         Self(UpdatePresencePayload {
             activities: Vec::new(),
             afk: false,
             since: None,
-            status,
+            status: gateway_status(status),
         })
     }
 
@@ -29,6 +29,13 @@ impl Presence {
     pub fn with_activity(mut self, activity: MinimalActivity) -> Self {
         self.0.activities = vec![activity.into()];
         self
+    }
+}
+
+fn gateway_status(status: Status) -> Status {
+    match status {
+        Status::Offline => Status::Invisible,
+        other => other,
     }
 }
 
@@ -50,6 +57,31 @@ impl PresenceHandle {
                 return false;
             }
             *current = presence;
+            true
+        });
+    }
+
+    /// オンライン状態だけを更新し、設定済みのアクティビティを保ちます。
+    pub fn set_status(&self, status: Status) {
+        let status = gateway_status(status);
+        self.0.send_if_modified(|current| {
+            if current.0.status == status {
+                return false;
+            }
+            current.0.status = status;
+            true
+        });
+    }
+
+    /// アクティビティだけを更新します。`None` はアクティビティを消します。
+    pub fn set_activity(&self, activity: Option<MinimalActivity>) {
+        let activity = activity.map(Into::into);
+        self.0.send_if_modified(|current| {
+            if current.0.activities.first() == activity.as_ref() {
+                return false;
+            }
+            current.0.activities.clear();
+            current.0.activities.extend(activity);
             true
         });
     }
@@ -97,7 +129,7 @@ impl PresenceUpdates {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn sends_latest_presence_and_replays_it_after_reconnect() {
         let handle = PresenceHandle::new(Presence::new(Status::Online));
         let mut updates = handle.subscribe();
@@ -111,17 +143,46 @@ mod tests {
         assert!(updates.next_send > Instant::now());
 
         handle.set(Presence::new(Status::Idle));
+        let before_deadline = MIN_UPDATE_INTERVAL - Duration::from_millis(1);
         assert!(
-            tokio::time::timeout(Duration::ZERO, updates.next())
+            tokio::time::timeout(before_deadline, updates.next())
                 .await
                 .is_err()
         );
-        updates.next_send = Instant::now();
+        handle.set_status(Status::Offline);
+        tokio::time::advance(Duration::from_millis(1)).await;
         let update = updates.next().await;
-        assert_eq!(update.d.status, Status::Idle);
+        assert_eq!(update.d.status, Status::Invisible);
 
-        updates.next_send = Instant::now();
+        tokio::time::advance(MIN_UPDATE_INTERVAL).await;
         updates.replay();
         assert_eq!(updates.next().await, update);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_updates_preserve_the_other_field_and_skip_duplicates() {
+        use twilight_model::gateway::presence::ActivityType;
+
+        let handle = PresenceHandle::new(Presence::new(Status::Offline));
+        let mut updates = handle.subscribe();
+        assert_eq!(updates.initial().status, Status::Invisible);
+        handle.set_status(Status::Invisible);
+        handle.set_activity(None);
+        assert!(!updates.desired.has_changed().unwrap());
+
+        handle.set_activity(Some(MinimalActivity {
+            kind: ActivityType::Playing,
+            name: "Akari".into(),
+            url: None,
+        }));
+        handle.set_status(Status::Idle);
+        let update = updates.next().await;
+        assert_eq!(update.d.status, Status::Idle);
+        assert_eq!(update.d.activities[0].name, "Akari");
+
+        handle.set_activity(None);
+        let update = updates.next().await;
+        assert_eq!(update.d.status, Status::Idle);
+        assert!(update.d.activities.is_empty());
     }
 }

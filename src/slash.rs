@@ -1771,7 +1771,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protected_subcommand_skips_handler_and_sends_private_check_failure() -> Result<()> {
+    async fn protected_subcommand_checks_permissions_for_execution_and_autocomplete() -> Result<()>
+    {
+        use twilight_model::application::interaction::InteractionType;
+
         let guild_id = Id::new(1);
         let command_id = Id::new(5);
         let mut slash = SlashCommands::for_guild(guild_id).replace_commands();
@@ -1781,11 +1784,22 @@ mod tests {
             .subcommand(
                 "run",
                 "実行",
-                vec![],
-                async |_: &mut SlashContext<'_>| -> Result<()> {
-                    panic!("protected handler ran without permissions")
+                vec![SlashCommands::string_option("key", "対象", true)],
+                async |ctx: &mut SlashContext<'_>| -> Result<()> {
+                    ctx.reply_ephemeral("protected command ran").await
                 },
             )?;
+        slash.autocomplete(
+            &["ping", "advanced", "run"],
+            "key",
+            async |ctx: &mut AutocompleteContext<'_>| -> Result<()> {
+                ctx.respond(vec![SlashCommands::string_choice(
+                    "protected suggestion",
+                    "key",
+                )])
+                .await
+            },
+        )?;
         assert!(matches!(
             slash.default_member_permissions("ping", Permissions::empty()),
             Err(Error::Registration(
@@ -1828,14 +1842,31 @@ mod tests {
         let Some(InteractionData::ApplicationCommand(data)) = &mut interaction.data else {
             unreachable!();
         };
-        data.options = vec![option(
-            "advanced",
-            CommandOptionValue::SubCommandGroup(vec![option(
-                "run",
-                CommandOptionValue::SubCommand(vec![]),
-            )]),
-        )];
+        let nested_options = |value| {
+            vec![option(
+                "advanced",
+                CommandOptionValue::SubCommandGroup(vec![option(
+                    "run",
+                    CommandOptionValue::SubCommand(vec![option("key", value)]),
+                )]),
+            )]
+        };
+        data.options = nested_options(CommandOptionValue::String("key".into()));
         interaction.token = "test-token".into();
+        let mut autocomplete = interaction.clone();
+        let Some(InteractionData::ApplicationCommand(data)) = &mut autocomplete.data else {
+            unreachable!();
+        };
+        data.options = nested_options(CommandOptionValue::Focused(
+            "k".into(),
+            CommandOptionType::String,
+        ));
+        autocomplete.kind = InteractionType::ApplicationCommandAutocomplete;
+
+        let mut allowed = interaction.clone();
+        allowed.member.as_mut().unwrap().permissions = Some(Permissions::MANAGE_GUILD);
+        let mut allowed_autocomplete = autocomplete.clone();
+        allowed_autocomplete.member.clone_from(&allowed.member);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(Error::handler)?;
@@ -1848,17 +1879,35 @@ mod tests {
         let mut hooks = Hooks::default();
         hooks.messages.check_failed = Some("private check failure".into());
         let (_, timing) = crate::timing::Pending::new((), None).begin();
-        let (_, response) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            tokio::join!(
-                commands.dispatch(&http, &interaction, timing, &hooks),
-                capture_response(&listener, "POST"),
-            )
-        })
-        .await
-        .map_err(Error::handler)?;
-        let response = response.map_err(Error::handler)?;
-        assert!(response.contains("private check failure"));
-        assert!(response.contains("\"flags\":64"));
+        for (input, expected, absent) in [
+            (
+                &interaction,
+                "private check failure",
+                "protected command ran",
+            ),
+            (&allowed, "protected command ran", "private check failure"),
+            (&autocomplete, "\"choices\":[]", "protected suggestion"),
+            (
+                &allowed_autocomplete,
+                "protected suggestion",
+                "private check failure",
+            ),
+        ] {
+            let (_, response) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    commands.dispatch(&http, input, timing, &hooks),
+                    capture_response(&listener, "POST"),
+                )
+            })
+            .await
+            .map_err(Error::handler)?;
+            let response = response.map_err(Error::handler)?;
+            assert!(response.contains(expected), "{response}");
+            assert!(!response.contains(absent), "{response}");
+            if input.kind == InteractionType::ApplicationCommand {
+                assert!(response.contains("\"flags\":64"), "{response}");
+            }
+        }
         Ok(())
     }
 

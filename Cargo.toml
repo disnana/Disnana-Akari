@@ -27,4 +27,4 @@ twilight-util = { version = "0.18", default-features = false, features = ["permi
 twilight-validate = "0.18"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "time", "test-util"] }

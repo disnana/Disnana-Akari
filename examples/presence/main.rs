@@ -31,6 +31,7 @@ async fn main() -> Result<()> {
         vec![
             status,
             SlashCommands::string_option("activity", "プレイ中に表示する名前", false),
+            SlashCommands::boolean_option("clear_activity", "アクティビティを消す", false),
         ],
         Permissions::ADMINISTRATOR,
         async move |ctx: &mut SlashContext<'_>| -> Result<()> {
@@ -41,18 +42,26 @@ async fn main() -> Result<()> {
                 Some("invisible") => Status::Invisible,
                 _ => return ctx.reply_ephemeral("ステータスを選んでください。").await,
             };
-            let mut next = Presence::new(status);
-            if let Some(name) = ctx
+            let activity = ctx
                 .string("activity")
                 .filter(|name| !name.trim().is_empty())
-            {
-                next = next.with_activity(MinimalActivity {
+                .map(|name| MinimalActivity {
                     kind: ActivityType::Playing,
                     name: name.to_owned(),
                     url: None,
                 });
+            match (activity, ctx.boolean("clear_activity") == Some(true)) {
+                (Some(_), true) => {
+                    return ctx
+                        .reply_ephemeral("activity と clear_activity は同時に指定できません。")
+                        .await;
+                }
+                (Some(activity), false) => {
+                    updates.set(Presence::new(status).with_activity(activity))
+                }
+                (None, true) => updates.set(Presence::new(status)),
+                (None, false) => updates.set_status(status),
             }
-            updates.set(next);
             ctx.reply_ephemeral("ステータス変更を受け付けました。")
                 .await
         },
