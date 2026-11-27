@@ -33,7 +33,12 @@ def main():
     compare = f"{quote(base, safe='')}...{quote(tag, safe='')}"
     changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
     summary = changelog.split(f"\n## {version}\n", 1)[1].split("\n## ", 1)[0].strip()
-    print(f"{summary}\n")
+    intro, heading, details = summary.partition("\n### ")
+    if heading and intro.strip() and summary.count("\n") > 30:
+        print(f"{intro.rstrip()}\n")
+        print(f"<details>\n<summary>変更履歴の詳細</summary>\n\n### {details}\n\n</details>\n")
+    else:
+        print(f"{summary}\n")
     print(f"[crates.io](https://crates.io/crates/disnana-akari/{quote(version, safe='')})"
           f" · [最新リリース]({root}/releases/latest) · [変更全体]({root}/compare/{compare})\n")
 

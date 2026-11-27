@@ -37,7 +37,7 @@ Error: テキストコマンドやメッセージのハンドラーには、Inte
 
 `MESSAGE_CONTENT` は **特権 Intent** です。コードで指定するだけでなく、Developer Portal の **Bot** ページでも有効にします（[手順](../getting-started/discord-setup.md#_3-message-content-intent-を有効にする)）。
 
-有効にしていないと、接続したあとに Gateway がコード `4014` で閉じます。この理由は、[`Bot::on_error`](errors.md) に報告されます（設定していなければ、標準エラー出力に出ます）。
+有効にしていないと、接続したあとに Gateway がコード `4014` で閉じます。理由は [`Bot::on_error`](errors.md) と `tracing` のログで確認できます。[ログを出す](logging.md)
 
 ## 設定の確認と置き換え
 

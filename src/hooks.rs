@@ -313,6 +313,11 @@ fn emit_error(report: &ErrorReport<'_>) {
     }
 }
 
+/// ログに載せるミリ秒。`u64` に収まらない長さ（約 5.8 億年）は、最大値にする。
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// 実行時の情報を、`tracing` のイベントとして発行する。
 fn emit_info(event: &InfoEvent) {
     match event {
@@ -340,8 +345,8 @@ fn emit_info(event: &InfoEvent) {
                 target: LOG_TARGET,
                 interaction_type = ?interaction_type,
                 response_type = ?response_type,
-                elapsed_ms = elapsed.as_millis() as u64,
-                rest_elapsed_ms = rest_elapsed.as_millis() as u64,
+                elapsed_ms = millis(*elapsed),
+                rest_elapsed_ms = millis(*rest_elapsed),
                 "Interaction に初回応答しました"
             );
         }
@@ -362,9 +367,9 @@ fn emit_info(event: &InfoEvent) {
                 command_id = command_id.map(|id| id.get()),
                 interaction_type = ?interaction_type,
                 response_type = ?response_type,
-                elapsed_ms = elapsed.as_millis() as u64,
-                queue_wait_ms = queue_wait.as_millis() as u64,
-                rest_elapsed_ms = rest_elapsed.as_millis() as u64,
+                elapsed_ms = millis(*elapsed),
+                queue_wait_ms = millis(*queue_wait),
+                rest_elapsed_ms = millis(*rest_elapsed),
                 http_status,
                 discord_code,
                 "Interaction の初回応答に失敗しました"
@@ -446,11 +451,13 @@ mod tests {
     }
 
     /// 発行されたイベントを集めるだけの購読先。テストで、依存を増やさずにログを確かめる。
+    ///
+    /// `tracing` は、発行箇所ごとに「購読先がいるか」をプロセス全体で覚える。テストはスレッドを
+    /// 並べて走るので、スレッドごとの購読先（`with_default`）を使うと、別のテストが先に同じ発行箇所を
+    /// 通ったときに、イベントを取りこぼす。そのため、購読先はプロセスに 1 回だけ置き、
+    /// 集める先をスレッドごとに分ける。
     mod capture {
-        use std::{
-            fmt,
-            sync::{Arc, Mutex},
-        };
+        use std::{cell::RefCell, fmt, sync::Once};
 
         use tracing::{
             Event, Level, Metadata, Subscriber,
@@ -458,9 +465,11 @@ mod tests {
             span::{Attributes, Id, Record},
         };
 
-        pub(super) type Seen = Arc<Mutex<Vec<(Level, String, String)>>>;
+        pub(super) type Seen = Vec<(Level, String, String)>;
 
-        pub(super) struct Capture(pub(super) Seen);
+        thread_local! {
+            static SINK: RefCell<Option<Seen>> = const { RefCell::new(None) };
+        }
 
         struct Message(String, Vec<String>);
 
@@ -474,7 +483,9 @@ mod tests {
             }
         }
 
-        impl Subscriber for Capture {
+        struct Router;
+
+        impl Subscriber for Router {
             fn enabled(&self, _: &Metadata<'_>) -> bool {
                 true
             }
@@ -484,32 +495,43 @@ mod tests {
             fn record(&self, _: &Id, _: &Record<'_>) {}
             fn record_follows_from(&self, _: &Id, _: &Id) {}
             fn event(&self, event: &Event<'_>) {
-                let mut message = Message(String::new(), Vec::new());
-                event.record(&mut message);
-                self.0.lock().unwrap().push((
-                    *event.metadata().level(),
-                    event.metadata().target().to_owned(),
-                    format!("{} [{}]", message.0, message.1.join(", ")),
-                ));
+                SINK.with(|sink| {
+                    // 集めているスレッドのイベントだけ残す。ほかのスレッドのものは捨てる。
+                    if let Some(seen) = sink.borrow_mut().as_mut() {
+                        let mut message = Message(String::new(), Vec::new());
+                        event.record(&mut message);
+                        seen.push((
+                            *event.metadata().level(),
+                            event.metadata().target().to_owned(),
+                            format!("{} [{}]", message.0, message.1.join(", ")),
+                        ));
+                    }
+                });
             }
             fn enter(&self, _: &Id) {}
             fn exit(&self, _: &Id) {}
+        }
+
+        /// `run` の間に、このスレッドで発行されたイベントを集めて返す。
+        pub(super) fn collect(run: impl FnOnce()) -> Seen {
+            static INSTALL: Once = Once::new();
+            INSTALL.call_once(|| {
+                tracing::subscriber::set_global_default(Router)
+                    .expect("テストの購読先は、プロセスで 1 回だけ置く");
+            });
+            SINK.with(|sink| *sink.borrow_mut() = Some(Vec::new()));
+            run();
+            SINK.with(|sink| sink.borrow_mut().take().unwrap_or_default())
         }
     }
 
     #[test]
     fn errors_and_info_are_emitted_as_tracing_events_at_matching_levels() {
-        use std::sync::{Arc, Mutex};
-
         use tracing::Level;
 
         use super::{InfoEvent, InfoReporter};
 
-        let seen: capture::Seen = Arc::new(Mutex::new(Vec::new()));
-        // 他のテストが同じ callsite を先に登録しても、購読先の候補を
-        // そのスレッドの既定値だけで決めないようにする。
-        let _idle_dispatch = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        tracing::subscriber::with_default(capture::Capture(Arc::clone(&seen)), || {
+        let seen = capture::collect(|| {
             // フックがなくても、ログには出る（出力先は、購読先が決める）。
             let reporter = Reporter::default();
             reporter.report(
@@ -526,7 +548,6 @@ mod tests {
             });
         });
 
-        let seen = seen.lock().unwrap();
         let levels: Vec<_> = seen.iter().map(|(level, ..)| *level).collect();
         assert_eq!(
             levels,
@@ -540,6 +561,49 @@ mod tests {
         );
         assert!(seen[0].2.contains("source=\"ボタン\""), "{}", seen[0].2);
         assert!(seen[3].2.contains("count=3"), "{}", seen[3].2);
+    }
+
+    #[test]
+    fn interaction_diagnostics_clamp_all_duration_fields() {
+        use super::{
+            Duration, Id, InfoEvent, InfoReporter, InteractionResponseType, InteractionType,
+        };
+
+        let seen = capture::collect(|| {
+            let info = InfoReporter::default();
+            let interaction_type = InteractionType::ApplicationCommand;
+            let response_type = InteractionResponseType::ChannelMessageWithSource;
+            info.report(InfoEvent::InteractionResponded {
+                interaction_type,
+                response_type,
+                elapsed: Duration::MAX,
+                rest_elapsed: Duration::MAX,
+            });
+            info.report(InfoEvent::InteractionResponseFailed {
+                interaction_id: Id::new(1),
+                command_id: Some(Id::new(2)),
+                interaction_type,
+                response_type,
+                elapsed: Duration::MAX,
+                queue_wait: Duration::MAX,
+                rest_elapsed: Duration::MAX,
+                http_status: Some(404),
+                discord_code: Some(10062),
+            });
+        });
+        assert_eq!(seen.len(), 2);
+        let has_clamped_field = |event: &str, field| {
+            let expected = format!("{field}={}", u64::MAX);
+            event
+                .split(['[', ',', ']'])
+                .any(|part| part.trim() == expected)
+        };
+        for (_, _, event) in &seen {
+            for field in ["elapsed_ms", "rest_elapsed_ms"] {
+                assert!(has_clamped_field(event, field), "{event}");
+            }
+        }
+        assert!(has_clamped_field(&seen[1].2, "queue_wait_ms"));
     }
 
     #[test]

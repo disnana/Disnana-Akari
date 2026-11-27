@@ -29,7 +29,7 @@ fn build() -> Result<Commands> {
 }
 ```
 
-Akari の `Result<()>` の `()` は「成功しても返す値がない」という意味です。ハンドラーがエラーを返すと、Akari はそのエラーを `Bot::on_error` に報告します（設定していなければ標準エラー出力に書きます）。
+Akari の `Result<()>` の `()` は「成功しても返す値がない」という意味です。ハンドラーのエラーは `Bot::on_error` で受け取れます。ログとして表示する場合は `tracing` の購読先を設定します。[ログを出す](../guide/logging.md)
 
 ## `&str` と `String`
 

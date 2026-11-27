@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "disnana-akari"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures-util",
  "http",

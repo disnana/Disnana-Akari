@@ -3,13 +3,17 @@
 **Disnana Akari**（以下 Akari）は、Rust で Discord Bot を書くためのフレームワークです。[Twilight](https://twilight.rs/) の上に作られていて、コマンドを `async fn` として登録するだけで動かせます。
 
 ```rust
+use disnana_akari::model::gateway::Intents;
 use disnana_akari::{Bot, CommandContext, Commands, Result};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let mut commands = Commands::new("!")?;
     commands.register("ping", ping)?;
-    Bot::from_env()?.run_commands(commands).await
+    Bot::from_env()?
+        .add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
+        .run_commands(commands)
+        .await
 }
 
 async fn ping(ctx: CommandContext<'_>) -> Result<()> {
@@ -17,7 +21,7 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 }
 ```
 
-これだけで、Discord で `!ping` と送ると Bot が `Pong!` と返信します。
+Bot を起動し、招待したサーバーで `!ping` と送ると `Pong!` が返ります。Developer Portal の **Message Content Intent** も有効にします。[はじめての Bot](getting-started/first-bot.md)
 
 ## できること
 
@@ -48,15 +52,13 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 - Discord の Bot トークン
 
 > [!NOTE]
-> 現在のバージョンは 0.1 系です。公開 API は今後の更新で変わることがあります。変更点は [変更履歴](reference/changelog.md) に記載します。
+> このガイドは 0.3 系を対象にしています。版ごとの変更点は [変更履歴](reference/changelog.md) を確認してください。
 
-## 現時点の制限
+## 接続とコマンドの範囲
 
-Akari は、まず「自分のテスト用サーバーで Bot を動かす」ことに重点を置いています。
-
-- シャードは 1 つです。大規模な Bot 向けの分割には対応していません。
-- スラッシュコマンドは、サーバーを 1 つ指定して登録します。
-- テキストコマンドとメッセージの受信は、サーバー内のメッセージが対象です（ダイレクトメッセージは対象外です）。
+- Gateway は既定で単一接続です。`with_recommended_shards` で Discord の推奨シャード数を使えます。[推奨シャード数で起動する](guide/tasks.md#推奨シャード数で起動する)
+- スラッシュコマンドは、サーバーを指定する登録と、アプリ全体へのグローバル登録を選べます。[スラッシュコマンド](guide/slash-commands.md)
+- テキストコマンドはサーバー内のメッセージを受け取ります。DM では、DM を利用場所に含むグローバルのアプリコマンドを使えます。[コマンドの利用場所](guide/slash-commands.md#利用場所と翻訳を設定する)
 
 ## 読み進め方
 
