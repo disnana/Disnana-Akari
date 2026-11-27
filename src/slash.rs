@@ -149,9 +149,11 @@ impl SlashCommands {
                 description: description.into(),
                 options,
                 permissions,
-                handler,
+                handlers: RouteHandlers {
+                    command: handler,
+                    autocompletes: HashMap::new(),
+                },
                 children: BTreeMap::new(),
-                autocompletes: HashMap::new(),
             })),
             Entry::Occupied(_) => Err(RegistrationError::Duplicate {
                 kind: HandlerKind::SlashCommand,
@@ -188,15 +190,17 @@ impl SlashCommands {
         };
         let (root, rest) = path.split_first().ok_or_else(unknown)?;
         let definition = self.entries.get_mut(*root).ok_or_else(unknown)?;
-        let options = match (rest, &mut definition.children) {
-            ([], children) if children.is_empty() => &mut definition.options,
+        let (options, handlers) = match (rest, &mut definition.children) {
+            ([], children) if children.is_empty() => {
+                (&mut definition.options, &mut definition.handlers)
+            }
             ([sub], children) => match children.get_mut(*sub) {
-                Some(Child::Sub(sub)) => &mut sub.options,
+                Some(Child::Sub(sub)) => (&mut sub.options, &mut sub.handlers),
                 _ => return Err(unknown().into()),
             },
             ([group, sub], children) => match children.get_mut(*group) {
                 Some(Child::Group { subs, .. }) => match subs.get_mut(*sub) {
-                    Some(sub) => &mut sub.options,
+                    Some(sub) => (&mut sub.options, &mut sub.handlers),
                     None => return Err(unknown().into()),
                 },
                 _ => return Err(unknown().into()),
@@ -220,11 +224,7 @@ impl SlashCommands {
             }
             .into());
         }
-        let key = (
-            rest.iter().map(|part| (*part).to_owned()).collect(),
-            option.to_owned(),
-        );
-        match definition.autocompletes.entry(key) {
+        match handlers.autocompletes.entry(option.to_owned()) {
             HashEntry::Vacant(entry) => {
                 target.autocomplete = Some(true);
                 entry.insert(Box::new(
@@ -611,7 +611,12 @@ impl CommandGroup<'_> {
         let definition = SubDefinition {
             description: description.into(),
             options,
-            handler: Box::new(adapt_handler!(handler, ctx: &mut SlashContext<'_>)),
+            handlers: RouteHandlers {
+                command: Some(Box::new(
+                    adapt_handler!(handler, ctx: &mut SlashContext<'_>),
+                )),
+                autocompletes: HashMap::new(),
+            },
         };
         let siblings = match &self.group {
             None => &mut self.root.children,
@@ -755,12 +760,10 @@ struct Definition {
     description: String,
     options: Vec<CommandOption>,
     permissions: PermissionPolicy,
-    /// サブコマンドを持たない、普通のコマンドの関数。
-    handler: Option<Box<dyn SlashHandler>>,
-    /// サブコマンドと、そのグループ。持つ場合、`options` と `handler` は使わない。
+    /// サブコマンドを持たない、普通のコマンドの関数と補完。
+    handlers: RouteHandlers,
+    /// サブコマンドと、そのグループ。
     children: BTreeMap<String, Child>,
-    /// オートコンプリートの関数。キーは、サブコマンドの経路（コマンド名を除く）と引数名。
-    autocompletes: HashMap<(Vec<String>, String), Box<dyn AutocompleteHandler>>,
 }
 
 enum Child {
@@ -774,7 +777,7 @@ enum Child {
 struct SubDefinition {
     description: String,
     options: Vec<CommandOption>,
-    handler: Box<dyn SlashHandler>,
+    handlers: RouteHandlers,
 }
 
 impl Definition {
@@ -819,23 +822,23 @@ impl Definition {
 
     /// 受信側で、呼ぶ関数を引くための表に変える。
     fn into_route(self) -> Route {
-        let mut subs = HashMap::new();
-        for (name, child) in self.children {
-            match child {
-                Child::Sub(sub) => {
-                    subs.insert(vec![name], sub.handler);
-                }
-                Child::Group { subs: inner, .. } => {
-                    for (sub_name, sub) in inner {
-                        subs.insert(vec![name.clone(), sub_name], sub.handler);
-                    }
-                }
-            }
-        }
         Route {
-            root: self.handler,
-            subs,
-            autocompletes: self.autocompletes,
+            root: self.handlers,
+            children: self
+                .children
+                .into_iter()
+                .map(|(name, child)| {
+                    let child = match child {
+                        Child::Sub(sub) => ChildRoute::Sub(sub.handlers),
+                        Child::Group { subs, .. } => ChildRoute::Group(
+                            subs.into_iter()
+                                .map(|(name, sub)| (name, sub.handlers))
+                                .collect(),
+                        ),
+                    };
+                    (name, child)
+                })
+                .collect(),
             permissions: self.permissions,
         }
     }
@@ -843,27 +846,46 @@ impl Definition {
 
 /// 一つのコマンドについて、サブコマンドの経路ごとの関数。
 struct Route {
-    root: Option<Box<dyn SlashHandler>>,
-    subs: HashMap<Vec<String>, Box<dyn SlashHandler>>,
-    autocompletes: HashMap<(Vec<String>, String), Box<dyn AutocompleteHandler>>,
+    root: RouteHandlers,
+    children: HashMap<String, ChildRoute>,
     permissions: PermissionPolicy,
+}
+
+enum ChildRoute {
+    Sub(RouteHandlers),
+    Group(HashMap<String, RouteHandlers>),
+}
+
+struct RouteHandlers {
+    command: Option<Box<dyn SlashHandler>>,
+    autocompletes: HashMap<String, Box<dyn AutocompleteHandler>>,
 }
 
 impl Route {
     fn find(&self, path: &[&str]) -> Option<&dyn SlashHandler> {
-        if path.is_empty() {
-            return self.root.as_deref();
-        }
-        let key: Vec<String> = path.iter().map(|part| (*part).to_owned()).collect();
-        self.subs.get(&key).map(AsRef::as_ref)
+        self.handlers(path)?.command.as_deref()
     }
 
     fn find_autocomplete(&self, path: &[&str], option: &str) -> Option<&dyn AutocompleteHandler> {
-        let key = (
-            path.iter().map(|part| (*part).to_owned()).collect(),
-            option.to_owned(),
-        );
-        self.autocompletes.get(&key).map(AsRef::as_ref)
+        self.handlers(path)?
+            .autocompletes
+            .get(option)
+            .map(AsRef::as_ref)
+    }
+
+    fn handlers(&self, path: &[&str]) -> Option<&RouteHandlers> {
+        match path {
+            [] => Some(&self.root),
+            [sub] => match self.children.get(*sub)? {
+                ChildRoute::Sub(handlers) => Some(handlers),
+                ChildRoute::Group(_) => None,
+            },
+            [group, sub] => match self.children.get(*group)? {
+                ChildRoute::Group(subs) => subs.get(*sub),
+                ChildRoute::Sub(_) => None,
+            },
+            _ => None,
+        }
     }
 }
 
@@ -1674,11 +1696,13 @@ mod tests {
         handlers.insert(
             Id::new(5),
             Route {
-                root: Some(Box::new(async |_: &mut SlashContext<'_>| -> Result<()> {
-                    Ok(())
-                })),
-                subs: HashMap::new(),
-                autocompletes: HashMap::new(),
+                root: super::RouteHandlers {
+                    command: Some(Box::new(async |_: &mut SlashContext<'_>| -> Result<()> {
+                        Ok(())
+                    })),
+                    autocompletes: HashMap::new(),
+                },
+                children: HashMap::new(),
                 permissions: PermissionPolicy::Unrestricted,
             },
         );
@@ -1701,7 +1725,7 @@ mod tests {
             )
             .build();
         let mut commands = active(Scope::Global);
-        commands.handlers.get_mut(&Id::new(5)).unwrap().root =
+        commands.handlers.get_mut(&Id::new(5)).unwrap().root.command =
             Some(Box::new(async |ctx: &mut SlashContext<'_>| -> Result<()> {
                 ctx.defer().await?;
                 ctx.require_permissions(Permissions::MANAGE_MESSAGES)
@@ -2139,13 +2163,26 @@ mod tests {
                 vec![SlashCommands::string_option("key", "名前", true)],
                 handler,
             )?;
+            config.group("advanced", "詳細設定")?.subcommand(
+                "set",
+                "設定",
+                vec![SlashCommands::string_option("key", "名前", true)],
+                handler,
+            )?;
         }
         // サブコマンドを持つコマンドの直下には付けられない。
         assert!(slash.autocomplete(&["config"], "key", complete).is_err());
         slash.autocomplete(&["config", "set"], "key", complete)?;
+        slash.autocomplete(&["config", "advanced", "set"], "key", complete)?;
         let route = slash.entries.remove("config").unwrap().into_route();
         assert!(route.find_autocomplete(&["set"], "key").is_some());
+        assert!(
+            route
+                .find_autocomplete(&["advanced", "set"], "key")
+                .is_some()
+        );
         assert!(route.find_autocomplete(&["set"], "other").is_none());
+        assert!(route.find_autocomplete(&["advanced"], "key").is_none());
         assert!(route.find_autocomplete(&[], "key").is_none());
         Ok(())
     }
