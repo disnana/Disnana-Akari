@@ -79,7 +79,14 @@ impl fmt::Display for ErrorReport<'_> {
         if let Some(name) = self.name {
             write!(f, " `{name}`")?;
         }
-        write!(f, ": {}", self.error)
+        write!(f, ": {}", self.error)?;
+        // 原因の連鎖も、「: 原因」の形で続ける（`Http` などは、原因に本当の理由がある）。
+        let mut cause = std::error::Error::source(self.error);
+        while let Some(inner) = cause {
+            write!(f, ": {inner}")?;
+            cause = inner.source();
+        }
+        Ok(())
     }
 }
 
@@ -238,6 +245,43 @@ mod tests {
     use super::{ErrorSource, Hooks, Messages, Reporter};
 
     #[test]
+    fn report_text_continues_with_the_cause_chain() {
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct Reason;
+        #[derive(Debug)]
+        struct Failure(Reason);
+        impl fmt::Display for Reason {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("本当の理由")
+            }
+        }
+        impl fmt::Display for Failure {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("失敗しました")
+            }
+        }
+        impl std::error::Error for Reason {}
+        impl std::error::Error for Failure {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let error = Error::handler(Failure(Reason));
+        let report = super::ErrorReport {
+            source: ErrorSource::Button,
+            name: Some("akari:demo"),
+            error: &error,
+        };
+        assert_eq!(
+            report.to_string(),
+            "ボタン `akari:demo`: 失敗しました: 本当の理由"
+        );
+    }
+
+    #[test]
     fn hook_receives_the_source_name_and_error_instead_of_stderr() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&seen);
@@ -253,7 +297,7 @@ mod tests {
         reporter.report(
             ErrorSource::Button,
             Some("akari:demo"),
-            &Error::Handler("壊れました".into()),
+            &Error::msg("壊れました"),
         );
         reporter.report(ErrorSource::Gateway, None, &Error::GatewayEnded);
 
