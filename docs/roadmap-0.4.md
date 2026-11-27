@@ -252,9 +252,30 @@ ctx.set_role_permissions(role_id, role.with(Permissions::MANAGE_MESSAGES), "理�
 
 テストでは、モックの REST を使い、上の回数を固定します。回数が増えたら CI が落ちます。権限の計算は、割り当てが 0 であることも確かめます。
 
-### 層 5: チャンネルと VC の作成・編集
+### 層 5: 管理操作（作成・編集・削除）
 
-d.py の `create_text_channel`、`channel.edit`、`member.move_to` などに当たる操作です。Rust らしく、**種類ごとの型で、成り立たない組み合わせを書けなくします。** d.py は、テキストチャンネルにビットレートを渡しても、実行時にしかエラーになりません。
+d.py の `create_text_channel`、`channel.edit`、`guild.edit`、`role.edit`、`member.kick`、`thread.edit` などに当たる操作です。チャンネルや VC だけでなく、サーバー設定、フォーラム、スレッド、ロール、メンバー、絵文字まで、**同じ決まりで** 扱います。Rust らしく、**種類ごとの型で、成り立たない組み合わせを書けなくします。** d.py は、テキストチャンネルにビットレートを渡しても、実行時にしかエラーになりません。
+
+#### 対象と段階
+
+| 段階 | 対象 | 必要な Bot の権限 | 主な事前検証 |
+| --- | --- | --- | --- |
+| 1 | チャンネル（作成、編集、削除）、VC のメンバー操作 | `MANAGE_CHANNELS`、`MOVE_MEMBERS`、`MUTE_MEMBERS`、`DEAFEN_MEMBERS` | 名前、トピック、スローモード、人数の範囲 |
+| 1 | ロール（作成、編集、削除、位置） | `MANAGE_ROLES` | 色、名前、権限は Bot が持つものだけ、Bot の最上位ロールより下 |
+| 1 | メンバー（ニックネーム、ロールの付け外し、キック、BAN、タイムアウト） | `MANAGE_NICKNAMES`、`MANAGE_ROLES`、`KICK_MEMBERS`、`BAN_MEMBERS`、`MODERATE_MEMBERS` | ロール階層、タイムアウトは 28 日以内 |
+| 2 | サーバー設定（名前、認証レベル、通知、コンテンツフィルター、システムチャンネル、AFK、ルール、言語、説明） | `MANAGE_GUILD` | 名前は 2〜100 文字、列挙は Twilight の型 |
+| 2 | フォーラム（タグ、既定の並び順、レイアウト、反応の絵文字、ガイドライン）と投稿の作成 | `MANAGE_CHANNELS`、投稿は `SEND_MESSAGES` | タグは 20 個まで、タグ名 20 文字、投稿に付けるタグは 5 個まで |
+| 2 | スレッド（作成、名前、アーカイブ、ロック、自動アーカイブ、メンバーの追加・削除） | `CREATE_PUBLIC_THREADS`、`MANAGE_THREADS` など | 自動アーカイブは 60、1440、4320、10080 分のみ |
+| 3 | 絵文字とステッカー（作成、名前、削除） | `CREATE_GUILD_EXPRESSIONS`、`MANAGE_GUILD_EXPRESSIONS` | 名前の文字種と長さ、画像の種類とサイズ |
+| 3 | ステージ、予定イベント、AutoMod、Webhook、招待 | それぞれ別 | 別に設計 |
+
+#### 統一する名前と形
+
+- 入り口は `ctx.manage()` です。動詞は `create_*`、`edit_*`、`delete_*` に統一します（例: `create_role`、`edit_guild`、`delete_channel`）。
+- 作成は `New*`（例: `NewChannel`、`NewRole`、`NewThread`）、編集は `*Edit`（例: `GuildEdit`、`RoleEdit`、`ThreadEdit`）の型を使います。どちらも、種類ごとに、設定できる項目だけを持ちます。
+- 結果は、更新後の Twilight の型です（`Channel`、`Role`、`Guild` など）。
+- 理由は必須で、512 文字以内です。
+
 
 #### 作成
 
@@ -299,6 +320,73 @@ ctx.manage().set_voice_mute(guild_id, user_id, true, "理由").await?;
 ctx.manage().set_voice_deafen(guild_id, user_id, true, "理由").await?;
 ```
 
+#### ロールとメンバー
+
+<!-- no-check -->
+```rust
+let role = ctx.manage().create_role(
+    guild_id,
+    NewRole::new("認証済み").color(0x2ecc71).hoist(true).permissions(Permissions::text()),
+    "認証用",
+).await?;
+
+ctx.manage().add_role(guild_id, user_id, role.id, "認証が完了したため").await?;
+ctx.manage().timeout_member(guild_id, user_id, Duration::from_secs(600), "スパム").await?;
+ctx.manage().kick_member(guild_id, user_id, "理由").await?;
+```
+
+- メンバーとロールの操作は、層 3 のロール階層の確認を、**自動で** 行います。Discord に送れば 403 で失敗する操作を、送る前に、理由つきで失敗させます（通信を 1 回減らせます）。
+- `NewRole` と `RoleEdit` に渡す権限は、Bot が持っているものだけです。持たないものを含む場合は、送らずに失敗します。
+- タイムアウトは、28 日を超えると、送る前に失敗します。
+
+#### サーバー設定
+
+<!-- no-check -->
+```rust
+ctx.manage().edit_guild(
+    guild_id,
+    GuildEdit::new()
+        .name("新しい名前")
+        .verification_level(VerificationLevel::Medium)
+        .default_notifications(DefaultMessageNotificationLevel::Mentions)
+        .system_channel(Some(channel_id)),
+    "理由",
+).await?;
+```
+
+- 列挙は Twilight の型をそのまま使います（数値を書きません）。層 0 の日本語名で、エラーや確認の表示ができます。
+- 画像（アイコン、バナー）は、「画像」の節の型を通します。
+- 機能の追加・削除（`features`）は、Discord が管理者権限を求めるものがあるので、最初は対象外にします。
+
+#### フォーラムとスレッド
+
+<!-- no-check -->
+```rust
+// フォーラムのタグ。Discord は、タグ一覧全体を 1 回で置き換える仕様
+ctx.manage().edit_forum_tags(channel_id, |tags| {
+    tags.add(ForumTag::new("質問").emoji("❓"));
+    tags.rename(existing_tag_id, "解決済み");
+    tags.remove(old_tag_id);
+}, "理由").await?;
+
+ctx.manage().create_forum_post(
+    channel_id,
+    NewForumPost::new("投稿のタイトル", "最初のメッセージ").tags(&[tag_id]),
+).await?;
+```
+
+- タグの一覧は、Discord が全体を置き換える仕様です。同時に別の変更があると、巻き戻すおそれがあります。`edit_forum_tags` は、**現在の一覧を読み、既存のタグを ID で維持したまま、変更を適用して書き戻します**。ドキュメントに、競合の可能性を明記します。
+- タグの数、名前の長さ、投稿に付けるタグの数は、送る前に検証します。
+- スレッドの `NewThread` は、メッセージから作る、公開、非公開の入り口を分けます。自動アーカイブの時間は、列挙型（`OneHour`、`OneDay`、`ThreeDays`、`OneWeek`）にして、不正な値を書けなくします。
+
+#### 画像
+
+アイコン、バナー、絵文字、ステッカーに使う画像は、`ImageData` 型を通します。
+
+- 画像の種類（PNG、JPEG、GIF、WebP）をバイト列から判別し、サイズの上限（絵文字は 256 KiB、ステッカーは 512 KiB）を、送る前に検証します。
+- Akari は、画像を勝手に取得しません。バイト列を渡すのは、アプリです。
+- Discord に送る形式の変換（Base64）は、依存を足さずに、小さな自前の実装か、すでにある依存を使います（依存の枠は 132/140 です）。
+
 #### 共通の決まり
 
 - 入り口は `ctx.manage()` です。層 2〜4 の `Access` と同じ取得結果を共有します。
@@ -310,7 +398,7 @@ ctx.manage().set_voice_deafen(guild_id, user_id, true, "理由").await?;
 
 #### 後回し
 
-スレッド、フォーラムのタグ、チャンネルの並び替え、ステージのインスタンス、Webhook は、この層が入ってから別に設計します。
+チャンネルとロールの並び替え、ステージ、予定イベント、AutoMod、Webhook、招待は、上の段階が入ってから別に設計します。
 
 ### 後回し
 
