@@ -7,6 +7,7 @@ mod events;
 mod hooks;
 mod hybrid;
 mod interactions;
+mod limits;
 mod slash;
 mod timing;
 pub mod ui;
@@ -39,6 +40,7 @@ pub use interactions::{
     ButtonContext, ChannelSelectContext, EntitySelectContext, Mentionable,
     MentionableSelectContext, ModalContext, RoleSelectContext, SelectContext, UserSelectContext,
 };
+pub use limits::Limits;
 pub use slash::{SlashCommands, SlashContext};
 pub use timing::Timing;
 pub use twilight_http as http;
@@ -46,11 +48,6 @@ pub use twilight_model as model;
 
 use hooks::{Hooks, InfoReporter, Reporter};
 use timing::Pending;
-
-const INTERACTION_WORKERS: usize = 8;
-const TEXT_WORKERS: usize = 8;
-const BUSY_WORKERS: usize = 8;
-const GATEWAY_QUEUE_CAPACITY: usize = 64;
 
 type NoMessageHandler = fn(Context<'_>) -> std::future::Ready<Result<()>>;
 
@@ -68,6 +65,7 @@ pub struct Bot {
     info: InfoReporter,
     messages: Messages,
     include_bots: bool,
+    limits: Limits,
 }
 
 impl fmt::Debug for Bot {
@@ -81,6 +79,7 @@ impl fmt::Debug for Bot {
             .field("has_info_hook", &self.info.has_hook())
             .field("messages", &self.messages)
             .field("include_bots", &self.include_bots)
+            .field("limits", &self.limits)
             .finish()
     }
 }
@@ -107,6 +106,7 @@ impl Bot {
             info: InfoReporter::default(),
             messages: Messages::default(),
             include_bots: false,
+            limits: Limits::default(),
         })
     }
 
@@ -184,6 +184,14 @@ impl Bot {
     /// 互いに反応し合うループは、アプリ側で防いでください。
     pub fn include_bots(mut self, include: bool) -> Self {
         self.include_bots = include;
+        self
+    }
+
+    /// 同時に処理する数と待ち行列の大きさを設定します。[`Limits`] を参照してください。
+    ///
+    /// 0 を含む設定は、起動時に [`Error::InvalidLimits`] になります。
+    pub fn limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -267,6 +275,7 @@ impl Bot {
             info,
             messages,
             include_bots,
+            limits,
         } = self;
         let hooks = Hooks {
             reporter,
@@ -280,6 +289,7 @@ impl Bot {
         let needs_messages = observe_messages || text_commands.is_some();
         let intents = intents.unwrap_or_else(Intents::empty) | additional_intents;
         check_intents(intents, needs_messages)?;
+        limits.validate()?;
 
         let http = Client::new(token.clone());
         let mut event_types = EventTypeFlags::READY;
@@ -304,12 +314,12 @@ impl Bot {
         }
 
         let mut shard = Shard::new(ShardId::ONE, token, intents);
-        let (event_tx, mut event_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
-        let (text_tx, text_queue) = mpsc::channel::<Pending<Arc<Message>>>(GATEWAY_QUEUE_CAPACITY);
-        let (text_busy_tx, text_busy_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
+        let (event_tx, mut event_queue) = mpsc::channel(limits.queue_capacity);
+        let (text_tx, text_queue) = mpsc::channel::<Pending<Arc<Message>>>(limits.queue_capacity);
+        let (text_busy_tx, text_busy_queue) = mpsc::channel(limits.queue_capacity);
         let (interactions, interaction_queue) =
-            mpsc::channel::<Pending<Interaction>>(GATEWAY_QUEUE_CAPACITY);
-        let (busy, busy_queue) = mpsc::channel(GATEWAY_QUEUE_CAPACITY);
+            mpsc::channel::<Pending<Interaction>>(limits.queue_capacity);
+        let (busy, busy_queue) = mpsc::channel(limits.queue_capacity);
         let slash = slash.as_ref();
 
         let handle_events = async {
@@ -338,7 +348,7 @@ impl Bot {
 
         let handle_text = work_queue::dispatch(
             text_queue,
-            TEXT_WORKERS,
+            limits.text_workers,
             |pending| async {
                 let (message, timing) = Pending::begin(pending);
                 if let Some(commands) = text_commands {
@@ -357,7 +367,7 @@ impl Bot {
             |pending| queue_text_busy(&text_busy_tx, pending, &hooks),
         );
         let handle_text_busy =
-            work_queue::respond(text_busy_queue, BUSY_WORKERS, |pending| async {
+            work_queue::respond(text_busy_queue, limits.notice_workers, |pending| async {
                 let (message, timing) = Pending::begin(pending);
                 let context = Context {
                     http: &http,
@@ -375,7 +385,7 @@ impl Bot {
 
         let handle_interactions = work_queue::dispatch(
             interaction_queue,
-            INTERACTION_WORKERS,
+            limits.interaction_workers,
             |pending| async {
                 let (interaction, timing) = Pending::begin(pending);
                 if matches!(
@@ -392,8 +402,10 @@ impl Bot {
             },
             |pending| queue_busy_response(&busy, pending, &hooks),
         );
-        let handle_busy =
-            work_queue::respond(busy_queue, BUSY_WORKERS, |pending: Pending<Interaction>| {
+        let handle_busy = work_queue::respond(
+            busy_queue,
+            limits.notice_workers,
+            |pending: Pending<Interaction>| {
                 let http = &http;
                 let hooks = &hooks;
                 async move {
@@ -412,7 +424,8 @@ impl Bot {
                             .report(ErrorSource::Response, Some("混雑の通知"), &error);
                     }
                 }
-            });
+            },
+        );
 
         let receive = async {
             let mut own_id = None;
@@ -688,6 +701,21 @@ mod tests {
     use super::*;
 
     async fn ping(_: CommandContext<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn zero_limits_fail_before_connecting() -> Result<()> {
+        let bot = Bot::new("token")?
+            .add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
+            .limits(Limits::default().text_workers(0));
+        let result = bot.run_commands(Commands::new("!")?).await;
+        assert!(matches!(
+            result,
+            Err(Error::InvalidLimits {
+                field: "text_workers"
+            })
+        ));
         Ok(())
     }
 

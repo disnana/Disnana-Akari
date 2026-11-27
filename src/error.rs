@@ -12,6 +12,12 @@ pub enum Error {
     /// `Bot::new` に空白だけ、または空のトークンが渡されました。
     #[error("Discord Bot トークンが空です")]
     EmptyToken,
+    /// [`Limits`](crate::Limits) の項目に 0 が指定されました。
+    #[error("Limits の `{field}` は 1 以上にしてください")]
+    InvalidLimits {
+        /// 0 が指定された項目の名前です。
+        field: &'static str,
+    },
     /// `DISCORD_TOKEN` を読み取れなかったか、空でした。
     #[error("DISCORD_TOKEN に Discord Bot トークンを設定してください")]
     InvalidTokenEnvironment,
