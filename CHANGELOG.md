@@ -7,6 +7,7 @@
 - **エラーの連鎖で、メッセージが二重に表示されなくなりました。** `Error` の `Http`、`GatewayReceive`、`*Validation` は、表示と原因を元のエラーへそのまま渡します。`Error::Handler` は `HandlerError` を持つようになり（`downcast_ref`、`inner`、`into_inner` で元のエラーを取り出せます）、`CommandRegistration` の表示から原因を外しました（原因は `source()` で取得します）。
 - `ErrorReport` を `{report}` で表示すると、原因の連鎖も `: 原因` の形で続けて表示します。標準エラー出力の既定の表示にも、本当の理由が含まれます。
 - ドキュメントに、Twilight の型を公開 API に含める方針（安定性）を明記しました。
+- **モジュールを追加しました。** `Module` trait と `Registry` で、関連するコマンドやイベントの登録を、ひとまとまりにできます（discord.py の Cog にあたりますが、継承もマクロもありません）。
 - **オートコンプリートに対応しました。** `SlashCommands::autocomplete(path, option, handler)` で、引数に入力中の候補を返す関数を付けられます（`AutocompleteContext::{focused, respond}`、候補は `string_choice` などで作ります）。付けた引数は、Akari が自動で `autocomplete` を有効にします。
 - **サブコマンドに対応しました。** `SlashCommands::group` と `CommandGroup::{subcommand, group}` で、`/config set` や `/config advanced reset` を登録できます（コマンド → グループ → サブコマンドの最大 3 段）。`SlashContext::option` などはサブコマンドの引数も読み、`SlashContext::command_path` で呼ばれた経路を取得できます。`on_error` に渡る名前は `config advanced reset` の形になります。
 - **テキストコマンドとハイブリッドの権限確認を追加しました。** `Context` と `CommandContext`、`HybridContext` の `require_permissions(..).await?`、`permissions().await`、`require_guild()` です。メッセージには権限が付かないため、サーバーとチャンネルを Discord から取得し、Twilight 公式の `twilight-util`（権限計算のみ）で計算します。`Bot::cache_permissions(ttl)` で取得した情報を保存できます（既定は保存しません）。依存に `twilight-util` を追加しました。

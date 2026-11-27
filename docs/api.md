@@ -87,6 +87,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | メソッド | 動作 |
 | --- | --- |
 | `SlashCommands::for_guild(guild_id) -> SlashCommands` | Discord のサーバー ID を指定して空のコマンド一覧を作ります。ID の型は `Id<GuildMarker>` です。 |
+| `Registry::new(&mut commands, slash, &mut events).add(&module)?` | `Module` を実装した型の `register(&self, &mut Registry)` を呼び、テキストコマンド、スラッシュコマンド、イベントをまとめて登録します。 |
 | `commands.autocomplete(path, option, handler) -> Result<()>` | 引数に、入力中の候補を返す関数を付けます。`path` はコマンド名（サブコマンドなら経路）、関数は `AutocompleteContext`（`focused()`、`respond(choices)`）を受け取ります。候補は `SlashCommands::{string_choice, integer_choice, number_choice}` で作ります。 |
 | `commands.group(name, description) -> Result<CommandGroup>` | サブコマンドをまとめるコマンドを作ります。`group.subcommand(name, description, options, handler)` と、`group.group(name, description)`（さらに 1 段）で登録します。 |
 | `SlashCommands::global() -> SlashCommands` | アプリ全体（すべてのサーバーと DM）向けに空のコマンド一覧を作ります。Discord 側の反映に時間がかかることがあります。 |
