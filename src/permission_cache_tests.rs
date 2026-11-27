@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -40,10 +39,11 @@ async fn gateway_updates_refresh_only_the_needed_rest_entries() {
         .proxy(listener.local_addr().unwrap().to_string(), true)
         .build();
     let resolver = PermissionResolver::new(Some(Duration::from_secs(60)));
-    let message = message();
     let allowed = Permissions::MANAGE_MESSAGES | Permissions::BAN_MEMBERS;
 
     let server = async {
+        reply(&listener, "/channels/12/messages/100", MESSAGE).await;
+        reply(&listener, "/channels/11", &parent(true)).await;
         // Exact request order catches duplicate fetches and accidental invalidation of unaffected keys.
         for (path, body) in [
             ("/guilds/10", guild(allowed)),
@@ -59,6 +59,14 @@ async fn gateway_updates_refresh_only_the_needed_rest_entries() {
         }
     };
     let commands = async {
+        let message = message(&http).await;
+        let modified_parent = http
+            .channel(Id::new(11))
+            .await
+            .unwrap()
+            .model()
+            .await
+            .unwrap();
         let (first, second) = tokio::join!(
             resolver.resolve(&http, &message),
             resolver.resolve(&http, &message),
@@ -75,9 +83,7 @@ async fn gateway_updates_refresh_only_the_needed_rest_entries() {
                 .contains(allowed)
         );
 
-        let parent_update = Event::ChannelUpdate(Box::new(ChannelUpdate(
-            serde_json::from_value(parent(true)).unwrap(),
-        )));
+        let parent_update = Event::ChannelUpdate(Box::new(ChannelUpdate(modified_parent)));
         update_permission_cache(&resolver, &parent_update);
         let held = resolver.resolve(&http, &message).await.unwrap();
         assert!(!held.contains(Permissions::MANAGE_MESSAGES));
@@ -105,9 +111,8 @@ async fn role_delete_during_rest_fetch_prevents_using_the_old_permissions() {
         .proxy(listener.local_addr().unwrap().to_string(), true)
         .build();
     let resolver = PermissionResolver::new(Some(Duration::from_secs(60)));
-    let mut message = message();
-    message.channel_id = Id::new(11);
     let server = async {
+        reply(&listener, "/channels/12/messages/100", MESSAGE).await;
         let request = read_request(&listener, "/guilds/10").await;
         update_permission_cache(&resolver, &role_deleted(10));
         write_response(request, &guild(Permissions::MANAGE_MESSAGES)).await;
@@ -115,6 +120,8 @@ async fn role_delete_during_rest_fetch_prevents_using_the_old_permissions() {
         reply(&listener, "/guilds/10", &guild(Permissions::empty())).await;
     };
     let commands = async {
+        let mut message = message(&http).await;
+        message.channel_id = Id::new(11);
         let held = resolver.resolve(&http, &message).await.unwrap();
         assert!(!held.contains(Permissions::MANAGE_MESSAGES));
         assert_eq!(resolver.resolve(&http, &message).await.unwrap(), held);
@@ -133,58 +140,74 @@ fn role_deleted(guild: u64) -> Event {
     })
 }
 
-fn message() -> Message {
-    serde_json::from_value(json!({
+const MESSAGE: &str = r#"{
         "id": "100", "guild_id": "10", "channel_id": "12", "type": 0,
         "author": {"id": "2", "username": "member", "discriminator": "0"},
         "member": {"roles": ["60"], "deaf": false, "mute": false, "flags": 0},
         "content": "!probe", "timestamp": "2026-01-01T00:00:00.000000+00:00", "attachments": [],
         "embeds": [], "mention_everyone": false, "mention_roles": [], "mentions": [],
         "pinned": false, "tts": false
-    }))
-    .unwrap()
+    }"#;
+
+async fn message(http: &Client) -> Message {
+    http.message(Id::new(12), Id::new(100))
+        .await
+        .unwrap()
+        .model()
+        .await
+        .unwrap()
 }
 
-fn guild(permissions: Permissions) -> Value {
+fn guild(permissions: Permissions) -> String {
     let everyone = Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES;
-    let mut roles = vec![role("10", everyone)];
-    if !permissions.is_empty() {
-        roles.push(role("60", permissions));
-    }
-    json!({
+    let base_role = role(10, everyone);
+    let roles = if permissions.is_empty() {
+        base_role
+    } else {
+        format!("{base_role},{}", role(60, permissions))
+    };
+    format!(
+        r#"{{
         "id": "10", "owner_id": "1", "name": "test", "afk_timeout": 60,
         "default_message_notifications": 0, "explicit_content_filter": 0, "features": [],
         "mfa_level": 0, "nsfw_level": 0, "preferred_locale": "ja", "verification_level": 0,
         "premium_progress_bar_enabled": false, "system_channel_flags": 0,
-        "roles": roles
-    })
+        "roles": [{roles}]
+    }}"#
+    )
 }
 
-fn role(id: &str, permissions: Permissions) -> Value {
-    json!({
-        "id": id, "name": "test role", "color": 0, "colors": {"primary_color": 0},
+fn role(id: u64, permissions: Permissions) -> String {
+    format!(
+        r#"{{
+        "id": "{id}", "name": "test role", "color": 0, "colors": {{"primary_color": 0}},
         "hoist": false, "managed": false, "mentionable": false, "position": 1, "flags": 0,
-        "permissions": permissions.bits().to_string()
-    })
+        "permissions": "{}"
+    }}"#,
+        permissions.bits()
+    )
 }
 
-fn thread() -> Value {
-    json!({"id": "12", "type": 11, "guild_id": "10", "parent_id": "11"})
+fn thread() -> String {
+    r#"{"id": "12", "type": 11, "guild_id": "10", "parent_id": "11"}"#.to_owned()
 }
 
-fn parent(deny_manage: bool) -> Value {
+fn parent(deny_manage: bool) -> String {
     let deny = if deny_manage {
         Permissions::MANAGE_MESSAGES
     } else {
         Permissions::empty()
     };
-    json!({
+    format!(
+        r#"{{
         "id": "11", "type": 0, "guild_id": "10",
-        "permission_overwrites": [{"id": "60", "type": 0, "allow": "0", "deny": deny.bits().to_string()}]
-    })
+        "permission_overwrites": [{{"id": "60", "type": 0, "allow": "0", "deny": "{}"}}]
+    }}"#,
+        deny.bits()
+    )
 }
 
-async fn reply(listener: &TcpListener, expected_path: &str, body: &Value) {
+async fn reply(listener: &TcpListener, expected_path: &str, body: &str) {
     let stream = read_request(listener, expected_path).await;
     write_response(stream, body).await;
 }
@@ -210,8 +233,7 @@ async fn read_request(listener: &TcpListener, expected_path: &str) -> BufReader<
     stream
 }
 
-async fn write_response(mut stream: BufReader<TcpStream>, body: &Value) {
-    let body = body.to_string();
+async fn write_response(mut stream: BufReader<TcpStream>, body: &str) {
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()

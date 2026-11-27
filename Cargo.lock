@@ -114,7 +114,6 @@ dependencies = [
  "futures-util",
  "http",
  "rustls",
- "serde_json",
  "thiserror",
  "tokio",
  "twilight-gateway",
