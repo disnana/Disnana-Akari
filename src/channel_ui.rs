@@ -17,7 +17,20 @@ use twilight_model::{
     http::attachment::Attachment,
 };
 
-use crate::{Error, Result};
+use crate::{Error, Result, validation::CREATE_MESSAGE_REQUEST_MAX_BYTES};
+
+pub(crate) async fn send_create_message(http: &Client, request: Request) -> Result<()> {
+    let bytes = request
+        .form()
+        .map_or_else(|| request.body().map_or(0, <[u8]>::len), |form| form.len());
+    if bytes as u64 > CREATE_MESSAGE_REQUEST_MAX_BYTES {
+        return Err(Error::InvalidUi(
+            "メッセージ作成リクエストが multipart の情報を含めて上限を超えています。",
+        ));
+    }
+    http.request::<Message>(request).await?;
+    Ok(())
+}
 
 #[derive(Serialize)]
 struct ChannelUiReply<'a> {
@@ -71,6 +84,5 @@ pub(crate) async fn reply_with_premium_button(
         let body = serde_json::to_vec(&payload).map_err(Error::handler)?;
         request.form(files.build_form(&body)).build()?
     };
-    http.request::<Message>(request).await?;
-    Ok(())
+    send_create_message(http, request).await
 }

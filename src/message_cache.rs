@@ -1,9 +1,8 @@
 use std::{cell::RefCell, collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 
-use twilight_gateway::{EventTypeFlags, Intents, ShardId, error::ReceiveMessageErrorType};
+use twilight_gateway::{EventTypeFlags, Intents, ShardId};
 use twilight_model::{
     channel::Message,
-    gateway::event::GatewayEventDeserializer,
     id::{
         Id,
         marker::{ChannelMarker, GuildMarker, MessageMarker},
@@ -123,27 +122,15 @@ impl MessageCacheRoute<'_> {
 }
 
 pub(crate) fn invalidates_message_history(error: &Error) -> bool {
-    match error {
-        Error::MessageUpdateDecode(_) => true,
-        Error::GatewayReceive(error) => {
-            let ReceiveMessageErrorType::Deserializing { event } = error.kind() else {
-                return false;
-            };
-            GatewayEventDeserializer::from_json(event).is_none_or(|header| {
-                matches!(
-                    header.event_type(),
-                    Some(
-                        "READY"
-                            | "MESSAGE_CREATE"
-                            | "MESSAGE_UPDATE"
-                            | "MESSAGE_DELETE"
-                            | "MESSAGE_DELETE_BULK"
-                    )
-                )
-            })
-        }
-        _ => false,
-    }
+    matches!(error, Error::MessageUpdateDecode(_))
+        || crate::message_events::lost_gateway_event(
+            error,
+            EventTypeFlags::READY
+                | EventTypeFlags::MESSAGE_CREATE
+                | EventTypeFlags::MESSAGE_UPDATE
+                | EventTypeFlags::MESSAGE_DELETE
+                | EventTypeFlags::MESSAGE_DELETE_BULK,
+        )
 }
 
 struct Entry {

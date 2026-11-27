@@ -120,7 +120,7 @@ async fn report(ctx: CommandContext<'_>) -> Result<()> {
 }
 ```
 
-`AttachmentLimits` は Components V2 と共有できます。通常の返信も、本文の長さ、添付数、名前と ID、ファイルサイズを送信前に検証します。アプリ独自の上限を使わない場合は `AttachmentLimits::default()` を渡します。
+`AttachmentLimits` は Components V2 と共有できます。通常の返信も、本文の長さ、添付数、名前と ID、ファイルサイズを送信前に検証します。チャンネルへの添付返信では multipart の情報も含めて 25 MiB のリクエスト上限を確認します。アプリ独自の上限を使わない場合は `AttachmentLimits::default()` を渡します。[Discord のメッセージ作成仕様](https://docs.discord.com/developers/resources/message#create-message)
 
 ## 追加のメッセージにファイルを添付する
 

@@ -320,6 +320,20 @@ pub(crate) async fn next_event(
     None
 }
 
+pub(crate) fn lost_gateway_event(error: &Error, relevant: EventTypeFlags) -> bool {
+    let Error::GatewayReceive(error) = error else {
+        return false;
+    };
+    let ReceiveMessageErrorType::Deserializing { event } = error.kind() else {
+        return false;
+    };
+    GatewayEventDeserializer::from_json(event).is_none_or(|header| {
+        OpCode::from(header.op())
+            .and_then(|op| EventTypeFlags::try_from((op, header.event_type())).ok())
+            .is_some_and(|kind| relevant.intersects(kind))
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn decode_text(
     json: String,

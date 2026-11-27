@@ -188,6 +188,14 @@ async fn deferred_v2_reply_uploads_file_when_completing_private_original() -> Re
     Ok(())
 }
 
+fn retained_pdf(id: u64, filename: &str) -> Result<Attachment> {
+    let url = format!("https://cdn.example/{filename}");
+    serde_json::from_value(json!({
+        "id": id.to_string(), "filename": filename, "size": 1, "url": url, "proxy_url": url,
+    }))
+    .map_err(Error::handler)
+}
+
 #[tokio::test]
 async fn component_v2_updates_keep_existing_files_for_callback_and_patch() -> Result<()> {
     let (listener, http) = local_http().await?;
@@ -197,13 +205,7 @@ async fn component_v2_updates_keep_existing_files_for_callback_and_patch() -> Re
     interaction.token = "token".into();
     let mut source = test_command_message("")?;
     source.flags = Some(MessageFlags::IS_COMPONENTS_V2);
-    source.attachments.push(
-        serde_json::from_value(json!({
-            "id": "900", "filename": "old.pdf", "size": 1, "url": "https://cdn.example/old.pdf",
-            "proxy_url": "https://cdn.example/old.pdf"
-        }))
-        .map_err(Error::handler)?,
-    );
+    source.attachments.push(retained_pdf(900, "old.pdf")?);
     upload()
         .file(FileDisplay::new("old.pdf"))
         .validate_attachment_references(&source.attachments)?;
@@ -211,6 +213,8 @@ async fn component_v2_updates_keep_existing_files_for_callback_and_patch() -> Re
     let conflicting_id = Upload::from_bytes("new.pdf".into(), vec![1], 900);
     assert!(retained_ids(&[conflicting_name], &source.attachments).is_err());
     assert!(retained_ids(&[conflicting_id], &source.attachments).is_err());
+    let mut current = source.clone();
+    current.attachments.push(retained_pdf(901, "later.pdf")?);
     interaction.message = Some(source);
     let mut events = Events::new();
     events.on_button("upload", async |ctx: &mut ButtonContext<'_>| {
@@ -218,11 +222,22 @@ async fn component_v2_updates_keep_existing_files_for_callback_and_patch() -> Re
     })?;
     events.on_button("defer", async |ctx: &mut ButtonContext<'_>| -> Result<()> {
         ctx.defer_update().await?;
+        let oversized = ComponentsV2::new()
+            .text("over limit")
+            .attachment(Upload::from_bytes("oversized.pdf".into(), vec![0; 101], 0));
+        assert!(matches!(
+            ctx.update_v2(&oversized).await,
+            Err(Error::InvalidUi(_))
+        ));
         ctx.update_v2(&upload()).await
+    })?;
+    events.on_button("plain", async |ctx: &mut ButtonContext<'_>| -> Result<()> {
+        ctx.defer_update().await?;
+        ctx.update_v2(&ComponentsV2::new().text("plain")).await
     })?;
     let hooks = Hooks::default();
     let client = async {
-        for id in ["upload", "defer"] {
+        for id in ["upload", "defer", "plain"] {
             interaction.data = Some(InteractionData::MessageComponent(Box::new(
                 MessageComponentInteractionData {
                     component_type: ComponentType::Button,
@@ -250,8 +265,23 @@ async fn component_v2_updates_keep_existing_files_for_callback_and_patch() -> Re
         )
         .map_err(Error::handler)?;
         assert_eq!(defer["type"], 6);
-        let edit = multipart(&listener, "PATCH", "/webhooks/10/token/messages/@original").await?;
+        let original = "/webhooks/10/token/messages/@original";
+        let current = serde_json::to_string(&current).map_err(Error::handler)?;
+        exchange_response(&listener, "GET", Some(original), Some(&current))
+            .await
+            .map_err(Error::handler)?;
+        let edit = multipart(&listener, "PATCH", original).await?;
         assert_eq!(edit["attachments"][1], json!({"id": 900}));
+        assert_eq!(edit["attachments"][2], json!({"id": 901}));
+        exchange_response(&listener, "POST", Some(callback_path), None)
+            .await
+            .map_err(Error::handler)?;
+        let plain = exchange_response(&listener, "PATCH", Some(original), None)
+            .await
+            .map_err(Error::handler)?;
+        let plain: Value = serde_json::from_str(&plain).map_err(Error::handler)?;
+        assert_eq!(plain["components"][0]["content"], "plain");
+        assert!(plain.get("attachments").is_none());
         Ok::<_, Error>(())
     };
     let (_, server) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -367,6 +397,48 @@ async fn premium_channel_replies_preserve_json_and_multipart_contracts() -> Resu
     .map_err(Error::handler)?;
     client?;
     server
+}
+
+#[tokio::test]
+async fn channel_replies_reject_oversized_multipart_before_sending() -> Result<()> {
+    let (listener, http) = local_http().await?;
+    let source = test_command_message("!file")?;
+    let (_, timing) = Pending::new((), None).begin();
+    let permissions = PermissionResolver::new(None);
+    let ctx = Context {
+        http: &http,
+        message: &source,
+        timing,
+        permissions: &permissions,
+    };
+    let check = async {
+        let size = crate::validation::CREATE_MESSAGE_REQUEST_MAX_BYTES as usize - 1;
+        let file = Upload::from_bytes("manual.pdf".into(), vec![0; size], 0);
+        assert!(matches!(
+            ctx.reply_files("", std::slice::from_ref(&file), AttachmentLimits::default())
+                .await,
+            Err(Error::InvalidUi(_))
+        ));
+
+        let message = ComponentsV2::new()
+            .file(FileDisplay::new("manual.pdf"))
+            .attachment(file);
+        assert!(matches!(
+            ctx.reply_v2(&message).await,
+            Err(Error::InvalidUi(_))
+        ));
+        let message = message.buttons(vec![Button::premium(Id::new(123))]);
+        assert!(matches!(
+            ctx.reply_v2(&message).await,
+            Err(Error::InvalidUi(_))
+        ));
+        Ok(())
+    };
+    tokio::select! {
+        biased;
+        _ = listener.accept() => Err(Error::msg("上限を超えた multipart リクエストを送信しました")),
+        result = check => result,
+    }
 }
 
 #[tokio::test]

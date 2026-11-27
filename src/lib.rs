@@ -43,7 +43,7 @@ use message_cache::{MessageCacheRoute, MessageCacheRuntime};
 use message_events::{GatewayDecodeOptions, IncomingEvent};
 use tokio::sync::mpsc;
 use twilight_gateway::{ConfigBuilder, Event, EventTypeFlags, Intents, ShardId};
-use twilight_http::Client;
+use twilight_http::{Client, request::TryIntoRequest};
 use twilight_model::{
     application::interaction::{Interaction, InteractionType},
     channel::{
@@ -934,6 +934,15 @@ fn route_gateway_event(
         // Twilight は型に変換する前にシーケンスを記録する。失敗した更新は再開しても再送されない。
         cache.reset();
     }
+    if let Err(error) = &event
+        && permissions.cache_enabled()
+        && message_events::lost_gateway_event(
+            error,
+            permission_cache_events(true, Intents::GUILDS) | EventTypeFlags::READY,
+        )
+    {
+        permissions.clear_shard(shard);
+    }
     let (event, radio) = forward_lifecycle_event(event, queue, reporter, cache)?;
     if matches!(event, Event::Ready(_))
         && let Some(cache) = cache
@@ -1337,8 +1346,7 @@ impl<'a> Context<'a> {
         if !files.is_empty() {
             request = request.attachments(files);
         }
-        request.await?;
-        Ok(())
+        channel_ui::send_create_message(self.http, request.try_into_request()?).await
     }
 
     /// 元のメッセージに Embed やボタンを付けて返信します。
@@ -1410,8 +1418,7 @@ impl<'a> Context<'a> {
         if !message.attachments.is_empty() {
             request = request.attachments(&message.attachments);
         }
-        request.await?;
-        Ok(())
+        channel_ui::send_create_message(self.http, request.try_into_request()?).await
     }
 }
 

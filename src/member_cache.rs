@@ -5,12 +5,9 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use twilight_gateway::{Event, EventTypeFlags, Intents, ShardId, error::ReceiveMessageErrorType};
+use twilight_gateway::{Event, EventTypeFlags, Intents, ShardId};
 use twilight_model::{
-    gateway::{
-        event::GatewayEventDeserializer,
-        payload::incoming::{GuildCreate, MemberUpdate},
-    },
+    gateway::payload::incoming::{GuildCreate, MemberUpdate},
     guild::Member,
     id::{
         Id,
@@ -295,23 +292,10 @@ impl MemberCacheRoute<'_> {
     }
 
     pub(crate) fn invalidate_on_decode_error(self, error: &Error) {
-        if let Error::GatewayReceive(error) = error
-            && let ReceiveMessageErrorType::Deserializing { event } = error.kind()
-            && GatewayEventDeserializer::from_json(event).is_none_or(|header| {
-                matches!(
-                    header.event_type(),
-                    Some(
-                        "READY"
-                            | "GUILD_CREATE"
-                            | "GUILD_DELETE"
-                            | "GUILD_ROLE_DELETE"
-                            | "GUILD_MEMBER_ADD"
-                            | "GUILD_MEMBER_UPDATE"
-                            | "GUILD_MEMBER_REMOVE"
-                    )
-                )
-            })
-        {
+        if crate::message_events::lost_gateway_event(
+            error,
+            self.runtime.event_types() | EventTypeFlags::READY,
+        ) {
             self.runtime.cache.write(|cache| cache.reset(self.shard));
         }
     }

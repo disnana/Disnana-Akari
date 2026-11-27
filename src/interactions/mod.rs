@@ -611,6 +611,7 @@ impl<'a> ButtonContext<'a> {
     /// 元の Components V2 メッセージのコンポーネントを置き換え、指定した添付を追加します。
     /// 既存の添付ファイルは保持します。
     /// `defer_update` 後にも一度呼べます。
+    /// 遅延更新で添付を追加する場合は、更新前に Discord から添付一覧を取得します。
     ///
     /// # エラー
     /// 更新できない応答状態、元メッセージが Components V2 以外、無効なコンポーネント、または通信の失敗でエラーになります。
@@ -625,7 +626,16 @@ impl<'a> ButtonContext<'a> {
                 self.initial.v2_update(message).await?;
             }
             UpdateAction::Edit => {
-                let retained = self.message().map(|source| source.attachments.as_slice());
+                let current;
+                let retained = if message.needs_existing_attachments() {
+                    message.validate_attachment_sizes(
+                        self.initial.interaction.attachment_size_limit,
+                    )?;
+                    current = self.initial.fetch_original_response().await?;
+                    Some(current.attachments.as_slice())
+                } else {
+                    self.message().map(|source| source.attachments.as_slice())
+                };
                 edit_v2_response(
                     self.initial.http,
                     self.initial.interaction,

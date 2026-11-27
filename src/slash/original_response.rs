@@ -67,14 +67,7 @@ impl SlashContext<'_> {
 impl ResponseState {
     pub(crate) async fn original_response(self, initial: InitialResponder<'_>) -> Result<Message> {
         self.require_original()?;
-        let interaction = initial.interaction;
-        Ok(initial
-            .http
-            .interaction(interaction.application_id)
-            .response(&interaction.token)
-            .await?
-            .model()
-            .await?)
+        initial.fetch_original_response().await
     }
 
     pub(crate) async fn edit_original_response(
@@ -156,5 +149,19 @@ impl ResponseState {
             Self::Replied if v2 => Err(ResponseStateError::OriginalResponseFormatMismatch.into()),
             _ => Ok(()),
         }
+    }
+}
+
+impl InitialResponder<'_> {
+    // 呼び出し元は、このトークンで取得できる応答があることを先に確認します。
+    pub(crate) async fn fetch_original_response(self) -> Result<Message> {
+        let interaction = self.interaction;
+        Ok(self
+            .http
+            .interaction(interaction.application_id)
+            .response(&interaction.token)
+            .await?
+            .model()
+            .await?)
     }
 }

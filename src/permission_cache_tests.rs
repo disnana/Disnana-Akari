@@ -11,13 +11,15 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::mpsc,
 };
+use twilight_gateway::ShardId;
 use twilight_model::gateway::payload::incoming::{ChannelUpdate, RoleDelete};
 
 use super::{
     Client, Event, EventTypeFlags, Events, Id, Intents, Message, NoMessageHandler,
-    PermissionResolver, Permissions, Result, dispatch_events, gateway_event_types, hooks::Hooks,
-    message_events::IncomingEvent, permission_cache_events, route_gateway_event,
-    update_permission_cache,
+    PermissionResolver, Permissions, Result, dispatch_events, gateway_event_types,
+    hooks::Hooks,
+    message_events::{IncomingEvent, decode_text},
+    permission_cache_events, route_gateway_event, update_permission_cache,
 };
 
 #[test]
@@ -190,6 +192,101 @@ async fn role_delete_during_rest_fetch_prevents_using_the_old_permissions() {
     .expect("the retry and cache hit must complete");
 }
 
+#[tokio::test]
+async fn malformed_role_update_invalidates_only_its_shard() {
+    const SECOND_GUILD: u64 = (1 << 22) + 10;
+    const SECOND_CHANNEL: u64 = 21;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http = Client::builder()
+        .proxy(listener.local_addr().unwrap().to_string(), true)
+        .build();
+    let resolver = PermissionResolver::new(Some(Duration::from_secs(60)));
+    let allowed = Permissions::BAN_MEMBERS;
+    let server = async {
+        reply(&listener, "/guilds/10", &guild(allowed)).await;
+        reply(&listener, "/channels/11", &parent(false)).await;
+        reply(
+            &listener,
+            &format!("/guilds/{SECOND_GUILD}"),
+            &guild_for(SECOND_GUILD, allowed),
+        )
+        .await;
+        reply(
+            &listener,
+            &format!("/channels/{SECOND_CHANNEL}"),
+            &format!(r#"{{"id":"{SECOND_CHANNEL}","type":0,"guild_id":"{SECOND_GUILD}"}}"#),
+        )
+        .await;
+        reply(&listener, "/guilds/10", &guild(Permissions::empty())).await;
+        reply(&listener, "/channels/11", &parent(false)).await;
+    };
+    let checks = async {
+        let mut first: Message = serde_json::from_str(MESSAGE).unwrap();
+        first.channel_id = Id::new(11);
+        let mut second = first.clone();
+        second.guild_id = Some(Id::new(SECOND_GUILD));
+        second.channel_id = Id::new(SECOND_CHANNEL);
+        for message in [&first, &second] {
+            assert!(
+                resolver
+                    .resolve(&http, message)
+                    .await
+                    .unwrap()
+                    .contains(allowed)
+            );
+        }
+
+        let events = Events::new();
+        let hooks = Hooks::default();
+        let (tx, _) = mpsc::channel(1);
+        let route_invalid = |name, kind| {
+            let body = format!(r#"{{"op":0,"t":"{name}","s":1,"d":{{}}}}"#);
+            let event = decode_text(body, kind, false).unwrap();
+            assert!(event.is_err());
+            assert!(
+                route_gateway_event(
+                    event,
+                    &events,
+                    &resolver,
+                    &tx,
+                    &hooks.reporter,
+                    ShardId::new(0, 2),
+                    (None, None)
+                )
+                .is_none()
+            );
+        };
+        route_invalid("MESSAGE_CREATE", EventTypeFlags::MESSAGE_CREATE);
+        assert!(
+            resolver
+                .resolve(&http, &first)
+                .await
+                .unwrap()
+                .contains(allowed)
+        );
+        route_invalid("GUILD_ROLE_UPDATE", EventTypeFlags::ROLE_UPDATE);
+        assert!(
+            resolver
+                .resolve(&http, &second)
+                .await
+                .unwrap()
+                .contains(allowed)
+        );
+        assert!(
+            !resolver
+                .resolve(&http, &first)
+                .await
+                .unwrap()
+                .contains(allowed)
+        );
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(checks, server);
+    })
+    .await
+    .unwrap();
+}
+
 fn role_deleted(guild: u64) -> Event {
     Event::RoleDelete(RoleDelete {
         guild_id: Id::new(guild),
@@ -216,8 +313,12 @@ async fn message(http: &Client) -> Message {
 }
 
 fn guild(permissions: Permissions) -> String {
+    guild_for(10, permissions)
+}
+
+fn guild_for(id: u64, permissions: Permissions) -> String {
     let everyone = Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES;
-    let base_role = role(10, everyone);
+    let base_role = role(id, everyone);
     let roles = if permissions.is_empty() {
         base_role
     } else {
@@ -225,7 +326,7 @@ fn guild(permissions: Permissions) -> String {
     };
     format!(
         r#"{{
-        "id": "10", "owner_id": "1", "name": "test", "afk_timeout": 60,
+        "id": "{id}", "owner_id": "1", "name": "test", "afk_timeout": 60,
         "default_message_notifications": 0, "explicit_content_filter": 0, "features": [],
         "mfa_level": 0, "nsfw_level": 0, "preferred_locale": "ja", "verification_level": 0,
         "premium_progress_bar_enabled": false, "system_channel_flags": 0,
