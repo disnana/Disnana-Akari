@@ -7,6 +7,7 @@
 - **エラーの連鎖で、メッセージが二重に表示されなくなりました。** `Error` の `Http`、`GatewayReceive`、`*Validation` は、表示と原因を元のエラーへそのまま渡します。`Error::Handler` は `HandlerError` を持つようになり（`downcast_ref`、`inner`、`into_inner` で元のエラーを取り出せます）、`CommandRegistration` の表示から原因を外しました（原因は `source()` で取得します）。
 - `ErrorReport` を `{report}` で表示すると、原因の連鎖も `: 原因` の形で続けて表示します。標準エラー出力の既定の表示にも、本当の理由が含まれます。
 - ドキュメントに、Twilight の型を公開 API に含める方針（安定性）を明記しました。
+- `Bot::include_bots` を追加しました。他の Bot やウェブフックの投稿も、コマンドとメッセージのハンドラーへ渡せます（既定は、これまでどおり無視します。この Bot 自身の投稿は、常に渡しません）。
 - **文字列だった `Error` のバリアントを、型付きに置き換えました。** `InvalidRegistration`、`InvalidSelection`、`InvalidResponseState`、`CommandSync`、`QueueFull(&str)` をやめ、`Registration(RegistrationError)`、`Selection(SelectionError)`、`ResponseState(ResponseStateError)`、`CommandSync(CommandSyncError)`、`QueueFull(QueueKind)` にしました。メッセージの文言ではなく、バリアントで判別できます。
 
 勝手な動作を減らし、エラーと文言を呼び出し側が決められるようにしました。**互換性のない変更を含みます。**

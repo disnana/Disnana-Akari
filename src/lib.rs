@@ -23,6 +23,7 @@ use twilight_model::{
         Message,
         message::{AllowedMentions, MessageFlags},
     },
+    id::{Id, marker::UserMarker},
 };
 
 pub use commands::{CommandContext, Commands};
@@ -66,6 +67,7 @@ pub struct Bot {
     reporter: Reporter,
     info: InfoReporter,
     messages: Messages,
+    include_bots: bool,
 }
 
 impl fmt::Debug for Bot {
@@ -78,6 +80,7 @@ impl fmt::Debug for Bot {
             .field("has_error_hook", &self.reporter.has_hook())
             .field("has_info_hook", &self.info.has_hook())
             .field("messages", &self.messages)
+            .field("include_bots", &self.include_bots)
             .finish()
     }
 }
@@ -103,6 +106,7 @@ impl Bot {
             reporter: Reporter::default(),
             info: InfoReporter::default(),
             messages: Messages::default(),
+            include_bots: false,
         })
     }
 
@@ -170,6 +174,16 @@ impl Bot {
     /// Interaction の初回応答を同期的に通知します。関数は処理の途中で呼ばれます。短く保ち、`panic` しないでください。
     pub fn on_info(mut self, hook: impl Fn(&InfoEvent) + Send + Sync + 'static) -> Self {
         self.info = InfoReporter::new(hook);
+        self
+    }
+
+    /// 他の Bot やウェブフックが送ったメッセージも、コマンドとメッセージのハンドラーに渡します。
+    ///
+    /// 既定では、Bot とウェブフックの投稿は無視します。有効にしても、この Bot 自身の投稿は
+    /// 渡しません（自分の返信に反応する無限ループを防ぐため）。ほかの Bot と
+    /// 互いに反応し合うループは、アプリ側で防いでください。
+    pub fn include_bots(mut self, include: bool) -> Self {
+        self.include_bots = include;
         self
     }
 
@@ -252,6 +266,7 @@ impl Bot {
             reporter,
             info,
             messages,
+            include_bots,
         } = self;
         let hooks = Hooks {
             reporter,
@@ -400,10 +415,12 @@ impl Bot {
             });
 
         let receive = async {
+            let mut own_id = None;
             while let Some(event) = shard.next_event(event_types).await {
                 let gateway_rtt = shard.latency().recent().first().copied();
                 match event {
                     Ok(Event::Ready(ready)) => {
+                        own_id = Some(ready.user.id);
                         hooks.info.report(InfoEvent::GatewayReady);
                         if event_tx
                             .try_send(MessageEvent::Ready(Box::new(ready)))
@@ -418,7 +435,13 @@ impl Bot {
                     }
                     Ok(Event::Resumed) => hooks.info.report(InfoEvent::GatewayResumed),
                     Ok(Event::MessageCreate(message))
-                        if !message.author.bot && message.webhook_id.is_none() =>
+                        if accepts_message(
+                            include_bots,
+                            own_id,
+                            message.author.id,
+                            message.author.bot,
+                            message.webhook_id.is_some(),
+                        ) =>
                     {
                         let run_command = text_commands
                             .is_some_and(|commands| commands.matches_message(&message.content));
@@ -532,6 +555,20 @@ fn queue_busy_response(
     }
 }
 
+/// 受け取ったメッセージをハンドラーへ渡すか判断する。自分自身の投稿は常に除く。
+fn accepts_message(
+    include_bots: bool,
+    own_id: Option<Id<UserMarker>>,
+    author: Id<UserMarker>,
+    author_is_bot: bool,
+    from_webhook: bool,
+) -> bool {
+    if Some(author) == own_id {
+        return false;
+    }
+    include_bots || !(author_is_bot || from_webhook)
+}
+
 /// メッセージを扱うのに必要な Intent が、要求する Intent に含まれているか確認する。
 fn check_intents(requested: Intents, needs_messages: bool) -> Result<()> {
     if !needs_messages {
@@ -633,6 +670,18 @@ mod tests {
 
     async fn ping(_: CommandContext<'_>) -> Result<()> {
         Ok(())
+    }
+
+    #[test]
+    fn bot_and_webhook_messages_are_opt_in_and_never_our_own() {
+        let me = Id::new(1);
+        let other = Id::new(2);
+        assert!(accepts_message(false, Some(me), other, false, false));
+        assert!(!accepts_message(false, Some(me), other, true, false));
+        assert!(!accepts_message(false, Some(me), other, false, true));
+        assert!(accepts_message(true, Some(me), other, true, false));
+        assert!(accepts_message(true, Some(me), other, false, true));
+        assert!(!accepts_message(true, Some(me), me, true, false));
     }
 
     #[test]
