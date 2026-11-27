@@ -23,7 +23,7 @@ async fn run(commands: Commands) -> Result<()> {
 ## 2. 標準出力とエラーの扱い
 
 - 接続時の「Discord に接続しました」は、出さなくなりました。知りたいときは `Events::on_ready` に書きます。
-- エラーは、既定では標準エラー出力に `[akari] ...` の形で書きます。自分で受け取るには `Bot::on_error` を使います（[エラーと自動で送る文言](../guide/errors.md)）。
+- **標準エラー出力にも、書かなくなりました。** エラーと実行時の情報は、`tracing` のログ（`target` は `disnana_akari`）として発行します。見たいときは、アプリの起動の最初に `tracing_subscriber::fmt::init();` を呼びます（[ログを出す](../guide/logging.md)）。コードで受け取るには `Bot::on_error` と `Bot::on_info` を使います（[エラーと自動で送る文言](../guide/errors.md)）。
 - **テキストコマンドの失敗時の公開返信を、既定で送らなくなりました。** 送りたいときは `Messages::text_command_failed` を設定します。スラッシュコマンド、ボタンなどの本人向けの返信は、これまでどおり残っています。
 
 ## 3. ハンドラーが返すエラーの型

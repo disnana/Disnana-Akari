@@ -61,4 +61,4 @@ discord.py を使ったことがある人向けに、よく使う操作の対応
 - **コマンドは並行して実行されます。** 遅いコマンドがあっても、ほかのコマンドは止まりません。[Akari の動き方](../guide/how-it-works.md)
 - **スラッシュコマンドは必ず応答します。** 応答せずに終わると、Akari が「処理できませんでした」と返します（文言は変えられます）。
 - **Intent は自動で追加されません。** discord.py の `intents=` と同じように、`add_intents` で指定します。[Intent の設定](../guide/intents.md)
-- **エラーは `Bot::on_error` で受け取ります。** discord.py の `on_error` / `on_command_error` にあたります。Akari は `logging` のようなログの仕組みを持たず、標準出力にも書きません。[エラーと自動で送る文言](../guide/errors.md)
+- **エラーは `Bot::on_error` で受け取ります。** discord.py の `on_error` / `on_command_error` にあたります。ログは、Rust の標準の `tracing` で出します（discord.py の `logging` にあたります）。Akari は、標準出力にも標準エラー出力にも書きません。[エラーと自動で送る文言](../guide/errors.md)

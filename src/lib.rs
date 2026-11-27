@@ -186,8 +186,9 @@ impl Bot {
     /// エラーを受け取る関数を設定します。
     ///
     /// ハンドラーが返したエラー、Gateway の切断や受信エラー、処理枠が満杯でイベントを捨てたことなどを、
-    /// 一件ずつ [`ErrorReport`] で受け取ります。設定すると、Akari は標準エラー出力へは書きません。
-    /// 設定しない場合は、これらを `[akari] ...` の形で標準エラー出力に書きます。
+    /// 一件ずつ [`ErrorReport`] で受け取ります。コードで反応するための関数です。
+    /// Akari は、標準出力にも標準エラー出力にも書きません。ログとしては、同じ内容を `tracing` の
+    /// イベント（`target` は `disnana_akari`）で発行します。この関数を設定しても、ログは変わりません。
     ///
     /// 関数は処理の途中で同期的に呼ばれます。短く保ち、`panic` しないでください。
     /// 重い処理や非同期の処理は、チャンネルへ送るなどして、別のタスクで行います。
@@ -266,7 +267,7 @@ impl Bot {
     /// Discord に接続し、人がサーバーで送った新着メッセージを順に処理します。
     ///
     /// Tokio ランタイム内で呼び出してください。Bot や Webhook によるメッセージは
-    /// ハンドラーに渡しません。ハンドラーのエラーは標準エラー出力に記録して処理を続けます。
+    /// ハンドラーに渡しません。ハンドラーのエラーは `tracing` のログと `on_error` に報告して、処理を続けます。
     /// 受信とハンドラーは協調的に進みます。ブロッキング処理や長い計算は分離してください。
     ///
     /// # エラー
@@ -343,7 +344,6 @@ impl Bot {
         let event_types = gateway_event_types(
             needs_messages,
             slash.is_some() || events.interaction_handlers.has_handlers(),
-            hooks.info.has_hook() || presence.is_some(),
             permission_cache_events(needs_messages && permissions.cache_enabled(), intents),
         );
 
@@ -609,18 +609,15 @@ async fn next_gateway_event(
 fn gateway_event_types(
     needs_messages: bool,
     needs_interactions: bool,
-    reports_sessions: bool,
     cache_events: EventTypeFlags,
 ) -> EventTypeFlags {
-    let mut events = EventTypeFlags::READY | cache_events;
+    // 再開は、ログ（`tracing`）にも出すので、フックの有無にかかわらず受け取る。
+    let mut events = EventTypeFlags::READY | EventTypeFlags::RESUMED | cache_events;
     if needs_messages {
         events |= EventTypeFlags::MESSAGE_CREATE;
     }
     if needs_interactions {
         events |= EventTypeFlags::INTERACTION_CREATE;
-    }
-    if reports_sessions {
-        events |= EventTypeFlags::RESUMED;
     }
     events
 }

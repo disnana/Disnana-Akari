@@ -19,13 +19,12 @@ fn cache_events_require_the_caller_to_enable_guilds() {
         EventTypeFlags::RESUMED
     );
     let cache_events = permission_cache_events(true, Intents::GUILDS);
-    assert!(
-        gateway_event_types(true, true, false, cache_events).contains(
-            EventTypeFlags::READY
-                | EventTypeFlags::MESSAGE_CREATE
-                | EventTypeFlags::INTERACTION_CREATE,
-        )
-    );
+    assert!(gateway_event_types(true, true, cache_events).contains(
+        EventTypeFlags::READY
+            | EventTypeFlags::RESUMED
+            | EventTypeFlags::MESSAGE_CREATE
+            | EventTypeFlags::INTERACTION_CREATE,
+    ));
     assert!(cache_events.contains(
         EventTypeFlags::GUILD_UPDATE
             | EventTypeFlags::GUILD_DELETE
