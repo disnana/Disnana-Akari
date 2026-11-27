@@ -139,7 +139,19 @@ async fn join_channel(
 }
 ```
 
-`connection.status()` で割り当てを確認し、`connection.changed().await` で再割り当てや切断を待てます。接続情報は音声ドライバーに渡します。送信キューへ渡した後に参加がタイムアウトした場合、遅れて届く通知との混同を避けるため、次の新規 Gateway セッションまで同じサーバーの参加を再試行できません。その場合も `leave` は使えます。トークンとセッション ID は明示的に取得し、保存やログ出力を避けてください。[Discord の音声サーバー割り当て](https://docs.discord.com/developers/topics/voice-connections#retrieving-voice-server-information)
+`connection.status()` で現在の状態を取得し、`connection.changed().await` で更新を待てます。`Ready(info)` の `info.channel_id` が参加先です。`AwaitingServer` では再割り当てを待ち、`Disconnected` で管理が終了します。`Ready` の接続情報を音声ドライバーに渡して、音声サーバーに接続します。送信キューへ渡した後に参加がタイムアウトした場合、遅れて届く通知との混同を避けるため、次の新規 Gateway セッションまで同じサーバーの参加を再試行できません。その場合も `leave` は使えます。トークンとセッション ID は明示的に取得し、保存やログ出力を避けてください。[Discord の音声サーバー割り当て](https://docs.discord.com/developers/topics/voice-connections#retrieving-voice-server-information)
+
+### WAV を再生・録音する
+
+リポジトリの `examples/voice` に、Akari の接続情報を Songbird に渡して WAV を再生・録音する例があります。Songbird の Twilight 統合は使わず、音声の依存はこの例の Cargo プロジェクトで管理します。
+
+Bot のトークンに加え、`AKARI_VOICE_GUILD`、`AKARI_VOICE_CHANNEL` を環境変数に設定します。再生するには `AKARI_VOICE_WAV` に入力ファイル、録音するには `AKARI_VOICE_RECORD_WAV` に新規ファイルのパスを設定します。リポジトリのルートから次のコマンドで実行します。
+
+```sh
+cargo run --locked --manifest-path examples/voice/Cargo.toml
+```
+
+再割り当て時は新しい音声サーバーへ接続し直します。録音は受信処理からファイル書き出しを分け、キューが満杯なら破棄したフレーム数を記録します。Ctrl+C で停止し、録音していれば WAV を確定します。[Songbird の音声ドライバー実装](https://github.com/serenity-rs/songbird/blob/v0.6.1/src/driver/mod.rs)
 
 ## シャード別の状態と RTT を監視する
 
