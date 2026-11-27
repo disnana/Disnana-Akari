@@ -51,9 +51,23 @@ pub(crate) fn check_permissions(
 }
 
 #[derive(Debug)]
-struct GuildInfo {
-    owner_id: Id<UserMarker>,
+pub(crate) struct GuildInfo {
+    pub(crate) owner_id: Id<UserMarker>,
     roles: HashMap<Id<RoleMarker>, Permissions>,
+    /// ロールの階層上の位置。大きいほど上位。
+    positions: HashMap<Id<RoleMarker>, i64>,
+}
+
+impl GuildInfo {
+    /// メンバーの最上位ロールの位置を返す。ロールが無ければ @everyone と同じ 0。
+    pub(crate) fn top_position(&self, member_roles: &[Id<RoleMarker>]) -> i64 {
+        member_roles
+            .iter()
+            .filter_map(|id| self.positions.get(id).copied())
+            .max()
+            .unwrap_or(0)
+            .max(0)
+    }
 }
 
 #[derive(Debug)]
@@ -112,6 +126,8 @@ impl<T> Snapshot<T> {
 pub(crate) struct PermissionResolver {
     ttl: Option<Duration>,
     cache: Mutex<Cache>,
+    /// Bot 自身のユーザー ID。最初に必要になったとき 1 回だけ取得する。
+    bot_id: OnceCell<Id<UserMarker>>,
 }
 
 #[derive(Default)]
@@ -130,12 +146,38 @@ impl std::fmt::Debug for PermissionResolver {
     }
 }
 
+impl Default for PermissionResolver {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
 impl PermissionResolver {
     pub(crate) fn new(ttl: Option<Duration>) -> Self {
         Self {
             ttl: ttl.filter(|ttl| !ttl.is_zero()),
             cache: Mutex::default(),
+            bot_id: OnceCell::new(),
         }
+    }
+
+    /// Bot 自身のユーザー ID を返す。
+    pub(crate) async fn bot_id(&self, http: &Client) -> Result<Id<UserMarker>> {
+        self.bot_id
+            .get_or_try_init(async || {
+                Ok::<_, crate::Error>(http.current_user().await?.model().await?.id)
+            })
+            .await
+            .copied()
+    }
+
+    /// サーバーのロールと所有者の情報を返す。
+    pub(crate) async fn guild_info(
+        &self,
+        http: &Client,
+        id: Id<GuildMarker>,
+    ) -> Result<Arc<GuildInfo>> {
+        Ok(self.guild(http, id).await?.value)
     }
 
     pub(crate) fn cache_enabled(&self) -> bool {
@@ -199,7 +241,27 @@ impl PermissionResolver {
             .member
             .as_ref()
             .ok_or(CheckFailure::PermissionsUnavailable)?;
-        let channel_id = message.channel_id;
+        self.resolve_member(
+            http,
+            guild_id,
+            message.channel_id,
+            message.author.id,
+            &member.roles,
+            member.communication_disabled_until,
+        )
+        .await
+    }
+
+    /// 指定したメンバーの、そのチャンネルでの権限を返す。
+    pub(crate) async fn resolve_member(
+        &self,
+        http: &Client,
+        guild_id: Id<GuildMarker>,
+        channel_id: Id<ChannelMarker>,
+        user_id: Id<UserMarker>,
+        roles: &[Id<RoleMarker>],
+        timed_out_until: Option<Timestamp>,
+    ) -> Result<Permissions> {
         for _ in 0..2 {
             let guild = self.guild(http, guild_id).await?;
             let channel = self.channel(http, guild_id, channel_id).await?;
@@ -222,16 +284,14 @@ impl PermissionResolver {
             )? {
                 return Ok(compute(
                     guild_id,
-                    message.author.id,
-                    &member.roles,
+                    user_id,
+                    roles,
                     &guild.value,
                     parent
                         .as_ref()
                         .map_or(&channel.value, |(_, parent)| &parent.value),
                     parent.is_some(),
-                    member
-                        .communication_disabled_until
-                        .is_some_and(|until| timeout_active(until, SystemTime::now())),
+                    timed_out_until.is_some_and(|until| timeout_active(until, SystemTime::now())),
                 ));
             }
         }
@@ -265,6 +325,11 @@ impl PermissionResolver {
             let guild = http.guild(id).await?.model().await?;
             Ok(GuildInfo {
                 owner_id: guild.owner_id,
+                positions: guild
+                    .roles
+                    .iter()
+                    .map(|role| (role.id, role.position))
+                    .collect(),
                 roles: guild
                     .roles
                     .into_iter()
@@ -468,6 +533,7 @@ mod tests {
 
     fn guild(owner: u64, roles: &[(u64, Permissions)]) -> GuildInfo {
         GuildInfo {
+            positions: HashMap::new(),
             owner_id: Id::new(owner),
             roles: roles.iter().map(|(id, p)| (Id::new(*id), *p)).collect(),
         }

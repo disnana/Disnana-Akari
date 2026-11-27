@@ -481,6 +481,11 @@ impl<'a> CommandContext<'a> {
         self.ctx.require_guild()
     }
 
+    /// 権限の確認や、Bot とほかのメンバーの権限の取得に使う [`Access`](crate::Access) を返します。
+    pub fn access(&self) -> crate::Access<'a> {
+        self.ctx.access()
+    }
+
     /// 送り主の、このチャンネルでの権限を返します。詳細は [`Context::permissions`] を参照してください。
     ///
     /// # エラー

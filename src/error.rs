@@ -391,6 +391,39 @@ pub enum CheckFailure {
     /// アプリが登録したチェックで、コマンドの実行を拒否しました。
     #[error("コマンドのチェックに通りませんでした")]
     Rejected,
+    /// Bot 自身に、必要な権限が足りません。
+    #[error("Bot に必要な権限が足りません: {0:?}")]
+    BotMissingPermissions(Permissions),
+    /// サーバーの所有者だけが使えるコマンドです。
+    #[error("サーバーの所有者だけが使えます")]
+    NotGuildOwner,
+    /// 必要なロールを持っていません。
+    #[error("必要なロールを持っていません")]
+    MissingRole,
+    /// ロールの階層により、対象を操作できません。
+    #[error("ロールの階層により、操作できません: {0}")]
+    Hierarchy(HierarchyDenied),
+}
+
+/// ロールの階層により、対象のメンバーを操作できない理由です。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum HierarchyDenied {
+    /// 対象が、自分自身です。
+    #[error("自分自身は操作できません")]
+    TargetIsSelf,
+    /// 対象が、この Bot です。
+    #[error("Bot 自身は操作できません")]
+    TargetIsBot,
+    /// 対象が、サーバーの所有者です。
+    #[error("サーバーの所有者は操作できません")]
+    TargetIsOwner,
+    /// 対象の最上位ロールが、実行した人以上です。
+    #[error("対象のロールが、あなた以上です")]
+    AuthorTooLow,
+    /// 対象の最上位ロールが、Bot 以上です。
+    #[error("対象のロールが、Bot 以上です")]
+    BotTooLow,
 }
 
 /// Discord が返したスラッシュコマンドの登録結果が、要求と合わなかった理由です。

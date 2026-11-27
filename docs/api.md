@@ -582,6 +582,10 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 | `SoundboardSound`、`SoundboardSoundId`、`SoundboardSoundMarker`、`SoundboardSounds`、`VoiceEffectAnimation` | Discord のサウンドボード音とその一覧、再生時の演出です。 |
 | `GuildSoundboardSoundCreate`、`GuildSoundboardSoundUpdate`、`GuildSoundboardSoundDelete`、`GuildSoundboardSoundsUpdate` | サウンドボード音の追加、更新、削除、一括更新の通知です。 |
 
+## 権限の確認（Access）
+
+`ctx.access()` が返す `Access` で、実行者、Bot、ほかのメンバーの権限を調べ、確認します。`can`、`missing`、`bot_can`、`bot_missing` は調べるだけで、`require_permissions`、`require_bot_permissions`、`require_guild_owner`、`require_role`、`require_any_role`、`require_can_moderate` は、満たさなければ `CheckFailure` で失敗します。`snapshot` は、実行者と Bot の権限と所有者かどうかを、`PermissionSnapshot` にまとめて返します。ロールの階層で断られた理由は、`CheckFailure::Hierarchy` が持つ `HierarchyDenied` で分かります。
+
 ## 権限やフラグを名前で扱う
 
 `use disnana_akari::prelude::*;` で、`PermissionsExt`、`PermissionPresets`、`MessageFlagsExt`、`UserFlagsExt`、`SystemChannelFlagsExt`、`ChannelFlagsExt`、`Label` を取り込みます。Twilight の型に、名前で調べるメソッド（`perms.manage_messages()`）、`names()`、`labels()`、`unknown_bits()` を足します。`Permissions::text()`、`voice()`、`moderator()` は、目的ごとの権限のまとまりです。`Label::label()` は、`ChannelType`、`VerificationLevel`、`DefaultMessageNotificationLevel`、`ExplicitContentFilter`、`MfaLevel`、`NSFWLevel`、`PremiumTier` を日本語の名前にします。トレイトは封印されていて、ほかの型には実装できません。

@@ -76,6 +76,7 @@ async fn initial_callback_failures_report_matching_ids_numbers_and_timing() -> R
         interaction: &interaction,
         timing,
         info: &info,
+        permissions: &crate::permissions::PermissionResolver::default(),
     };
 
     let default_reply = async {
@@ -211,6 +212,7 @@ async fn autocomplete_does_not_send_empty_choices_after_a_definitive_rejection()
             interaction: &interaction,
             timing,
             info: &info,
+            permissions: &crate::permissions::PermissionResolver::default(),
         },
         data,
         response_finished: false,

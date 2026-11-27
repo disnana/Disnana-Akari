@@ -281,6 +281,14 @@ impl<'a> HybridContext<'a> {
             .ok_or_else(|| crate::CheckFailure::GuildOnly.into())
     }
 
+    /// 権限の確認や、Bot とほかのメンバーの権限の取得に使う [`Access`](crate::Access) を返します。
+    pub fn access(&self) -> crate::Access<'a> {
+        match &self.inner {
+            SourceContext::Text { ctx, .. } => ctx.access(),
+            SourceContext::Slash(ctx) => ctx.access(),
+        }
+    }
+
     /// 呼び出した人の、このチャンネルでの権限を返します。
     ///
     /// スラッシュでは Discord が送った値を、テキストでは REST で計算した値を使います

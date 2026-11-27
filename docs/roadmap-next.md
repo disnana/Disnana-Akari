@@ -181,7 +181,7 @@ ctx.set_role_permissions(role_id, role.with(Permissions::MANAGE_MESSAGES), "理�
 | テキスト | 既存の計算（サーバーとチャンネルの取得） | REST（Bot のメンバー取得）と既存の計算 | REST（メンバー取得）と既存の計算 |
 
 - 今の `PermissionResolver::resolve` は、メッセージの送り主に固定されています。これを、ユーザー ID、ロール、タイムアウトを受け取る形に一般化し、`resolve` はそれを呼ぶだけにします。
-- Bot のユーザー ID は、最初に `current_user` で 1 回取得し、保存します。
+- Bot のユーザー ID は、最初に `current_user` で 1 回取得し、保存します。Bot のメンバー情報は、`guild_member` で取得します（`current_user_guild_member` は OAuth2 のトークンが必要で、Bot のトークンでは使えません）。
 - サーバーの取得結果に、ロールの `position` を加えます（階層の判定に使います）。チャンネルの取得結果に、NSFW とスローモードを加えます（`snapshot` に使います）。どちらも、既存のキャッシュと無効化に載せるので、新しい状態は増えません。
 - サーバー全体の権限（チャンネルの上書きを含まない）も、同じ計算から取り出せるようにします（ロールの権限変更の確認に使います）。
 

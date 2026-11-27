@@ -71,6 +71,66 @@ fn describe(kind: ChannelType, level: VerificationLevel) -> String {
 }
 ```
 
+## Bot の権限、ほかのメンバー、ロールの階層を確認する
+
+`ctx.access()` で取得する `Access` に、実行者以外の確認がまとまっています。スラッシュコマンドでは、実行者と Bot の権限を Discord が送ってくるので、通信は要りません。
+
+```rust
+use disnana_akari::model::guild::Permissions;
+use disnana_akari::{Result, SlashContext};
+
+async fn purge(ctx: &mut SlashContext<'_>) -> Result<()> {
+    let access = ctx.access();
+    // 実行者にも、Bot にも、必要な権限があることを確認する（足りなければ、ここで失敗する）
+    access.require_permissions(Permissions::MANAGE_MESSAGES).await?;
+    access
+        .require_bot_permissions(Permissions::MANAGE_MESSAGES | Permissions::READ_MESSAGE_HISTORY)
+        .await?;
+    ctx.reply_ephemeral("確認に通りました。").await
+}
+```
+
+| メソッド | 動作 |
+| --- | --- |
+| `access.can(perms).await?` | 実行者が持っているかを返します（拒否はしません） |
+| `access.missing(perms).await?` | 実行者に足りない権限を返します |
+| `access.bot_can(perms)`、`bot_missing(perms)` | Bot について、同じことを調べます |
+| `access.permissions_of(user_id).await?` | 指定したメンバーの、このチャンネルでの権限を返します（メンバーを 1 回取得します） |
+| `access.require_permissions(perms)`、`require_bot_permissions(perms)` | 足りなければ失敗します（Bot の場合は `BotMissingPermissions`） |
+| `access.snapshot().await?` | 実行者と Bot の権限と、実行者が所有者かどうかを、まとめて取得します（`PermissionSnapshot`） |
+| `access.require_guild_owner().await?` | 実行者がサーバーの所有者であることを確認します |
+| `access.require_role(role)`、`require_any_role(&[..])` | 実行者が、指定したロールを持つことを確認します（通信なし） |
+| `access.require_can_moderate(user_id).await?` | ロールの階層から、実行者と Bot が対象を操作できることを確認します |
+
+判断できないときは、許可せずに失敗します。「持っていない」と偽って返すこともありません。
+
+### ロールの階層
+
+`require_can_moderate` は、BAN やキック、ニックネームの変更などの前に呼びます。Discord に送れば 403 で失敗する操作を、送る前に、理由つきで止められます。
+
+```rust
+use disnana_akari::model::{guild::Permissions, id::{Id, marker::UserMarker}};
+use disnana_akari::{CheckFailure, Error, HierarchyDenied, Result, SlashContext};
+
+async fn kick(ctx: &mut SlashContext<'_>, target: Id<UserMarker>) -> Result<()> {
+    let access = ctx.access();
+    access.require_permissions(Permissions::KICK_MEMBERS).await?;
+    access.require_bot_permissions(Permissions::KICK_MEMBERS).await?;
+    match access.require_can_moderate(target).await {
+        Err(Error::Check(CheckFailure::Hierarchy(HierarchyDenied::TargetIsOwner))) => {
+            return ctx.reply_ephemeral("サーバーの所有者は操作できません。").await;
+        }
+        other => other?,
+    }
+    // ここまで来れば、Discord に送っても階層では失敗しない
+    ctx.reply_ephemeral("操作できます。").await
+}
+```
+
+- サーバーの所有者は、誰にも操作されません。
+- 最上位ロールが、対象と同じ位置か低いときは、拒否します。管理者権限でも、階層は免除されません。
+- 対象のメンバーと Bot のメンバーを、それぞれ 1 回取得します。対象がサーバーにいないときは、HTTP のエラーです。
+
 ## テキストコマンドで確認する
 
 メッセージには権限が付いていないため、Akari が Discord からサーバーとチャンネルの情報を取得して計算します（Twilight 公式の `twilight-util` の計算を使います）。ロールやチャンネルごとの上書きを反映し、サーバーのオーナーと管理者はすべての権限を持つものとして扱います。

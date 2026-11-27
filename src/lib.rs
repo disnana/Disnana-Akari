@@ -1,5 +1,6 @@
 #![doc = include_str!("../docs/api.md")]
 
+mod access;
 mod autocomplete;
 mod channel_ui;
 mod command_check;
@@ -58,6 +59,7 @@ use twilight_model::{
     },
 };
 
+pub use access::{Access, PermissionSnapshot};
 pub use autocomplete::AutocompleteContext;
 pub use command_check::{CommandCheck, CommandCheckContext, CommandCheckSource};
 pub use commands::{
@@ -67,8 +69,8 @@ pub use commands::{
 pub use concurrency::{ConcurrencyLimit, ConcurrencyPermit};
 pub use cooldown::Cooldown;
 pub use error::{
-    CheckFailure, CommandSyncError, Error, HandlerError, HandlerKind, QueueKind, RegistrationError,
-    ResponseStateError, SelectionError,
+    CheckFailure, CommandSyncError, Error, HandlerError, HandlerKind, HierarchyDenied, QueueKind,
+    RegistrationError, ResponseStateError, SelectionError,
 };
 pub use events::{
     Events, GatewayPayload, GuildSoundboardSoundCreate, GuildSoundboardSoundDelete,
@@ -527,6 +529,7 @@ impl Bot {
             reporter,
             info,
             messages,
+            permissions: Arc::new(PermissionResolver::new(permission_cache)),
         };
 
         // Intent は自動では足さない。足りないときは、通信する前にエラーにする。
@@ -557,7 +560,7 @@ impl Bot {
                 .build(),
             None => http,
         };
-        let permissions = PermissionResolver::new(permission_cache);
+        let permissions = Arc::clone(&hooks.permissions);
         let event_types = gateway_event_types(
             needs_messages,
             slash.is_some() || events.interaction_handlers.has_handlers(),
@@ -778,6 +781,7 @@ async fn respond_interaction_busy(
         interaction: &incoming.interaction,
         timing,
         info: &hooks.info,
+        permissions: &hooks.permissions,
     };
     let response = if incoming.interaction.kind == InteractionType::ApplicationCommandAutocomplete {
         initial.autocomplete(Vec::new()).await
@@ -1270,6 +1274,11 @@ impl<'a> Context<'a> {
     pub fn require_guild(&self) -> Result<Id<GuildMarker>> {
         self.guild_id()
             .ok_or_else(|| CheckFailure::GuildOnly.into())
+    }
+
+    /// 権限の確認や、ほかのメンバーの権限の取得に使う [`Access`] を返します。
+    pub fn access(&self) -> Access<'a> {
+        Access::for_message(self.http, self.permissions, self.message)
     }
 
     /// メッセージを送った人の、このチャンネルでの権限を計算して返します。

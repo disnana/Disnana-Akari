@@ -91,6 +91,7 @@ async fn classic_files_send_channel_public_and_private_attachment_only_replies()
         interaction: &interaction,
         timing,
         info: &hooks.info,
+        permissions: &hooks.permissions,
     };
     let mut public = ResponseState::Pending;
     let mut private = ResponseState::Pending;
@@ -156,6 +157,7 @@ async fn classic_files_reject_invalid_or_locked_replies_before_completing_deferr
         interaction: &interaction,
         timing,
         info: &hooks.info,
+        permissions: &hooks.permissions,
     };
     let mut state = ResponseState::Pending;
     let mut private_state = ResponseState::Pending;
@@ -253,6 +255,7 @@ async fn file_followups_preserve_visibility_and_validate_before_sending() -> Res
             interaction: &interaction,
             timing,
             info: &hooks.info,
+            permissions: &hooks.permissions,
         },
         data,
         response_state: &mut state,

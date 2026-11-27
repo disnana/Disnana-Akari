@@ -295,6 +295,8 @@ pub(crate) struct Hooks {
     pub(crate) reporter: Reporter,
     pub(crate) info: InfoReporter,
     pub(crate) messages: Messages,
+    /// 権限の計算。すべての処理で、取得結果とキャッシュを共有する。
+    pub(crate) permissions: std::sync::Arc<crate::permissions::PermissionResolver>,
 }
 
 /// ログのイベントの `target`。利用者は、これでフィルターできる（例: `RUST_LOG=disnana_akari=info`）。
