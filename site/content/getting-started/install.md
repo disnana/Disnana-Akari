@@ -24,7 +24,7 @@ cargo add tokio --features macros,rt
 
 ```toml
 [dependencies]
-disnana-akari = "0.1"
+disnana-akari = "0.2"
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 

@@ -22,7 +22,7 @@ cargo package --offline --list
 - [ ] RustSec による `Cargo.lock` の監査を確認する。監査は pull request、`main` への push、毎日の定期実行で最新のアドバイザリを取得します。脆弱性と取り下げられた依存バージョンは CI を失敗させます。
 - [ ] 公開先と設定を確定した後、クリーンな作業ツリーで `cargo publish --dry-run` を実行し、`.crate` からのビルドを確認する。
 
-## 0.2.0 の前に、実際の Discord で確認すること
+## 公開前に、実際の Discord で確認すること（0.2.0 の記録）
 
 リリース候補をテスト用 Bot とサーバーで起動し、結果を記録します。ローカルの Playground の手順は `playground/SMOKE.md` にあります。通常の確認は RustRover の **Akari Playground** に `--skip-replace` を付けて始めます。
 
@@ -81,11 +81,11 @@ cargo publish --locked --registry crates-io
 
 初回公開後は crates.io のクレート設定から GitHub の Trusted Publisher を登録します。Repository owner は `disnana`、Repository name は `Disnana-Akari`、Workflow filename は `publish.yml`、Environment name は `crates-io` です。GitHub の同名環境では `v*` タグを許可します。タグルールでは `v*` の作成・変更・削除をリポジトリ管理者に限定しています。[crates.io のクレート設定](https://crates.io/crates/disnana-akari/settings) · [GitHub の環境設定](https://github.com/disnana/Disnana-Akari/settings/environments)
 
-次の版では `Cargo.toml` と `Cargo.lock` のバージョンを更新し、変更履歴を揃えて `main` に反映します。公開対象のコミットに、その版と一致する `v` 付きタグを作って push します。たとえば、`0.1.1` を公開する場合は次のように実行します。
+次の版では `Cargo.toml` と `Cargo.lock` のバージョンを更新し、変更履歴を揃えて `main` に反映します。公開対象のコミットに、その版と一致する `v` 付きタグを作って push します。たとえば、`0.2.1` を公開する場合は次のように実行します。
 
 ```sh
-git tag -a v0.1.1 -m "Release v0.1.1"
-git push origin refs/tags/v0.1.1
+git tag -a v0.2.1 -m "Release v0.2.1"
+git push origin refs/tags/v0.2.1
 ```
 
 GitHub Actions はタグ名と `Cargo.toml` のバージョン、公開対象コミットが `main` の履歴に含まれることを確認します。CI と RustSec 監査の成功後、GitHub の OIDC で取得した短期トークンを使って公開します。Actions の **Run workflow** では検証だけ実行できます。[Publish to crates.io](https://github.com/disnana/Disnana-Akari/actions/workflows/publish.yml) · [Trusted Publishing の公式ガイド](https://crates.io/docs/trusted-publishing)

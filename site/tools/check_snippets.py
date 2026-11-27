@@ -3,7 +3,8 @@
 
 使い方: python3 site/tools/check_snippets.py [作業ディレクトリ]
 
-`site/content/**/*.md` の ```rust ブロック（直前に `<!-- no-check -->` があるものを除く）を 1 つずつモジュールにして、
+`site/content/**/*.md`、`README.md`、`DESIGN.md`、`docs/*.md` の ```rust ブロック（直前に `<!-- no-check -->` があるものを除く）を
+1 つずつモジュールにして、
 Akari に依存する一時クレートで `cargo check` する。
 """
 import pathlib
@@ -17,8 +18,17 @@ CONTENT = ROOT / "site" / "content"
 FENCE = re.compile(r"^```(\S*)[^\n]*\n(.*?)^```[ \t]*$", re.S | re.M)
 
 
+def documents():
+    """検査するドキュメント。サイトのガイドと、リポジトリ直下の文書。"""
+    yield from sorted(CONTENT.rglob("*.md"))
+    for name in ("README.md", "DESIGN.md"):
+        if (ROOT / name).exists():
+            yield ROOT / name
+    yield from sorted((ROOT / "docs").glob("*.md"))
+
+
 def blocks():
-    for path in sorted(CONTENT.rglob("*.md")):
+    for path in documents():
         text = path.read_text(encoding="utf-8")
         for match in FENCE.finditer(text):
             info, body = match.group(1), match.group(2)
@@ -31,7 +41,33 @@ def blocks():
             yield path.relative_to(ROOT), line, body
 
 
+def stale_version_pins() -> list[str]:
+    """ドキュメントの `disnana-akari = "X.Y"` が、Cargo.toml の版と合っているか確認する。
+
+    0.x では、`"0.1"` は 0.2 以降を含まない。古い指定のままだと、読者は古い版を取得してしまう。
+    """
+    import tomllib
+
+    version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
+    major, minor, *_ = version.split(".")
+    expected = f"{major}.{minor}" if major == "0" else major
+    problems = []
+    for path in documents():
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r'^disnana-akari\s*=\s*"([^"]+)"', text, re.M):
+            if match.group(1) != expected:
+                line = text[: match.start()].count("\n") + 1
+                problems.append(
+                    f"{path.relative_to(ROOT)}:{line}: disnana-akari = \"{match.group(1)}\" は、現在の版 {version} と合いません（\"{expected}\" にしてください）"
+                )
+    return problems
+
+
 def main() -> int:
+    problems = stale_version_pins()
+    if problems:
+        sys.stderr.write("\n".join(problems) + "\n")
+        return 1
     work = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(tempfile.mkdtemp())
     (work / "src").mkdir(parents=True, exist_ok=True)
     (work / "Cargo.toml").write_text(
