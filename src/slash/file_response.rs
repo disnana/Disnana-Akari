@@ -174,8 +174,7 @@ impl InitialResponder<'_> {
         .use_authorization_token(false)
         .form(files.build_form(&body))
         .build()?;
-        self.http.request::<EmptyBody>(request).await?;
-        self.report_sent(kind, started_at);
-        Ok(())
+        let result = self.http.request::<EmptyBody>(request).await;
+        self.report_response(kind, started_at, result)
     }
 }

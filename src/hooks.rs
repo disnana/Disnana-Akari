@@ -6,7 +6,10 @@ use twilight_gateway::error::ReceiveMessageErrorType;
 use twilight_model::{
     application::interaction::InteractionType,
     http::interaction::InteractionResponseType,
-    id::{Id, marker::GuildMarker},
+    id::{
+        Id,
+        marker::{CommandMarker, GuildMarker, InteractionMarker},
+    },
 };
 
 use crate::Error;
@@ -235,6 +238,28 @@ pub enum InfoEvent {
         /// 初回応答の REST リクエストにかかった時間です。レート制限の待ち時間を含みます。
         rest_elapsed: Duration,
     },
+    /// Discord への初回応答リクエストが失敗しました。トークンと HTTP 本文は通知しません。
+    #[non_exhaustive]
+    InteractionResponseFailed {
+        /// 試行を照合するための Interaction ID です。
+        interaction_id: Id<InteractionMarker>,
+        /// アプリコマンドの ID です。ボタンやフォームなどでは None です。
+        command_id: Option<Id<CommandMarker>>,
+        /// スラッシュコマンド、コンポーネント、フォームなどの種類です。
+        interaction_type: InteractionType,
+        /// 送信しようとした初回応答の種類です。
+        response_type: InteractionResponseType,
+        /// 受信から応答試行が終了するまでにかかった時間です。
+        elapsed: Duration,
+        /// イベントを受け取ってから処理を開始するまでの時間です。
+        queue_wait: Duration,
+        /// REST リクエストの待ち時間です。
+        rest_elapsed: Duration,
+        /// HTTP 応答のステータスです。通信中の失敗では None です。
+        http_status: Option<u16>,
+        /// Discord が返した数値エラーコードです。
+        discord_code: Option<u64>,
+    },
 }
 
 type InfoHook = dyn Fn(&InfoEvent) + Send + Sync;
@@ -318,6 +343,31 @@ fn emit_info(event: &InfoEvent) {
                 elapsed_ms = elapsed.as_millis() as u64,
                 rest_elapsed_ms = rest_elapsed.as_millis() as u64,
                 "Interaction に初回応答しました"
+            );
+        }
+        InfoEvent::InteractionResponseFailed {
+            interaction_id,
+            command_id,
+            interaction_type,
+            response_type,
+            elapsed,
+            queue_wait,
+            rest_elapsed,
+            http_status,
+            discord_code,
+        } => {
+            tracing::debug!(
+                target: LOG_TARGET,
+                interaction_id = interaction_id.get(),
+                command_id = command_id.map(|id| id.get()),
+                interaction_type = ?interaction_type,
+                response_type = ?response_type,
+                elapsed_ms = elapsed.as_millis() as u64,
+                queue_wait_ms = queue_wait.as_millis() as u64,
+                rest_elapsed_ms = rest_elapsed.as_millis() as u64,
+                http_status,
+                discord_code,
+                "Interaction の初回応答に失敗しました"
             );
         }
     }

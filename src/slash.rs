@@ -40,6 +40,7 @@ use crate::{
 
 mod context_menu;
 mod file_response;
+mod invoke;
 mod localizations;
 mod original_response;
 mod settings;
@@ -47,6 +48,8 @@ mod v2_attachments;
 mod validation;
 pub use context_menu::UserMenuTarget;
 use context_menu::{MenuCommands, MenuKind, replace_application_commands};
+pub(crate) use invoke::InvocationHooks;
+use invoke::{PreparedSlashHandler, slash_handler};
 pub use localizations::CommandOptionLocalizations;
 use localizations::validate_distinct_names;
 pub(crate) use localizations::validate_options;
@@ -64,6 +67,7 @@ pub struct SlashCommands {
     menus: MenuCommands,
     settings: SettingsByKind,
     checks: Vec<CommandCheck>,
+    invocation_hooks: InvocationHooks,
     replace: bool,
 }
 
@@ -116,6 +120,7 @@ impl SlashCommands {
             menus: MenuCommands::default(),
             settings: SettingsByKind::default(),
             checks: Vec::new(),
+            invocation_hooks: InvocationHooks::default(),
             replace: false,
         }
     }
@@ -124,6 +129,26 @@ impl SlashCommands {
     /// 登録順に実行し、最初のエラーで処理を止めます。補完で失敗した場合は空の候補を返します。
     pub fn add_check(&mut self, check: CommandCheck) {
         self.checks.push(check);
+    }
+
+    /// アプリコマンドの関数の直前に呼ぶ非同期フックを設定します。以前の設定は置き換えます。
+    /// 実行前のチェック、型付き引数の変換、メニューの選択対象の解決を通過した場合に呼びます。
+    /// フックの失敗時はコマンド関数と実行後フックを呼びません。補完には適用しません。
+    pub fn set_before_invoke(
+        &mut self,
+        hook: impl AsyncFn(&SlashContext<'_>) -> Result<()> + Send + Sync + 'static,
+    ) {
+        self.invocation_hooks.set_before(hook);
+    }
+
+    /// アプリコマンドの関数の直後に呼ぶ非同期フックを設定します。以前の設定は置き換えます。
+    /// 関数がエラーや panic で終わった場合も呼び、そのエラーを渡します。両方が失敗した場合は関数のエラーを優先します。
+    /// 補完には適用しません。Future が破棄される場合の後始末には `Drop` を使ってください。
+    pub fn set_after_invoke(
+        &mut self,
+        hook: impl AsyncFn(&SlashContext<'_>, Option<&Error>) -> Result<()> + Send + Sync + 'static,
+    ) {
+        self.invocation_hooks.set_after(hook);
     }
 
     /// 起動時に、このアプリの同じ範囲（サーバー、またはグローバル）のコマンド一覧を、
@@ -158,9 +183,27 @@ impl SlashCommands {
             name,
             description,
             options,
-            Some(Box::new(
-                adapt_handler!(handler, ctx: &mut SlashContext<'_>),
-            )),
+            Some(slash_handler(handler)),
+            PermissionPolicy::Unrestricted,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn register_prepared(
+        &mut self,
+        name: &str,
+        description: &str,
+        options: Vec<CommandOption>,
+        handler: impl AsyncFn(&mut SlashContext<'_>, &InvocationHooks) -> Result<()>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()> {
+        self.insert(
+            name,
+            description,
+            options,
+            Some(Box::new(PreparedSlashHandler(handler))),
             PermissionPolicy::Unrestricted,
         )?;
         Ok(())
@@ -370,9 +413,7 @@ impl SlashCommands {
             name,
             description,
             options,
-            Some(Box::new(
-                adapt_handler!(handler, ctx: &mut SlashContext<'_>),
-            )),
+            Some(slash_handler(handler)),
             permissions,
         )?;
         Ok(())
@@ -683,6 +724,7 @@ impl SlashCommands {
             scope: self.scope,
             handlers,
             checks: self.checks,
+            invocation_hooks: self.invocation_hooks,
         })
     }
 }
@@ -814,6 +856,34 @@ impl CommandGroup<'_> {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
+        self.insert_subcommand(name, description, options, slash_handler(handler))
+    }
+
+    pub(crate) fn subcommand_prepared(
+        &mut self,
+        name: &str,
+        description: &str,
+        options: Vec<CommandOption>,
+        handler: impl AsyncFn(&mut SlashContext<'_>, &InvocationHooks) -> Result<()>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()> {
+        self.insert_subcommand(
+            name,
+            description,
+            options,
+            Box::new(PreparedSlashHandler(handler)),
+        )
+    }
+
+    fn insert_subcommand(
+        &mut self,
+        name: &str,
+        description: &str,
+        options: Vec<CommandOption>,
+        handler: Box<dyn SlashHandler>,
+    ) -> Result<()> {
         command::chat_input_name(name)?;
         command::description(description)?;
         validate_options(&options)?;
@@ -822,9 +892,7 @@ impl CommandGroup<'_> {
             options,
             localizations: CommandOptionLocalizations::default(),
             handlers: RouteHandlers {
-                command: Some(Box::new(
-                    adapt_handler!(handler, ctx: &mut SlashContext<'_>),
-                )),
+                command: Some(handler),
                 autocompletes: HashMap::new(),
             },
         };
@@ -1214,6 +1282,7 @@ pub(crate) struct ActiveSlashCommands {
     scope: Scope,
     handlers: HashMap<Id<CommandMarker>, Route>,
     checks: Vec<CommandCheck>,
+    invocation_hooks: InvocationHooks,
 }
 
 impl ActiveSlashCommands {
@@ -1331,7 +1400,7 @@ impl ActiveSlashCommands {
             CommandCheckSource::Application(route.kind),
         )
         .await?;
-        handler.call(ctx).await
+        handler.call(ctx, &self.invocation_hooks).await
     }
 
     pub(crate) async fn dispatch(
@@ -1897,30 +1966,71 @@ impl InitialResponder<'_> {
 
     pub(crate) async fn send(self, response: &InteractionResponse) -> Result<()> {
         let started_at = self.info.measures_timing().then(Instant::now);
-        self.http
+        let result = self
+            .http
             .interaction(self.interaction.application_id)
             .create_response(self.interaction.id, &self.interaction.token, response)
-            .await?;
-        self.report_sent(response.kind, started_at);
-        Ok(())
+            .await;
+        self.report_response(response.kind, started_at, result)
     }
 
-    pub(crate) fn report_sent(
+    pub(crate) fn report_response<T>(
         self,
         response_type: InteractionResponseType,
         started_at: Option<Instant>,
-    ) {
+        result: std::result::Result<T, twilight_http::Error>,
+    ) -> Result<()> {
         if let Some(started_at) = started_at {
             let completed_at = Instant::now();
-            self.info.report(InfoEvent::InteractionResponded {
-                interaction_type: self.interaction.kind,
-                response_type,
-                elapsed: self.timing.elapsed_since_receive(completed_at),
-                rest_elapsed: completed_at.saturating_duration_since(started_at),
-            });
+            let elapsed = self.timing.elapsed_since_receive(completed_at);
+            let rest_elapsed = completed_at.saturating_duration_since(started_at);
+            let interaction_type = self.interaction.kind;
+            let event = match &result {
+                Ok(_) => InfoEvent::InteractionResponded {
+                    interaction_type,
+                    response_type,
+                    elapsed,
+                    rest_elapsed,
+                },
+                Err(error) => {
+                    use twilight_http::{api_error::ApiError, error::ErrorType};
+                    let (http_status, discord_code) = match error.kind() {
+                        ErrorType::Response { status, error, .. } => (
+                            Some(status.get()),
+                            match error {
+                                ApiError::General(error) => Some(error.code),
+                                _ => None,
+                            },
+                        ),
+                        _ => (None, None),
+                    };
+                    let command_id = match &self.interaction.data {
+                        Some(InteractionData::ApplicationCommand(command)) => Some(command.id),
+                        _ => None,
+                    };
+                    InfoEvent::InteractionResponseFailed {
+                        interaction_id: self.interaction.id,
+                        command_id,
+                        interaction_type,
+                        response_type,
+                        elapsed,
+                        queue_wait: self.timing.queue_wait(),
+                        rest_elapsed,
+                        http_status,
+                        discord_code,
+                    }
+                }
+            };
+            self.info.report(event);
         }
+        result?;
+        Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "slash/response_diagnostics_tests.rs"]
+mod response_diagnostics_tests;
 
 async fn edit_text_response(http: &Client, interaction: &Interaction, content: &str) -> Result<()> {
     crate::validation::message_content(content)?;
@@ -1971,6 +2081,7 @@ trait SlashHandler: Send + Sync {
     fn call<'a, 'ctx>(
         &'a self,
         ctx: &'a mut SlashContext<'ctx>,
+        hooks: &'a InvocationHooks,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
 }
 
@@ -1981,8 +2092,9 @@ where
     fn call<'a, 'ctx>(
         &'a self,
         ctx: &'a mut SlashContext<'ctx>,
+        hooks: &'a InvocationHooks,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        Box::pin(self(ctx))
+        Box::pin(hooks.run(ctx, self))
     }
 }
 
@@ -2106,6 +2218,7 @@ pub(crate) mod tests {
             scope,
             handlers,
             checks: Vec::new(),
+            invocation_hooks: super::InvocationHooks::default(),
         }
     }
 
@@ -2336,6 +2449,18 @@ pub(crate) mod tests {
         let guild_id = Id::new(1);
         let command_id = Id::new(5);
         let mut slash = SlashCommands::for_guild(guild_id).replace_commands();
+        let invocations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let before = std::sync::Arc::clone(&invocations);
+        slash.set_before_invoke(async move |_: &SlashContext<'_>| {
+            before.lock().unwrap().push("before");
+            Ok(())
+        });
+        let after = std::sync::Arc::clone(&invocations);
+        slash.set_after_invoke(async move |_: &SlashContext<'_>, error: Option<&Error>| {
+            assert!(error.is_none());
+            after.lock().unwrap().push("after");
+            Ok(())
+        });
         let custom_checks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let calls = std::sync::Arc::clone(&custom_checks);
         slash.add_check(crate::CommandCheck::new(
@@ -2482,6 +2607,7 @@ pub(crate) mod tests {
                 crate::CommandCheckSource::Autocomplete,
             ]
         );
+        assert_eq!(*invocations.lock().unwrap(), ["before", "after"]);
         Ok(())
     }
 

@@ -16,6 +16,7 @@ use crate::{
     CommandContext, Commands, Cooldown, Error, Result, SlashCommands, SlashContext, Timing,
     commands::PreparedTextHandler,
     error::handler_error,
+    slash::InvocationHooks,
     ui::{ComponentsV2, UiMessage},
 };
 
@@ -70,11 +71,13 @@ where
     if let Some(slash) = slash {
         let options = typed.schema.options().to_vec();
         let typed = Arc::clone(&typed);
-        slash.register(
+        slash.register_prepared(
             name,
             description,
             options,
-            async move |ctx: &mut SlashContext<'_>| typed.slash(ctx).await,
+            async move |ctx: &mut SlashContext<'_>, hooks: &InvocationHooks| {
+                typed.slash(ctx, hooks).await
+            },
         )?;
     }
 
@@ -125,7 +128,7 @@ impl<F> TypedHandler<F> {
         .await
     }
 
-    async fn slash<E>(&self, ctx: &mut SlashContext<'_>) -> Result<()>
+    async fn slash<E>(&self, ctx: &mut SlashContext<'_>, hooks: &InvocationHooks) -> Result<()>
     where
         F: for<'a> AsyncFn(
             &mut HybridContext<'a>,
@@ -134,12 +137,16 @@ impl<F> TypedHandler<F> {
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
         let arguments = self.schema.bind_slash(ctx.leaf_options(), ctx.resolved())?;
-        let mut ctx = HybridContext {
-            inner: SourceContext::Slash(ctx.reborrow()),
-        };
-        (self.handler)(&mut ctx, arguments)
+        hooks
+            .run(ctx, async move |ctx: &mut SlashContext<'_>| {
+                let mut ctx = HybridContext {
+                    inner: SourceContext::Slash(ctx.reborrow()),
+                };
+                (self.handler)(&mut ctx, arguments)
+                    .await
+                    .map_err(handler_error)
+            })
             .await
-            .map_err(handler_error)
     }
 }
 

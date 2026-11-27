@@ -13,11 +13,11 @@ use twilight_model::{
 };
 use twilight_validate::command;
 
-use super::{Scope, SlashCommands, SlashContext, SlashHandler, settings::CommandPayload};
-use crate::{
-    Error, HandlerKind, RegistrationError, Result,
-    error::{adapt_handler, handler_error},
+use super::{
+    InvocationHooks, Scope, SlashCommands, SlashContext, SlashHandler,
+    invoke::PreparedSlashHandler, settings::CommandPayload,
 };
+use crate::{Error, HandlerKind, RegistrationError, Result, error::handler_error};
 
 /// ユーザーコマンドのメニューで選ばれたユーザーです。
 ///
@@ -75,16 +75,18 @@ impl SlashCommands {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let invoke = async move |ctx: &mut SlashContext<'_>| {
+        let invoke = async move |ctx: &mut SlashContext<'_>, hooks: &InvocationHooks| {
             let target =
                 UserMenuTarget::resolve(ctx.data).ok_or(Error::CommandTargetUnavailable)?;
-            handler(ctx, target).await.map_err(handler_error)
+            let handler = &handler;
+            hooks
+                .run(ctx, async move |ctx: &mut SlashContext<'_>| {
+                    handler(ctx, target).await.map_err(handler_error)
+                })
+                .await
         };
-        self.menus.insert(
-            MenuKind::User,
-            name,
-            Box::new(adapt_handler!(invoke, ctx: &mut SlashContext<'_>)),
-        )
+        self.menus
+            .insert(MenuKind::User, name, Box::new(PreparedSlashHandler(invoke)))
     }
 
     /// メッセージのコンテキストメニューに表示するコマンドを登録します。
@@ -106,14 +108,19 @@ impl SlashCommands {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let invoke = async move |ctx: &mut SlashContext<'_>| {
+        let invoke = async move |ctx: &mut SlashContext<'_>, hooks: &InvocationHooks| {
             let target = resolve_message(ctx.data).ok_or(Error::CommandTargetUnavailable)?;
-            handler(ctx, target).await.map_err(handler_error)
+            let handler = &handler;
+            hooks
+                .run(ctx, async move |ctx: &mut SlashContext<'_>| {
+                    handler(ctx, target).await.map_err(handler_error)
+                })
+                .await
         };
         self.menus.insert(
             MenuKind::Message,
             name,
-            Box::new(adapt_handler!(invoke, ctx: &mut SlashContext<'_>)),
+            Box::new(PreparedSlashHandler(invoke)),
         )
     }
 }

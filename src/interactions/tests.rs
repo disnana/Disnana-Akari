@@ -94,7 +94,7 @@ async fn button_context_debug_omits_credentials() {
 }
 
 #[tokio::test]
-async fn initial_response_reports_only_after_discord_accepts_it() -> Result<()> {
+async fn initial_response_reports_the_failed_attempt_and_successful_retry() -> Result<()> {
     use std::{
         sync::{Arc, Mutex},
         time::Duration,
@@ -136,12 +136,26 @@ async fn initial_response_reports_only_after_discord_accepts_it() -> Result<()> 
 
     let request = async {
         assert!(ctx.defer_update().await.is_err());
-        assert!(seen.lock().unwrap().is_empty());
+        assert!(matches!(
+            seen.lock().unwrap().as_slice(),
+            [crate::InfoEvent::InteractionResponseFailed {
+                interaction_id,
+                command_id: None,
+                http_status: Some(400),
+                discord_code: Some(50035),
+                ..
+            }] if *interaction_id == event.id
+        ));
         ctx.defer_update().await
     };
     let server = async {
+        let body = r#"{"code":50035,"message":"mock rejection"}"#;
+        let failure = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
         for response in [
-            "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            failure.as_str(),
             "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
         ] {
             let (stream, _) = listener.accept().await?;
@@ -174,7 +188,7 @@ async fn initial_response_reports_only_after_discord_accepts_it() -> Result<()> 
     assert_eq!(ctx.response, ButtonResponse::DeferredUpdate);
     assert!(matches!(
         seen.lock().unwrap().as_slice(),
-        [crate::InfoEvent::InteractionResponded {
+        [crate::InfoEvent::InteractionResponseFailed { .. }, crate::InfoEvent::InteractionResponded {
             interaction_type: InteractionType::MessageComponent,
             response_type: InteractionResponseType::DeferredUpdateMessage,
             elapsed,

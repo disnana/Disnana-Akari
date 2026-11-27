@@ -49,6 +49,15 @@ pub(super) async fn run(guild: Id<GuildMarker>, directory: PathBuf) -> Result<()
                 println!("VC コマンドを {count} 件同期しました")
             }
             InfoEvent::GatewayReady => println!("Playground VC の Gateway が準備できました"),
+            InfoEvent::InteractionResponseFailed {
+                interaction_id, command_id, response_type, elapsed, queue_wait,
+                rest_elapsed, http_status, discord_code, ..
+            } => {
+                eprintln!(
+                    "初回応答の失敗 interaction={interaction_id} command={command_id:?} kind={response_type:?} HTTP={http_status:?} code={discord_code:?} total={} ms queue={} ms REST={} ms",
+                    elapsed.as_millis(), queue_wait.as_millis(), rest_elapsed.as_millis(),
+                );
+            }
             _ => {}
         })
         .with_messages(messages)

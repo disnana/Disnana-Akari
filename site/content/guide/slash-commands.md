@@ -356,3 +356,20 @@ fn build() -> SlashCommands {
 ## コマンド全体の文字数
 
 1コマンドの名前、説明、サブコマンド、引数、選択肢を合わせて最大8,000文字です。翻訳がある項目は、既定値を含めた最長の文字列を数えます。1項目ずつ制限内でも、合計が超えると同期前にエラーになります。選択肢は1つの引数につき25件までで、オートコンプリートとは併用できません。[Discord のスラッシュコマンド仕様](https://docs.discord.com/developers/interactions/application-commands#slash-commands)
+
+## 実行前後の処理を共通化する
+
+`SlashCommands` の実行フックは、権限チェックと必要な引数の準備に通った後に呼ばれます。スラッシュコマンドとユーザー・メッセージのメニューに共通です。`set_before_invoke` のエラーは実行を中止します。`set_after_invoke` には実行結果が渡り、ハンドラーとフックが両方失敗した場合はハンドラーのエラーを優先します。
+
+```rust
+use disnana_akari::{Error, Result, SlashCommands, SlashContext};
+
+fn install_hooks(commands: &mut SlashCommands) {
+    commands.set_after_invoke(async |ctx: &SlashContext<'_>, error: Option<&Error>| -> Result<()> {
+        eprintln!("実行完了 {:?} 成功={}", ctx.command_path(), error.is_none());
+        Ok(())
+    });
+}
+```
+
+自動補完に実行フックは適用されません。ハイブリッドでは `!` 用の `Commands` とスラッシュ用の `SlashCommands` にそれぞれ設定します。

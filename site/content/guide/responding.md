@@ -120,3 +120,9 @@ async fn report(ctx: CommandContext<'_>) -> Result<()> {
 ```
 
 `AttachmentLimits` は Components V2 と共有できます。通常の返信も、本文の長さ、添付数、名前と ID、ファイルサイズを送信前に検証します。アプリ独自の上限を使わない場合は `AttachmentLimits::default()` を渡します。
+
+## 初回応答の失敗を調べる
+
+`Bot::on_info` の `InfoEvent::InteractionResponseFailed` は、初回応答の HTTP リクエストが失敗したときに届きます。JSON と添付付きのどちらでも、Interaction ID、HTTP ステータス、Discord の数値エラーコード、キュー待ち、REST 待ちを確認できます。トークンとレスポンス本文は含みません。
+
+たとえば、Discord のコード `10062` は Interaction を見つけられなかったことを示します。Bot が受信してからの経過時間を合わせて見れば、Discord が求める3秒の期限と照らし合わせられます。[Discord の応答期限](https://docs.discord.com/developers/interactions/receiving-and-responding#interaction-callback) · [Discord のエラー番号](https://docs.discord.com/developers/topics/opcodes-and-status-codes#json)

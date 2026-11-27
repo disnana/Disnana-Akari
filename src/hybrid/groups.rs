@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use twilight_model::application::command::CommandOption;
 
-use super::{CommandContext, HybridArguments, HybridContext, SlashContext, TypedHandler};
+use super::{
+    CommandContext, HybridArguments, HybridContext, InvocationHooks, SlashContext, TypedHandler,
+};
 use crate::{
     CommandGroup, Commands, Result, SlashCommands, TextCommandGroup, commands::PreparedTextHandler,
     slash::CommandOptionLocalizations,
@@ -142,11 +144,13 @@ impl HybridCommandGroup<'_> {
         self.text.ensure_names_available(name, aliases)?;
         let typed = Arc::new(TypedHandler::new(options, handler)?);
         let slash_handler = Arc::clone(&typed);
-        self.slash.subcommand(
+        self.slash.subcommand_prepared(
             name,
             description,
             typed.schema.options().to_vec(),
-            async move |ctx: &mut SlashContext<'_>| slash_handler.slash(ctx).await,
+            async move |ctx: &mut SlashContext<'_>, hooks: &InvocationHooks| {
+                slash_handler.slash(ctx, hooks).await
+            },
         )?;
         self.text.subcommand_handler(
             name,
@@ -209,11 +213,13 @@ impl HybridCommandGroup<'_> {
         self.text.ensure_fallback_available()?;
         let typed = Arc::new(TypedHandler::new(Vec::new(), handler)?);
         let slash_handler = Arc::clone(&typed);
-        self.slash.subcommand(
+        self.slash.subcommand_prepared(
             slash_name,
             description,
             Vec::new(),
-            async move |ctx: &mut SlashContext<'_>| slash_handler.slash(ctx).await,
+            async move |ctx: &mut SlashContext<'_>, hooks: &InvocationHooks| {
+                slash_handler.slash(ctx, hooks).await
+            },
         )?;
         self.text.fallback_handler(Box::new(PreparedTextHandler(
             async move |ctx: CommandContext<'_>| typed.text(ctx).await,

@@ -272,9 +272,8 @@ impl InitialResponder<'_> {
         else {
             return self.send(&modal.response()?).await;
         };
-        self.http.request::<EmptyBody>(request).await?;
-        self.report_sent(InteractionResponseType::Modal, started_at);
-        Ok(())
+        let result = self.http.request::<EmptyBody>(request).await;
+        self.report_response(InteractionResponseType::Modal, started_at, result)
     }
 }
 
