@@ -98,3 +98,25 @@ Akari が、種類ごとに補います。文言は [`Messages`](errors.md) で�
 
 > [!TIP]
 > エラーの原因を利用者に説明したいときは、`Err` を返さずに、自分で `reply_ephemeral` で理由を伝えて `Ok(())` で終わります。
+
+## 通常の返信にファイルを添付する
+
+`reply_files` はテキスト、スラッシュ、ハイブリッドで使えます。添付だけを送りたいときは本文に空文字を渡します。スラッシュの `reply_files_ephemeral` は実行者のみに表示します。先に defer した場合は、その応答の表示範囲に合わせます。
+
+```rust
+use disnana_akari::{
+    CommandContext, Result, model::http::attachment::Attachment, validation::AttachmentLimits,
+};
+
+async fn report(ctx: CommandContext<'_>) -> Result<()> {
+    let files = [Attachment::from_bytes(
+        "report.txt".into(),
+        b"Report ready".to_vec(),
+        0,
+    )];
+    let limits = AttachmentLimits::default().max_file_bytes(Some(1024 * 1024));
+    ctx.reply_files("", &files, limits).await
+}
+```
+
+`AttachmentLimits` は Components V2 と共有できます。通常の返信も、本文の長さ、添付数、名前と ID、ファイルサイズを送信前に検証します。アプリ独自の上限を使わない場合は `AttachmentLimits::default()` を渡します。

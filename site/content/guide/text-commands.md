@@ -232,3 +232,24 @@ fn register(commands: &mut Commands) -> Result<()> {
 - `/` から呼べるようにする → [スラッシュコマンド](slash-commands.md)
 - 両方に対応する → [ハイブリッドコマンド](hybrid-commands.md)
 - 連打を防ぐ → [クールダウン](cooldowns.md)
+
+## コマンドの実行前後を処理する
+
+`Commands` に共通の非同期フックを前後1つずつ設定できます。権限チェックと Akari が行う型付き引数の変換を通過したテキスト実行に適用します。ハイブリッドの `!` 側にも適用されます。
+
+```rust
+use disnana_akari::{CommandContext, Commands, Error, Result};
+
+fn configure_hooks(commands: &mut Commands) {
+    commands.set_before_invoke(async |ctx: &CommandContext<'_>| -> Result<()> {
+        eprintln!("実行開始 {}", ctx.command_name());
+        Ok(())
+    });
+    commands.set_after_invoke(async |ctx: &CommandContext<'_>, error: Option<&Error>| -> Result<()> {
+        eprintln!("実行終了 {} 成功={}", ctx.command_name(), error.is_none());
+        Ok(())
+    });
+}
+```
+
+実行前フックが失敗するとハンドラーの実行を取りやめます。実行後フックには、ハンドラーの結果に応じてエラーが渡ります。実行後フックも失敗した場合はハンドラー側のエラーを優先します。タスクのキャンセル時にも確実に解放したい値は、所有と Drop で管理してください。[discord.py の実行フック](https://discordpy.readthedocs.io/en/stable/ext/commands/api.html#discord.ext.commands.Bot.after_invoke)

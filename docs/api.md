@@ -535,6 +535,14 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 
 音声接続の準備では、Bot 自身の `VoiceStateUpdate` と同じサーバーの `VoiceServerUpdate` を受け取ります。`VoiceServerUpdate` に含まれるトークンは機密情報です。
 
+## 通常の添付返信
+
+`Context`、`CommandContext`、`SlashContext`、`HybridContext` の `reply_files` で本文と添付を送れます。添付だけを送る場合は空の本文を指定します。`SlashContext::reply_files_ephemeral` は本人向けで、`defer_ephemeral` 後の待機表示も完了できます。
+
+### テキストコマンドの実行フック
+
+`Commands::set_before_invoke` と `set_after_invoke` は、チェックと型付き引数の変換が通ったテキスト実行の前後に呼ばれます。実行後フックにはハンドラーのエラーが渡ります。ハイブリッドのテキスト実行にも適用します。
+
 ## 送信前の検証
 
 `validation::message_content`、`attachment_count`、`attachment_sizes` で、本文の文字数、保持分を含む添付件数、Discord が通知した1ファイルのバイト上限を確認します。本文は上限超過を検出した時点で走査を打ち切ります。 `AttachmentLimits` では、保持分を含む件数、1 ファイルのサイズ、新規送信分の合計サイズにアプリ独自の上限を設定できます。値を `None` にすると、その項目のアプリ独自の検査を外します。`ComponentsV2::attachment_limits` で返信と編集に適用できます。`UiMessage::validate`、`ComponentsV2::validate`、`Modal::validate` は各ビルダーの構成を検証します。
