@@ -158,6 +158,8 @@ fn build() -> Result<Bot> {
 | `slash_command_failed` | スラッシュコマンドの関数がエラーを返したか、応答しなかったとき | 「コマンドを処理できませんでした。」 |
 | `slash_command_unavailable` | Akari に登録していないスラッシュコマンドが実行されたとき（本人にだけ） | 「このコマンドは現在利用できません。」 |
 | `check_failed` | `require_*` の確認に通らず、ハンドラーが [`CheckFailure`](permissions.md) を返したとき（スラッシュでは本人にだけ、テキストでは元の投稿への返信） | 「このコマンドを使う権限がありません。」 |
+| `bot_check_failed` | Bot 自身に必要な権限が足りず、[`CheckFailure`](permissions.md) の `BotMissingPermissions` で拒否したとき（送り方は `check_failed` と同じ） | 「Bot に必要な権限が足りないため、実行できません。サーバーの管理者に連絡してください。」 |
+| `hierarchy_failed` | ロールの階層で操作できず、[`CheckFailure`](permissions.md) の `Hierarchy` で拒否したとき（送り方は `check_failed` と同じ） | 「ロールの階層により、この相手は操作できません。」 |
 | `button_failed` | ボタンの関数がエラーを返したとき（本人にだけ） | 「ボタンを処理できませんでした。」 |
 | `select_failed` | 選択メニューの関数がエラーを返したとき、または選択内容を読み取れなかったとき（本人にだけ） | 「選択内容を処理できませんでした。」 |
 | `modal_failed` | フォームの関数がエラーを返したとき（本人にだけ） | 「入力内容を処理できませんでした。」 |

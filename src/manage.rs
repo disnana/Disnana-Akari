@@ -6,7 +6,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use twilight_http::{error::ErrorType, request::AuditLogReason};
+use twilight_http::request::AuditLogReason;
 use twilight_model::{
     channel::{Channel, ChannelType},
     guild::{Permissions, Role},
@@ -18,8 +18,8 @@ use twilight_model::{
 };
 
 use crate::{
-    Access, CheckFailure, Error, HierarchyDenied, InvalidArgument, NewCategory, NewRole,
-    NewTextChannel, NewVoiceChannel, Overwrite, OverwriteTarget, Result, RoleEdit, TextChannelEdit,
+    Access, CheckFailure, HierarchyDenied, InvalidArgument, NewCategory, NewRole, NewTextChannel,
+    NewVoiceChannel, Overwrite, OverwriteTarget, Result, RoleEdit, TextChannelEdit,
     VoiceChannelEdit, access::check_bot_can_grant,
 };
 
@@ -60,15 +60,9 @@ impl<'a> Manage<'a> {
     ) -> Result<Id<GuildMarker>> {
         let guild_id = self.access.require_guild()?;
         self.access.require_bot_permissions(required).await?;
-        match self.access.require_bot_can_moderate(target).await {
-            Err(Error::Http(error))
-                if allow_absent
-                    && matches!(
-                        error.kind(),
-                        ErrorType::Response { status, .. } if status.get() == 404
-                    ) => {}
-            other => other?,
-        }
+        self.access
+            .require_bot_can_moderate(target, allow_absent)
+            .await?;
         Ok(guild_id)
     }
 
@@ -632,6 +626,7 @@ fn timestamp_after(duration: Duration) -> Result<Timestamp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
     use crate::{
         Access,
         access::tests::{
@@ -1248,5 +1243,24 @@ mod tests {
         ));
         assert_eq!(mock.count("PATCH /guilds/20/roles/102"), 0);
         assert_eq!(mock.count("DELETE /guilds/20/roles/102"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_missing_bot_member_does_not_skip_the_hierarchy_check_for_a_ban() {
+        // Bot 自身のメンバー（3）が取得できない（404）。サーバーにいない相手（99）の BAN 用の
+        // 「相手が 404 なら階層を省く」処理が、これを見逃してはならない。
+        let mock = Mock::start(vec![
+            ("/users/@me".into(), user_json(3)),
+            ("/guilds/20".into(), guild_json_with(Permissions::empty())),
+            ("/guilds/20/bans/99".into(), "{}".into()),
+        ])
+        .await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let interaction = slash_interaction(true, 0, Permissions::BAN_MEMBERS.bits());
+        let manage = manage(&http, &resolver, &interaction);
+        let result = manage.ban_member(user(99), Duration::ZERO, "理由").await;
+        assert!(matches!(result, Err(Error::Http(_))), "{result:?}");
+        assert_eq!(mock.count("PUT /guilds/20/bans/99"), 0);
     }
 }

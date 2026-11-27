@@ -130,12 +130,11 @@ impl Needs {
     /// 指定したコマンド（とその配下）だけで、確認を行うチェックにする。
     pub(crate) fn into_check(self, command: Vec<String>) -> CommandCheck {
         CommandCheck::new(async move |ctx: CommandCheckContext<'_>| {
-            let path: Vec<&str> = ctx.command_path().collect();
-            let applies = path.len() >= command.len()
-                && path
-                    .iter()
-                    .zip(&command)
-                    .all(|(given, wanted)| given == wanted);
+            // 割り当てなしで、宣言した経路が、呼ばれた経路の先頭と一致するか（配下を含む）。
+            let mut path = ctx.command_path();
+            let applies = command
+                .iter()
+                .all(|wanted| path.next().is_some_and(|given| given == wanted));
             if applies {
                 self.verify(&ctx.access()).await
             } else {
@@ -614,7 +613,15 @@ impl<'a> Access<'a> {
 
     /// Bot が、ロールの階層から見て、対象のメンバーを操作できることを確認する。
     /// 実行した人の階層は確認しない（[`require_can_moderate`](Self::require_can_moderate) で確認する）。
-    pub(crate) async fn require_bot_can_moderate(&self, target: Id<UserMarker>) -> Result<()> {
+    ///
+    /// `allow_absent` が真のとき、**対象のメンバーの取得だけ** が「存在しない（404）」で失敗した場合は、
+    /// 階層の確認を省く（サーバーにいないユーザーの BAN 用）。サーバーや Bot 自身の取得の失敗は、
+    /// 省かずに、エラーのまま返す。
+    pub(crate) async fn require_bot_can_moderate(
+        &self,
+        target: Id<UserMarker>,
+        allow_absent: bool,
+    ) -> Result<()> {
         let guild_id = self.require_guild()?;
         let bot_id = self.resolver.bot_id(self.http).await?;
         if target == bot_id {
@@ -622,9 +629,19 @@ impl<'a> Access<'a> {
         }
         let (info, target_member, bot_member) = tokio::try_join!(
             self.resolver.guild_info(self.http, guild_id),
-            fetch_member(self.http, guild_id, target),
+            async {
+                match fetch_member(self.http, guild_id, target).await {
+                    Err(crate::Error::Http(error)) if allow_absent && is_not_found(&error) => {
+                        Ok(None)
+                    }
+                    other => other.map(Some),
+                }
+            },
             fetch_member(self.http, guild_id, bot_id),
         )?;
+        let Some(target_member) = target_member else {
+            return Ok(());
+        };
         check_bot_hierarchy(
             info.owner_id,
             target,
@@ -699,6 +716,14 @@ pub(crate) fn check_bot_can_grant(
     } else {
         Err(CheckFailure::BotMissingPermissions(missing))
     }
+}
+
+/// Discord が「存在しない」（404）と答えたか。
+fn is_not_found(error: &twilight_http::Error) -> bool {
+    matches!(
+        error.kind(),
+        twilight_http::error::ErrorType::Response { status, .. } if status.get() == 404
+    )
 }
 
 async fn fetch_member(

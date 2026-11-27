@@ -12,7 +12,7 @@ use twilight_model::{
     },
 };
 
-use crate::Error;
+use crate::{CheckFailure, Error};
 
 type ErrorHook = dyn Fn(&ErrorReport<'_>) + Send + Sync;
 
@@ -152,6 +152,13 @@ pub struct Messages {
     /// 公開の遅延応答がある場合は、固定文言で待機表示を終了してから、本人への追加応答で送ります。
     /// テキストコマンドでは、元の投稿への返信になります（送らない場合は `None` にします）。
     pub check_failed: Option<String>,
+    /// Bot 自身に必要な権限が足りないとき（[`CheckFailure::BotMissingPermissions`](crate::CheckFailure::BotMissingPermissions)）の文言です。
+    /// 実行した人の権限は足りているので、「権限がありません」とは伝えず、サーバーの管理者への連絡を促します。
+    /// 送る場所と送り方は [`check_failed`](Self::check_failed) と同じです。
+    pub bot_check_failed: Option<String>,
+    /// ロールの階層で操作できないとき（[`CheckFailure::Hierarchy`](crate::CheckFailure::Hierarchy)）の文言です。
+    /// 送る場所と送り方は [`check_failed`](Self::check_failed) と同じです。
+    pub hierarchy_failed: Option<String>,
     /// ボタンの関数がエラーを返したときに、本人にだけ送る文言です。
     pub button_failed: Option<String>,
     /// 選択メニューの関数がエラーを返したときや、選択内容を読み取れなかったときに、本人にだけ送る文言です。
@@ -160,6 +167,22 @@ pub struct Messages {
     pub modal_failed: Option<String>,
     /// 入力フォームの関数が、成功したのに何も応答しなかったときに、本人にだけ送る文言です。
     pub modal_accepted: Option<String>,
+}
+
+impl Messages {
+    /// 実行前の確認に通らなかった理由に合う文言を返す。
+    pub(crate) fn for_check(&self, failure: &CheckFailure) -> &Option<String> {
+        match failure {
+            CheckFailure::BotMissingPermissions(_) => &self.bot_check_failed,
+            CheckFailure::Hierarchy(_) => &self.hierarchy_failed,
+            CheckFailure::GuildOnly
+            | CheckFailure::MissingPermissions(_)
+            | CheckFailure::PermissionsUnavailable
+            | CheckFailure::Rejected
+            | CheckFailure::NotGuildOwner
+            | CheckFailure::MissingRole => &self.check_failed,
+        }
+    }
 }
 
 impl Default for Messages {
@@ -172,6 +195,10 @@ impl Default for Messages {
             slash_command_failed: text("コマンドを処理できませんでした。"),
             slash_command_unavailable: text("このコマンドは現在利用できません。"),
             check_failed: text("このコマンドを使う権限がありません。"),
+            bot_check_failed: text(
+                "Bot に必要な権限が足りないため、実行できません。サーバーの管理者に連絡してください。",
+            ),
+            hierarchy_failed: text("ロールの階層により、この相手は操作できません。"),
             button_failed: text("ボタンを処理できませんでした。"),
             select_failed: text("選択内容を処理できませんでした。"),
             modal_failed: text("入力内容を処理できませんでした。"),
@@ -680,6 +707,47 @@ mod tests {
         assert_eq!(
             Error::GatewayClose(1000).to_string(),
             "Discord Gateway が接続を閉じました (コード 1000)"
+        );
+    }
+
+    #[test]
+    fn each_check_failure_uses_the_message_that_matches_its_cause() {
+        use crate::CheckFailure;
+        use twilight_model::guild::Permissions;
+
+        let messages = Messages::default();
+        let pick = |failure: CheckFailure| messages.for_check(&failure).clone();
+        // 実行した人の問題は「権限がありません」。Bot の権限と階層は、別の文言で、原因が分かる。
+        assert_eq!(pick(CheckFailure::GuildOnly), messages.check_failed);
+        assert_eq!(
+            pick(CheckFailure::MissingPermissions(Permissions::BAN_MEMBERS)),
+            messages.check_failed
+        );
+        assert_eq!(pick(CheckFailure::NotGuildOwner), messages.check_failed);
+        assert_eq!(pick(CheckFailure::MissingRole), messages.check_failed);
+        assert_eq!(
+            pick(CheckFailure::BotMissingPermissions(
+                Permissions::BAN_MEMBERS
+            )),
+            messages.bot_check_failed
+        );
+        assert_eq!(
+            pick(CheckFailure::Hierarchy(crate::HierarchyDenied::BotTooLow)),
+            messages.hierarchy_failed
+        );
+        assert_ne!(messages.bot_check_failed, messages.check_failed);
+        assert_ne!(messages.hierarchy_failed, messages.check_failed);
+        // 文言を None にすれば、送らない。
+        let silent = Messages {
+            bot_check_failed: None,
+            ..Messages::default()
+        };
+        assert!(
+            silent
+                .for_check(&CheckFailure::BotMissingPermissions(
+                    Permissions::BAN_MEMBERS
+                ))
+                .is_none()
         );
     }
 }
