@@ -7,18 +7,22 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::sync::OnceCell;
 use twilight_http::Client;
 use twilight_model::{
-    channel::{ChannelType, Message, permission_overwrite::PermissionOverwrite},
+    channel::{
+        ChannelType, Message,
+        permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
+    },
     guild::Permissions,
     id::{
         Id,
         marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
     },
+    util::datetime::Timestamp,
 };
 use twilight_util::permission_calculator::PermissionCalculator;
 
@@ -208,6 +212,10 @@ impl PermissionResolver {
                     parent
                         .as_ref()
                         .map_or(&channel.value, |(_, parent)| &parent.value),
+                    parent.is_some(),
+                    member
+                        .communication_disabled_until
+                        .is_some_and(|until| timeout_active(until, SystemTime::now())),
                 ));
             }
         }
@@ -337,6 +345,19 @@ const GUILD_LEVEL: Permissions = Permissions::from_bits_truncate(
         | Permissions::VIEW_GUILD_INSIGHTS.bits(),
 );
 
+const MESSAGE_DEPENDENT: Permissions = Permissions::from_bits_truncate(
+    Permissions::ATTACH_FILES.bits()
+        | Permissions::EMBED_LINKS.bits()
+        | Permissions::MENTION_EVERYONE.bits()
+        | Permissions::SEND_TTS_MESSAGES.bits(),
+);
+
+fn timeout_active(until: Timestamp, now: SystemTime) -> bool {
+    now.duration_since(UNIX_EPOCH).map_or(true, |elapsed| {
+        u128::try_from(until.as_micros()).is_ok_and(|until| elapsed.as_micros() < until)
+    })
+}
+
 /// 取得済みの情報から、権限を計算する。知らないロールは、権限なしとして扱う。
 fn compute(
     guild_id: Id<GuildMarker>,
@@ -344,6 +365,8 @@ fn compute(
     member_roles: &[Id<RoleMarker>],
     guild: &GuildInfo,
     channel: &ChannelInfo,
+    in_thread: bool,
+    timed_out: bool,
 ) -> Permissions {
     // @everyone ロールの ID は、サーバーの ID と同じ。
     let everyone = guild
@@ -358,14 +381,73 @@ fn compute(
     let calculator =
         PermissionCalculator::new(guild_id, user_id, everyone, &roles).owner_id(guild.owner_id);
     let root = calculator.root();
-    let in_channel = calculator.in_channel(channel.kind, &channel.overwrites);
-    in_channel | (root & GUILD_LEVEL)
+    if root.contains(Permissions::ADMINISTRATOR) {
+        return Permissions::all();
+    }
+
+    let mut in_channel = calculator.in_channel(channel.kind, &channel.overwrites);
+    if in_thread {
+        if !in_channel.contains(Permissions::VIEW_CHANNEL) {
+            in_channel = Permissions::empty();
+        } else if !in_channel.contains(Permissions::SEND_MESSAGES_IN_THREADS) {
+            in_channel.remove(MESSAGE_DEPENDENT);
+        } else if !in_channel.contains(Permissions::SEND_MESSAGES) {
+            // Twilight が親の SEND_MESSAGES の拒否で落としたビットを、スレッド内の権限で計算し直す。
+            in_channel.remove(MESSAGE_DEPENDENT);
+            in_channel.insert(thread_message_permissions(
+                root,
+                guild_id,
+                user_id,
+                &roles,
+                &channel.overwrites,
+            ));
+        }
+    }
+
+    let mut permissions = in_channel | (root & GUILD_LEVEL);
+    if timed_out {
+        permissions &= Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY;
+    }
+    permissions
+}
+
+fn thread_message_permissions(
+    root: Permissions,
+    guild_id: Id<GuildMarker>,
+    user_id: Id<UserMarker>,
+    roles: &[(Id<RoleMarker>, Permissions)],
+    overwrites: &[PermissionOverwrite],
+) -> Permissions {
+    let mut everyone = root & MESSAGE_DEPENDENT;
+    let (mut role_allow, mut role_deny) = (Permissions::empty(), Permissions::empty());
+    let (mut member_allow, mut member_deny) = (Permissions::empty(), Permissions::empty());
+
+    for overwrite in overwrites {
+        let allow = overwrite.allow & MESSAGE_DEPENDENT;
+        let deny = overwrite.deny & MESSAGE_DEPENDENT;
+        match overwrite.kind {
+            PermissionOverwriteType::Role if overwrite.id.get() == guild_id.get() => {
+                everyone = (everyone - deny) | allow;
+            }
+            PermissionOverwriteType::Role
+                if roles.iter().any(|(id, _)| *id == overwrite.id.cast()) =>
+            {
+                role_allow |= allow;
+                role_deny |= deny;
+            }
+            PermissionOverwriteType::Member if overwrite.id.get() == user_id.get() => {
+                member_allow |= allow;
+                member_deny |= deny;
+            }
+            _ => {}
+        }
+    }
+
+    ((((everyone - role_deny) | role_allow) - member_deny) | member_allow) & MESSAGE_DEPENDENT
 }
 
 #[cfg(test)]
 mod tests {
-    use twilight_model::channel::permission_overwrite::PermissionOverwriteType;
-
     use super::*;
 
     fn guild(owner: u64, roles: &[(u64, Permissions)]) -> GuildInfo {
@@ -386,8 +468,27 @@ mod tests {
     const GUILD: u64 = 100;
 
     fn calc(user: u64, roles: &[u64], guild: &GuildInfo, channel: &ChannelInfo) -> Permissions {
+        calc_for(user, roles, guild, channel, false, false)
+    }
+
+    fn calc_for(
+        user: u64,
+        roles: &[u64],
+        guild: &GuildInfo,
+        channel: &ChannelInfo,
+        in_thread: bool,
+        timed_out: bool,
+    ) -> Permissions {
         let roles: Vec<Id<RoleMarker>> = roles.iter().map(|id| Id::new(*id)).collect();
-        compute(Id::new(GUILD), Id::new(user), &roles, guild, channel)
+        compute(
+            Id::new(GUILD),
+            Id::new(user),
+            &roles,
+            guild,
+            channel,
+            in_thread,
+            timed_out,
+        )
     }
 
     #[test]
@@ -448,6 +549,98 @@ mod tests {
         let held = calc(2, &[200], &guild, &channel(vec![overwrite]));
         assert!(!held.contains(Permissions::MANAGE_MESSAGES));
         assert!(held.contains(Permissions::VIEW_CHANNEL));
+    }
+
+    #[test]
+    fn sending_in_parent_does_not_grant_dependent_permissions_inside_thread() {
+        let root = Permissions::VIEW_CHANNEL
+            | Permissions::SEND_MESSAGES
+            | Permissions::SEND_MESSAGES_IN_THREADS
+            | MESSAGE_DEPENDENT;
+        let guild = guild(1, &[(GUILD, root), (200, Permissions::empty())]);
+        let channel = channel(vec![PermissionOverwrite {
+            allow: Permissions::empty(),
+            deny: Permissions::SEND_MESSAGES_IN_THREADS,
+            id: Id::new(200),
+            kind: PermissionOverwriteType::Role,
+        }]);
+        assert!(calc(2, &[200], &guild, &channel).contains(MESSAGE_DEPENDENT));
+        let thread = calc_for(2, &[200], &guild, &channel, true, false);
+        assert!(thread.contains(Permissions::SEND_MESSAGES));
+        assert!(!thread.intersects(Permissions::SEND_MESSAGES_IN_THREADS | MESSAGE_DEPENDENT));
+    }
+
+    #[test]
+    fn thread_sending_uses_parent_overwrites_without_requiring_parent_sending() {
+        let root = Permissions::VIEW_CHANNEL
+            | Permissions::SEND_MESSAGES
+            | Permissions::SEND_MESSAGES_IN_THREADS
+            | MESSAGE_DEPENDENT;
+        let guild = guild(1, &[(GUILD, root), (200, Permissions::empty())]);
+        let channel = channel(vec![
+            PermissionOverwrite {
+                allow: Permissions::empty(),
+                deny: Permissions::SEND_MESSAGES | Permissions::EMBED_LINKS,
+                id: Id::new(200),
+                kind: PermissionOverwriteType::Role,
+            },
+            PermissionOverwrite {
+                allow: Permissions::empty(),
+                deny: Permissions::ATTACH_FILES,
+                id: Id::new(2),
+                kind: PermissionOverwriteType::Member,
+            },
+        ]);
+        assert!(!calc(2, &[200], &guild, &channel).intersects(MESSAGE_DEPENDENT));
+        let thread = calc_for(2, &[200], &guild, &channel, true, false);
+        assert!(thread.contains(Permissions::SEND_MESSAGES_IN_THREADS));
+        assert!(!thread.contains(Permissions::SEND_MESSAGES));
+        assert_eq!(
+            thread & MESSAGE_DEPENDENT,
+            Permissions::MENTION_EVERYONE | Permissions::SEND_TTS_MESSAGES,
+        );
+    }
+
+    #[test]
+    fn active_timeout_restricts_non_admins_until_strictly_before_expiry() {
+        let until = Timestamp::from_secs(100).unwrap();
+        let expiry = UNIX_EPOCH + Duration::from_secs(100);
+        let timed_out = timeout_active(until, expiry - Duration::from_micros(1));
+        assert!(timed_out);
+        assert!(!timeout_active(until, expiry));
+        assert!(!timeout_active(until, expiry + Duration::from_micros(1)));
+
+        let read_only = Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY;
+        let extra = Permissions::SEND_MESSAGES
+            | Permissions::SEND_MESSAGES_IN_THREADS
+            | Permissions::MANAGE_MESSAGES
+            | Permissions::BAN_MEMBERS
+            | MESSAGE_DEPENDENT;
+        let guild = guild(
+            1,
+            &[
+                (GUILD, read_only | extra),
+                (200, Permissions::ADMINISTRATOR),
+            ],
+        );
+        let channel = channel(Vec::new());
+        for in_thread in [false, true] {
+            assert_eq!(
+                calc_for(2, &[], &guild, &channel, in_thread, timed_out),
+                read_only
+            );
+            assert!(
+                calc_for(2, &[], &guild, &channel, in_thread, false).contains(read_only | extra)
+            );
+            assert_eq!(
+                calc_for(1, &[], &guild, &channel, in_thread, timed_out),
+                Permissions::all()
+            );
+            assert_eq!(
+                calc_for(2, &[200], &guild, &channel, in_thread, timed_out),
+                Permissions::all()
+            );
+        }
     }
 
     #[test]

@@ -30,6 +30,8 @@ async fn ban(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 メッセージには権限が付いていないため、Akari が Discord からサーバーとチャンネルの情報を取得して計算します（Twilight 公式の `twilight-util` の計算を使います）。ロールやチャンネルごとの上書きを反映し、サーバーのオーナーと管理者はすべての権限を持つものとして扱います。
 
+スレッドでは親チャンネルの上書きを使い、添付や埋め込みなどの権限はスレッドに投稿できるかも見て判定します。また、メッセージに有効なタイムアウトの期限が入っている場合、一般メンバーの権限を閲覧と履歴の読み取りに絞ります。
+
 ```rust
 use disnana_akari::model::guild::Permissions;
 use disnana_akari::{CommandContext, Result};

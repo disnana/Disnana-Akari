@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
 };
 use twilight_model::gateway::payload::incoming::{ChannelUpdate, RoleDelete};
 
@@ -98,6 +98,34 @@ async fn gateway_updates_refresh_only_the_needed_rest_entries() {
     .expect("permission checks and mock HTTP requests must complete");
 }
 
+#[tokio::test]
+async fn role_delete_during_rest_fetch_prevents_using_the_old_permissions() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http = Client::builder()
+        .proxy(listener.local_addr().unwrap().to_string(), true)
+        .build();
+    let resolver = PermissionResolver::new(Some(Duration::from_secs(60)));
+    let mut message = message();
+    message.channel_id = Id::new(11);
+    let server = async {
+        let request = read_request(&listener, "/guilds/10").await;
+        update_permission_cache(&resolver, &role_deleted(10));
+        write_response(request, &guild(Permissions::MANAGE_MESSAGES)).await;
+        reply(&listener, "/channels/11", &parent(false)).await;
+        reply(&listener, "/guilds/10", &guild(Permissions::empty())).await;
+    };
+    let commands = async {
+        let held = resolver.resolve(&http, &message).await.unwrap();
+        assert!(!held.contains(Permissions::MANAGE_MESSAGES));
+        assert_eq!(resolver.resolve(&http, &message).await.unwrap(), held);
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(commands, server);
+    })
+    .await
+    .expect("the retry and cache hit must complete");
+}
+
 fn role_deleted(guild: u64) -> Event {
     Event::RoleDelete(RoleDelete {
         guild_id: Id::new(guild),
@@ -157,6 +185,11 @@ fn parent(deny_manage: bool) -> Value {
 }
 
 async fn reply(listener: &TcpListener, expected_path: &str, body: &Value) {
+    let stream = read_request(listener, expected_path).await;
+    write_response(stream, body).await;
+}
+
+async fn read_request(listener: &TcpListener, expected_path: &str) -> BufReader<TcpStream> {
     let (stream, _) = listener.accept().await.unwrap();
     let mut stream = BufReader::new(stream);
     let mut line = String::new();
@@ -174,6 +207,10 @@ async fn reply(listener: &TcpListener, expected_path: &str, body: &Value) {
             break;
         }
     }
+    stream
+}
+
+async fn write_response(mut stream: BufReader<TcpStream>, body: &Value) {
     let body = body.to_string();
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
