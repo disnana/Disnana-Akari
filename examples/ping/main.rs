@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     let bot = if let Some(slash_commands) = slash_commands {
         // true の場合だけ、この Bot の指定サーバー向けコマンドをコードの一覧で置き換えます。
         let slash_commands = if replace_guild_commands {
-            slash_commands.replace_guild_commands()
+            slash_commands.replace_commands()
         } else {
             slash_commands
         };

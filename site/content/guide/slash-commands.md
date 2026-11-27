@@ -42,6 +42,28 @@ Bot::from_env()?
 > [!IMPORTANT]
 > スラッシュコマンドは **必ず応答** してください。ハンドラーが何も返信せずに終わると、Akari が「コマンドを処理できませんでした。」と（本人にだけ）返します。この文言は `Messages::slash_command_failed` で変えられます（[エラーと自動で送る文言](errors.md)）。
 
+## すべてのサーバーで使う（グローバルコマンド）
+
+`SlashCommands::for_guild` の代わりに `SlashCommands::global()` を使うと、Bot が入っているすべてのサーバーと DM でコマンドを使えます。Discord 側の反映に時間がかかることがあるため、開発中は `for_guild`、公開するときに `global` にするのがおすすめです。
+
+```rust
+use disnana_akari::{Bot, Result, SlashCommands, SlashContext};
+
+async fn ping(ctx: &mut SlashContext<'_>) -> Result<()> {
+    ctx.reply("Pong!").await
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
+    let mut slash = SlashCommands::global();
+    slash.register("ping", "Bot の応答を確認します", vec![], ping)?;
+
+    Bot::from_env()?.with_slash_commands(slash).start().await
+}
+```
+
+同じ Bot に、グローバルとサーバー限定のコマンドを同時には登録できません。
+
 ## 引数を受け取る
 
 引数の定義は、`register` の 3 番目の引数に渡します。文字列の引数は `SlashCommands::string_option` で作れます。
@@ -166,7 +188,7 @@ use disnana_akari::SlashCommands;
 use disnana_akari::model::id::Id;
 
 fn build() -> SlashCommands {
-    SlashCommands::for_guild(Id::new(123456789012345678)).replace_guild_commands()
+    SlashCommands::for_guild(Id::new(123456789012345678)).replace_commands()
 }
 ```
 

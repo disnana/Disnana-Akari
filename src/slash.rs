@@ -31,17 +31,33 @@ use crate::{
     ui::{ComponentsV2, Modal, UiMessage},
 };
 
-/// 一つのサーバーに登録するスラッシュコマンド一覧です。
+/// 一つのサーバー、またはアプリ全体に登録するスラッシュコマンド一覧です。
 pub struct SlashCommands {
-    guild_id: Id<GuildMarker>,
+    scope: Scope,
     entries: BTreeMap<String, Definition>,
     replace: bool,
+}
+
+/// コマンドを登録する範囲です。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Scope {
+    Guild(Id<GuildMarker>),
+    Global,
+}
+
+impl Scope {
+    fn guild_id(self) -> Option<Id<GuildMarker>> {
+        match self {
+            Self::Guild(guild_id) => Some(guild_id),
+            Self::Global => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for SlashCommands {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SlashCommands")
-            .field("guild_id", &self.guild_id)
+            .field("scope", &self.scope)
             .field("registered", &self.entries.keys().collect::<Vec<_>>())
             .field("replace", &self.replace)
             .finish()
@@ -51,18 +67,32 @@ impl std::fmt::Debug for SlashCommands {
 impl SlashCommands {
     /// 指定したサーバー向けに空の一覧を作ります。
     pub fn for_guild(guild_id: Id<GuildMarker>) -> Self {
+        Self::new(Scope::Guild(guild_id))
+    }
+
+    /// アプリ全体（すべてのサーバーと DM）向けに空の一覧を作ります。
+    ///
+    /// グローバルコマンドは、Discord 側で反映されるまでに時間がかかることがあります。
+    /// 開発中は [`for_guild`](Self::for_guild) のほうが、すぐに反映されて便利です。
+    /// 同じ Bot に、グローバルとサーバー限定を同時には登録できません。
+    pub fn global() -> Self {
+        Self::new(Scope::Global)
+    }
+
+    fn new(scope: Scope) -> Self {
         Self {
-            guild_id,
+            scope,
             entries: BTreeMap::new(),
             replace: false,
         }
     }
 
-    /// 起動時に、このアプリのサーバーコマンド一覧を登録済みの定義で置き換えます。
+    /// 起動時に、このアプリの同じ範囲（サーバー、またはグローバル）のコマンド一覧を、
+    /// 登録済みの定義で置き換えます。
     ///
     /// 一覧に含まれないスラッシュコマンドや、ユーザー・メッセージのコマンドも削除されます。
-    /// 空の一覧を指定した場合は、このアプリの対象サーバーのコマンドがすべて削除されます。
-    pub fn replace_guild_commands(mut self) -> Self {
+    /// 空の一覧を指定した場合は、その範囲のコマンドがすべて削除されます。
+    pub fn replace_commands(mut self) -> Self {
         self.replace = true;
         self
     }
@@ -164,25 +194,48 @@ impl SlashCommands {
         let client = http.interaction(application.id);
         let registered = if self.replace {
             let commands = self.replacement_commands()?;
-            client
-                .set_guild_commands(self.guild_id, &commands)
-                .await?
-                .models()
-                .await?
+            match self.scope {
+                Scope::Guild(guild_id) => {
+                    client
+                        .set_guild_commands(guild_id, &commands)
+                        .await?
+                        .models()
+                        .await?
+                }
+                Scope::Global => {
+                    client
+                        .set_global_commands(&commands)
+                        .await?
+                        .models()
+                        .await?
+                }
+            }
         } else {
             let mut registered = Vec::with_capacity(self.entries.len());
             for (name, definition) in &self.entries {
-                let command = client
-                    .create_guild_command(self.guild_id)
-                    .chat_input(name, &definition.description)
-                    .command_options(&definition.options)
-                    .await
-                    .map_err(|source| Error::CommandRegistration {
-                        name: name.clone(),
-                        source,
-                    })?
-                    .model()
-                    .await?;
+                let registration = |source| Error::CommandRegistration {
+                    name: name.clone(),
+                    source,
+                };
+                let command = match self.scope {
+                    Scope::Guild(guild_id) => {
+                        client
+                            .create_guild_command(guild_id)
+                            .chat_input(name, &definition.description)
+                            .command_options(&definition.options)
+                            .await
+                    }
+                    Scope::Global => {
+                        client
+                            .create_global_command()
+                            .chat_input(name, &definition.description)
+                            .command_options(&definition.options)
+                            .await
+                    }
+                }
+                .map_err(registration)?
+                .model()
+                .await?;
                 registered.push(command);
             }
             registered
@@ -191,7 +244,7 @@ impl SlashCommands {
         let count = registered.len();
         let active = self.bind(registered)?;
         info.report(InfoEvent::SlashCommandsSynced {
-            guild_id: active.guild_id,
+            guild_id: active.scope.guild_id(),
             count,
         });
         Ok(active)
@@ -255,7 +308,7 @@ impl SlashCommands {
         }
 
         Ok(ActiveSlashCommands {
-            guild_id: self.guild_id,
+            scope: self.scope,
             handlers,
         })
     }
@@ -268,7 +321,7 @@ struct Definition {
 }
 
 pub(crate) struct ActiveSlashCommands {
-    guild_id: Id<GuildMarker>,
+    scope: Scope,
     handlers: HashMap<Id<CommandMarker>, Box<dyn SlashHandler>>,
 }
 
@@ -278,17 +331,23 @@ impl ActiveSlashCommands {
     }
 
     fn command_data<'a>(&self, interaction: &'a Interaction) -> Option<&'a CommandData> {
-        if interaction.guild_id != Some(self.guild_id)
-            || interaction.kind != InteractionType::ApplicationCommand
-        {
+        if interaction.kind != InteractionType::ApplicationCommand {
             return None;
         }
         let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
             return None;
         };
-        let in_scope = match data.guild_id {
-            Some(guild_id) => guild_id == self.guild_id,
-            None => self.handlers.contains_key(&data.id),
+        let in_scope = match self.scope {
+            Scope::Guild(guild_id) => {
+                interaction.guild_id == Some(guild_id)
+                    && match data.guild_id {
+                        Some(command_guild) => command_guild == guild_id,
+                        None => self.handlers.contains_key(&data.id),
+                    }
+            }
+            // グローバルコマンドは、どのサーバーや DM からも呼ばれる。
+            // サーバー限定のコマンド（`data.guild_id` が `Some`）は対象にしない。
+            Scope::Global => data.guild_id.is_none() && self.handlers.contains_key(&data.id),
         };
         (data.kind == CommandType::ChatInput && in_scope).then_some(data)
     }
@@ -852,10 +911,13 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{
-        AllowedMentions, CommandOptionType, CommandType, Id, InitialResponse,
-        InteractionResponseType, MessageFlags, ReplyAction, ResponseState, Result, SlashCommands,
-        SlashContext, initial_response, v2_update_response,
+        ActiveSlashCommands, AllowedMentions, CommandOptionType, CommandType, GuildMarker, Id,
+        InitialResponse, Interaction, InteractionResponseType, MessageFlags, ReplyAction,
+        ResponseState, Result, Scope, SlashCommands, SlashContext, SlashHandler, initial_response,
+        v2_update_response,
     };
     use crate::ui::{Button, ComponentsV2, Embed, UiMessage};
 
@@ -888,6 +950,82 @@ mod tests {
             Some(MessageFlags::IS_COMPONENTS_V2)
         );
         assert!(ResponseState::ModalOpened.reply_action(false).is_err());
+    }
+
+    #[allow(deprecated)]
+    fn command_interaction(
+        interaction_guild: Option<Id<GuildMarker>>,
+        command_guild: Option<Id<GuildMarker>>,
+        command_id: u64,
+    ) -> Interaction {
+        use twilight_model::{
+            application::interaction::{
+                InteractionData, InteractionType, application_command::CommandData,
+            },
+            oauth::ApplicationIntegrationMap,
+        };
+        Interaction {
+            app_permissions: None,
+            application_id: Id::new(10),
+            attachment_size_limit: 0,
+            authorizing_integration_owners: ApplicationIntegrationMap {
+                guild: None,
+                user: None,
+            },
+            channel: None,
+            channel_id: None,
+            context: None,
+            data: Some(InteractionData::ApplicationCommand(Box::new(CommandData {
+                guild_id: command_guild,
+                id: Id::new(command_id),
+                kind: CommandType::ChatInput,
+                name: "ping".into(),
+                options: vec![],
+                resolved: None,
+                target_id: None,
+            }))),
+            entitlements: vec![],
+            guild: None,
+            guild_id: interaction_guild,
+            guild_locale: None,
+            id: Id::new(1),
+            kind: InteractionType::ApplicationCommand,
+            locale: None,
+            member: None,
+            message: None,
+            token: String::new(),
+            user: None,
+        }
+    }
+
+    fn active(scope: Scope) -> ActiveSlashCommands {
+        let mut handlers: HashMap<_, Box<dyn SlashHandler>> = HashMap::new();
+        handlers.insert(
+            Id::new(5),
+            Box::new(async |_: &mut SlashContext<'_>| -> Result<()> { Ok(()) }),
+        );
+        ActiveSlashCommands { scope, handlers }
+    }
+
+    #[test]
+    fn global_commands_accept_dms_and_any_guild_but_not_guild_only_commands() {
+        let global = active(Scope::Global);
+        let guild = Id::new(1);
+        assert!(global.accepts(&command_interaction(None, None, 5)));
+        assert!(global.accepts(&command_interaction(Some(guild), None, 5)));
+        // 登録していない ID や、サーバー限定のコマンドは受け付けない。
+        assert!(!global.accepts(&command_interaction(None, None, 6)));
+        assert!(!global.accepts(&command_interaction(Some(guild), Some(guild), 5)));
+    }
+
+    #[test]
+    fn guild_commands_only_accept_their_own_guild() {
+        let guild = Id::new(1);
+        let scoped = active(Scope::Guild(guild));
+        assert!(scoped.accepts(&command_interaction(Some(guild), None, 5)));
+        assert!(!scoped.accepts(&command_interaction(None, None, 5)));
+        assert!(!scoped.accepts(&command_interaction(Some(Id::new(2)), None, 5)));
+        assert!(!scoped.accepts(&command_interaction(Some(guild), Some(Id::new(2)), 6)));
     }
 
     #[test]
@@ -933,7 +1071,7 @@ mod tests {
     }
 
     fn two_commands() -> Result<SlashCommands> {
-        let mut slash = SlashCommands::for_guild(Id::new(1)).replace_guild_commands();
+        let mut slash = SlashCommands::for_guild(Id::new(1)).replace_commands();
         slash.register("echo", "echo text", vec![], handler)?;
         slash.register("ping", "return pong", vec![], handler)?;
         Ok(slash)
@@ -941,7 +1079,7 @@ mod tests {
 
     #[test]
     fn replacement_binds_ids_by_name_and_accepts_empty_registry() -> Result<()> {
-        let empty = SlashCommands::for_guild(Id::new(1)).replace_guild_commands();
+        let empty = SlashCommands::for_guild(Id::new(1)).replace_commands();
         assert!(empty.replacement_commands()?.is_empty());
         assert!(empty.bind(Vec::new())?.handlers.is_empty());
 

@@ -86,7 +86,8 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | メソッド | 動作 |
 | --- | --- |
 | `SlashCommands::for_guild(guild_id) -> SlashCommands` | Discord のサーバー ID を指定して空のコマンド一覧を作ります。ID の型は `Id<GuildMarker>` です。 |
-| `commands.replace_guild_commands() -> SlashCommands` | 起動時に、このアプリのサーバー内の全コマンドを登録した一覧に一括で置き換えます。 |
+| `SlashCommands::global() -> SlashCommands` | アプリ全体（すべてのサーバーと DM）向けに空のコマンド一覧を作ります。Discord 側の反映に時間がかかることがあります。 |
+| `commands.replace_commands() -> SlashCommands` | 起動時に、このアプリの同じ範囲（サーバー、またはグローバル）の全コマンドを、登録した一覧に一括で置き換えます。 |
 | `commands.register(name, description, options, handler) -> Result<()>` | 表示名、説明、引数の定義、呼び出す非同期関数を登録します。Discord の名前や説明の制約、重複名を検証します。 |
 | `SlashCommands::string_option(name, description, required) -> CommandOption` | 文字列引数を定義します。`required` が `true` なら Discord の入力欄で必須になります。 |
 | `ctx.option(name) -> Option<&CommandOptionValue>` | 指定した名前の引数を Twilight の値として借ります。 |
@@ -110,7 +111,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 
 既定の起動では、同名のスラッシュコマンドを追加または更新し、ほかの既存コマンドを保持します。Akari に登録していないサーバー限定のスラッシュコマンドを受信した場合は、`on_error` に報告し、`Messages::slash_command_unavailable`（既定は「このコマンドは現在利用できません。」）を本人にだけ返します。
 
-`replace_guild_commands()` を指定すると、登録一覧に含まれないコマンドが対象サーバーから削除されます。削除の範囲は同じアプリ・同じサーバーの全アプリケーションコマンドで、ユーザーやメッセージを右クリックして実行するコマンドも対象です。空の一覧で一括同期すると対象の全コマンドが削除されます。[Discord のサーバー単位の一括上書き](https://docs.discord.com/developers/interactions/application-commands#bulk-overwrite-guild-application-commands)
+`replace_commands()` を指定すると、登録一覧に含まれないコマンドが対象サーバーから削除されます。削除の範囲は同じアプリ・同じサーバーの全アプリケーションコマンドで、ユーザーやメッセージを右クリックして実行するコマンドも対象です。空の一覧で一括同期すると対象の全コマンドが削除されます。[Discord のサーバー単位の一括上書き](https://docs.discord.com/developers/interactions/application-commands#bulk-overwrite-guild-application-commands)
 
 ### 時間がかかる処理に応答する
 
@@ -312,7 +313,7 @@ async fn submit(ctx: &mut ModalContext<'_>) -> Result<()> {
 | --- | --- |
 | `GatewayReady` | Gateway で新しいセッションが準備できたとき |
 | `GatewayResumed` | 既存の Gateway セッションを再開したとき |
-| `SlashCommandsSynced` | Discord への同期が成功したとき。サーバー ID と今回同期したコマンド数を渡します |
+| `SlashCommandsSynced` | Discord への同期が成功したとき。サーバー ID（グローバルは `None`）と今回同期したコマンド数を渡します |
 | `InteractionResponded` | Akari 経由の初回応答を Discord が受け付けたとき。遅延応答、フォーム表示、混雑時の初回返信も含みます |
 
 `InteractionResponded` の `elapsed` は、Akari が Gateway イベントを受信してから REST 応答を受け取るまでの時間です。`rest_elapsed` はそのうち初回応答の REST リクエストにかかった時間で、レート制限による待ち時間を含みます。後続の更新や追加メッセージ、`ctx.http()` から直接送った応答は計測の対象外です。

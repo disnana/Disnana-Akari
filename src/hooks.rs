@@ -185,11 +185,11 @@ pub enum InfoEvent {
     GatewayReady,
     /// Gateway で既存のセッションを再開しました。
     GatewayResumed,
-    /// サーバー向けスラッシュコマンドの同期が完了しました。
+    /// スラッシュコマンドの同期が完了しました。
     #[non_exhaustive]
     SlashCommandsSynced {
-        /// 同期先のサーバーです。
-        guild_id: Id<GuildMarker>,
+        /// 同期先のサーバーです。グローバルコマンドの場合は `None` です。
+        guild_id: Option<Id<GuildMarker>>,
         /// 今回の同期で確認したコマンド数です。
         count: usize,
     },
