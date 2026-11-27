@@ -63,6 +63,7 @@ export default defineConfig({
           { text: 'イベントを受け取る', link: '/guide/events' },
           { text: '応答のしかた', link: '/guide/responding' },
           { text: 'エラーと自動で送る文言', link: '/guide/errors' },
+          { text: 'ログを出す', link: '/guide/logging' },
           { text: 'Embed とボタン', link: '/guide/buttons' },
           { text: '選択メニュー', link: '/guide/select-menus' },
           { text: '入力フォーム（モーダル）', link: '/guide/modals' },

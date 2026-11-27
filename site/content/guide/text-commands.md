@@ -116,7 +116,7 @@ fn register(commands: &mut Commands) -> Result<()> {
 
 ## エラーが起きたとき
 
-コマンド関数が `Err` を返すと、Akari はエラーを `Bot::on_error` に報告します（設定していなければ、標準エラー出力に書きます）。元のメッセージへの返信は、既定では **しません**。返信したいときは、`Messages::text_command_failed` に文言を設定します（[エラーと自動で送る文言](errors.md)）。利用者に見せたい説明は、`Err` を返さず、自分で返信するのが確実です。
+コマンド関数が `Err` を返すと、Akari はエラーを `Bot::on_error` に報告し、`tracing` のログにも出します（[ログを出す](logging.md)）。元のメッセージへの返信は、既定では **しません**。返信したいときは、`Messages::text_command_failed` に文言を設定します（[エラーと自動で送る文言](errors.md)）。利用者に見せたい説明は、`Err` を返さず、自分で返信するのが確実です。
 
 ## 次のステップ
 

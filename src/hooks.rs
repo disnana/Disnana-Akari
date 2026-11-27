@@ -153,7 +153,7 @@ impl Default for Messages {
     }
 }
 
-/// エラーの報告先です。フックが未設定のときは、標準エラー出力に書きます。
+/// エラーの報告先です。`tracing` のイベントとして発行し、フックが設定されていれば、フックにも渡します。
 #[derive(Clone, Default)]
 pub(crate) struct Reporter {
     hook: Option<Arc<ErrorHook>>,
@@ -172,9 +172,9 @@ impl Reporter {
             name,
             error,
         };
-        match &self.hook {
-            Some(hook) => hook(&report),
-            None => write_stderr(&report),
+        emit_error(&report);
+        if let Some(hook) = &self.hook {
+            hook(&report);
         }
     }
 
@@ -227,7 +227,13 @@ impl InfoReporter {
         self.0.is_some()
     }
 
+    /// 応答にかかった時間を測る必要があるか。フックがあるか、デバッグのログが有効なときだけ測る。
+    pub(crate) fn measures_timing(&self) -> bool {
+        self.has_hook() || tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG)
+    }
+
     pub(crate) fn report(&self, event: InfoEvent) {
+        emit_info(&event);
         if let Some(hook) = &self.0 {
             hook(&event);
         }
@@ -242,13 +248,55 @@ pub(crate) struct Hooks {
     pub(crate) messages: Messages,
 }
 
-/// `Bot::on_error` が未設定のときの既定の出力先。
-#[allow(
-    clippy::print_stderr,
-    reason = "既定の出力先として、標準エラー出力に書く。ライブラリが出力するのは、ここだけ。"
-)]
-fn write_stderr(report: &ErrorReport<'_>) {
-    eprintln!("[akari] {report}");
+/// ログのイベントの `target`。利用者は、これでフィルターできる（例: `RUST_LOG=disnana_akari=info`）。
+const LOG_TARGET: &str = "disnana_akari";
+
+/// エラーを、`tracing` のイベントとして発行する。出力先は、利用者が購読先で決める。
+fn emit_error(report: &ErrorReport<'_>) {
+    let source = report.source.label();
+    let name = report.name.unwrap_or_default();
+    match report.source {
+        // 処理を捨てたことや、自動の応答の失敗は、続行できる問題として警告にする。
+        ErrorSource::QueueFull | ErrorSource::Response => {
+            tracing::warn!(target: LOG_TARGET, source, name, "{report}");
+        }
+        _ => tracing::error!(target: LOG_TARGET, source, name, "{report}"),
+    }
+}
+
+/// 実行時の情報を、`tracing` のイベントとして発行する。
+fn emit_info(event: &InfoEvent) {
+    match event {
+        InfoEvent::GatewayReady => {
+            tracing::info!(target: LOG_TARGET, "Gateway のセッションが準備できました");
+        }
+        InfoEvent::GatewayResumed => {
+            tracing::info!(target: LOG_TARGET, "Gateway のセッションを再開しました");
+        }
+        InfoEvent::SlashCommandsSynced { guild_id, count } => {
+            tracing::info!(
+                target: LOG_TARGET,
+                guild_id = guild_id.map(|id| id.get()),
+                count,
+                "スラッシュコマンドを同期しました"
+            );
+        }
+        InfoEvent::InteractionResponded {
+            interaction_type,
+            response_type,
+            elapsed,
+            rest_elapsed,
+        } => {
+            tracing::debug!(
+                target: LOG_TARGET,
+                interaction_type = ?interaction_type,
+                response_type = ?response_type,
+                elapsed_ms = elapsed.as_millis() as u64,
+                rest_elapsed_ms = rest_elapsed.as_millis() as u64,
+                "Interaction に初回応答しました"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -294,6 +342,107 @@ mod tests {
             report.to_string(),
             "ボタン `akari:demo`: 失敗しました: 本当の理由"
         );
+    }
+
+    /// 発行されたイベントを集めるだけの購読先。テストで、依存を増やさずにログを確かめる。
+    mod capture {
+        use std::{
+            fmt,
+            sync::{Arc, Mutex},
+        };
+
+        use tracing::{
+            Event, Level, Metadata, Subscriber,
+            field::{Field, Visit},
+            span::{Attributes, Id, Record},
+        };
+
+        pub(super) type Seen = Arc<Mutex<Vec<(Level, String, String)>>>;
+
+        pub(super) struct Capture(pub(super) Seen);
+
+        struct Message(String, Vec<String>);
+
+        impl Visit for Message {
+            fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                } else {
+                    self.1.push(format!("{}={value:?}", field.name()));
+                }
+            }
+        }
+
+        impl Subscriber for Capture {
+            fn enabled(&self, _: &Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+            fn record(&self, _: &Id, _: &Record<'_>) {}
+            fn record_follows_from(&self, _: &Id, _: &Id) {}
+            fn event(&self, event: &Event<'_>) {
+                let mut message = Message(String::new(), Vec::new());
+                event.record(&mut message);
+                self.0.lock().unwrap().push((
+                    *event.metadata().level(),
+                    event.metadata().target().to_owned(),
+                    format!("{} [{}]", message.0, message.1.join(", ")),
+                ));
+            }
+            fn enter(&self, _: &Id) {}
+            fn exit(&self, _: &Id) {}
+        }
+    }
+
+    #[test]
+    fn errors_and_info_are_emitted_as_tracing_events_at_matching_levels() {
+        use std::sync::{Arc, Mutex};
+
+        use tracing::Level;
+
+        use super::{InfoEvent, InfoReporter};
+
+        let seen: capture::Seen = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(capture::Capture(Arc::clone(&seen)), || {
+            // フックがなくても、ログには出る（出力先は、購読先が決める）。
+            let reporter = Reporter::default();
+            reporter.report(
+                ErrorSource::Button,
+                Some("akari:demo"),
+                &Error::msg("壊れました"),
+            );
+            reporter.report(ErrorSource::QueueFull, Some("READY"), &Error::GatewayEnded);
+            let info = InfoReporter::default();
+            info.report(InfoEvent::GatewayReady);
+            info.report(InfoEvent::SlashCommandsSynced {
+                guild_id: None,
+                count: 3,
+            });
+        });
+
+        let seen = seen.lock().unwrap();
+        let levels: Vec<_> = seen.iter().map(|(level, ..)| *level).collect();
+        assert_eq!(
+            levels,
+            [Level::ERROR, Level::WARN, Level::INFO, Level::INFO]
+        );
+        assert!(seen.iter().all(|(_, target, _)| target == "disnana_akari"));
+        assert!(
+            seen[0].2.contains("ボタン `akari:demo`: 壊れました"),
+            "{}",
+            seen[0].2
+        );
+        assert!(seen[0].2.contains("source=\"ボタン\""), "{}", seen[0].2);
+        assert!(seen[3].2.contains("count=3"), "{}", seen[3].2);
+    }
+
+    #[test]
+    fn nothing_is_written_when_no_subscriber_is_set() {
+        // 購読先がなければ、イベントは捨てられる。パニックもしない。
+        Reporter::default().report(ErrorSource::Gateway, None, &Error::GatewayEnded);
+        super::InfoReporter::default().report(super::InfoEvent::GatewayResumed);
     }
 
     #[test]

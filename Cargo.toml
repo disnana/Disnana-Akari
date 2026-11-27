@@ -20,6 +20,7 @@ http-types = { package = "http", version = "1" }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "sync", "time"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 twilight-gateway = "0.18"
 twilight-http = "0.18"
 twilight-model = "0.18"

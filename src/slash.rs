@@ -1540,7 +1540,7 @@ impl InitialResponder<'_> {
     }
 
     pub(crate) async fn send(self, response: &InteractionResponse) -> Result<()> {
-        let started_at = self.info.has_hook().then(Instant::now);
+        let started_at = self.info.measures_timing().then(Instant::now);
         self.http
             .interaction(self.interaction.application_id)
             .create_response(self.interaction.id, &self.interaction.token, response)

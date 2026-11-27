@@ -183,8 +183,9 @@ impl Bot {
     /// エラーを受け取る関数を設定します。
     ///
     /// ハンドラーが返したエラー、Gateway の切断や受信エラー、処理枠が満杯でイベントを捨てたことなどを、
-    /// 一件ずつ [`ErrorReport`] で受け取ります。設定すると、Akari は標準エラー出力へは書きません。
-    /// 設定しない場合は、これらを `[akari] ...` の形で標準エラー出力に書きます。
+    /// 一件ずつ [`ErrorReport`] で受け取ります。コードで反応するための関数です。
+    /// Akari は、標準出力にも標準エラー出力にも書きません。ログとしては、同じ内容を `tracing` の
+    /// イベント（`target` は `disnana_akari`）で発行します。この関数を設定しても、ログは変わりません。
     ///
     /// 関数は処理の途中で同期的に呼ばれます。短く保ち、`panic` しないでください。
     /// 重い処理や非同期の処理は、チャンネルへ送るなどして、別のタスクで行います。
@@ -262,7 +263,7 @@ impl Bot {
     /// Discord に接続し、人がサーバーで送った新着メッセージを順に処理します。
     ///
     /// Tokio ランタイム内で呼び出してください。Bot や Webhook によるメッセージは
-    /// ハンドラーに渡しません。ハンドラーのエラーは標準エラー出力に記録して処理を続けます。
+    /// ハンドラーに渡しません。ハンドラーのエラーは `tracing` のログと `on_error` に報告して、処理を続けます。
     /// 受信とハンドラーは協調的に進みます。ブロッキング処理や長い計算は分離してください。
     ///
     /// # エラー
@@ -336,10 +337,8 @@ impl Bot {
 
         let http = Client::new(token.clone());
         let permissions = PermissionResolver::new(permission_cache);
-        let mut event_types = EventTypeFlags::READY;
-        if hooks.info.has_hook() || presence.is_some() {
-            event_types |= EventTypeFlags::RESUMED;
-        }
+        // 再開は、ログ（`tracing`）にも出すので、フックの有無にかかわらず受け取る。
+        let mut event_types = EventTypeFlags::READY | EventTypeFlags::RESUMED;
 
         let slash = match slash {
             Some(commands) => {
