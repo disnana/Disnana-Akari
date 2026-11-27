@@ -130,12 +130,11 @@ impl Needs {
     /// 指定したコマンド（とその配下）だけで、確認を行うチェックにする。
     pub(crate) fn into_check(self, command: Vec<String>) -> CommandCheck {
         CommandCheck::new(async move |ctx: CommandCheckContext<'_>| {
-            let path: Vec<&str> = ctx.command_path().collect();
-            let applies = path.len() >= command.len()
-                && path
-                    .iter()
-                    .zip(&command)
-                    .all(|(given, wanted)| given == wanted);
+            // 割り当てなしで、宣言した経路が、呼ばれた経路の先頭と一致するか（配下を含む）。
+            let mut path = ctx.command_path();
+            let applies = command
+                .iter()
+                .all(|wanted| path.next().is_some_and(|given| given == wanted));
             if applies {
                 self.verify(&ctx.access()).await
             } else {

@@ -383,8 +383,8 @@ impl Commands {
         hooks
             .reporter
             .report(ErrorSource::TextCommand, name, &error);
-        let text = if matches!(error, Error::Check(_)) {
-            &hooks.messages.check_failed
+        let text = if let Error::Check(failure) = &error {
+            hooks.messages.for_check(failure)
         } else {
             &hooks.messages.text_command_failed
         };

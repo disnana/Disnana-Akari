@@ -1506,20 +1506,18 @@ impl ActiveSlashCommands {
             response_state: &mut response_state,
         };
         let result = self.call_command(&mut ctx, route, path, handler).await;
-        let check_failed = match result {
-            Ok(()) => false,
+        let (check_failed, failed_text) = match result {
+            Ok(()) => (false, &hooks.messages.slash_command_failed),
             Err(error) => {
                 report_command_error(hooks, ErrorSource::SlashCommand, data, &error);
                 if *ctx.response_state == ResponseState::Pending && callback_unavailable(&error) {
                     return;
                 }
-                matches!(error, Error::Check(_))
+                match &error {
+                    Error::Check(failure) => (true, hooks.messages.for_check(failure)),
+                    _ => (false, &hooks.messages.slash_command_failed),
+                }
             }
-        };
-        let failed_text = if check_failed {
-            &hooks.messages.check_failed
-        } else {
-            &hooks.messages.slash_command_failed
         };
         // 応答が済んでいない（エラー、または応答の忘れ）ときは、文言が設定されていれば知らせる。
         let Some(text) = failed_text else {
