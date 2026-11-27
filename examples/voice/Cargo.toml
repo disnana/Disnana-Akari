@@ -8,7 +8,11 @@ publish = false
 [dependencies]
 async-trait = "0.1"
 disnana-akari = { path = "../.." }
+flacenc = { version = "=0.5.1", default-features = false }
 # Songbird 0.6.1 の receive が使う dashmap は gateway で有効になります。
 songbird = { version = "=0.6.1", default-features = false, features = ["driver", "gateway", "receive", "rustls", "tws"] }
 symphonia = { version = "0.5", default-features = false, features = ["pcm", "wav"] }
 tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+
+[dev-dependencies]
+symphonia = { version = "0.5", default-features = false, features = ["flac"] }

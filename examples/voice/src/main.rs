@@ -25,8 +25,10 @@ use tokio::{
 };
 
 mod control;
+mod flac;
 mod manual;
 mod multitrack;
+mod playback;
 mod receive;
 mod speaker;
 

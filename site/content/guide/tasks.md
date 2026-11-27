@@ -153,7 +153,7 @@ cargo run --locked --manifest-path examples/voice/Cargo.toml
 
 再割り当て時は新しい音声サーバーへ接続し直します。録音は受信処理からファイル書き出しを分け、キューが満杯なら破棄したフレーム数を記録します。Ctrl+C で停止し、録音していれば WAV を確定します。[Songbird の音声ドライバー実装](https://github.com/serenity-rs/songbird/blob/v0.6.1/src/driver/mod.rs)
 
-音声を Discord のコマンドから操作するには、`AKARI_VOICE_RECORD_DIR` にローカルの録音先を設定します。参加先を省略して `/vc-join` を呼ぶと、自分が参加中の VC に Bot が接続します。`/vc-record` で録音を始め、`/vc-stop` で実行先のチャンネルに WAV を投稿し、`/vc-leave` で退出します。このサンプルでは WAV を 10 MiB までに制限します。[Discord の音声状態取得 API](https://docs.discord.com/developers/resources/voice#get-user-voice-state)
+音声を Discord のコマンドから操作するには、`AKARI_VOICE_RECORD_DIR` にローカルの録音先を設定します。参加先を省略して `/vc-join` を呼ぶと、自分が参加中の VC に Bot が接続します。 `/vc-playtest` で短い2音を再生できます。`/vc-record` で録音を始め、`format:FLAC` を選ぶとロスレス圧縮で保存できます。`/vc-stop` で実行先のチャンネルに録音を投稿し、`/vc-leave` で退出します。このサンプルでは合計 10 MiB、最長5分まで録音できます。[Discord の音声状態取得 API](https://docs.discord.com/developers/resources/voice#get-user-voice-state)
 
 ## シャード別の状態と RTT を監視する
 

@@ -7,6 +7,7 @@ use disnana_akari::{
     Result, SlashCommands, SlashContext,
     http::{error::ErrorType, response::StatusCode},
     model::{
+        application::command::{CommandOptionChoice, CommandOptionChoiceValue},
         application::interaction::application_command::CommandOptionValue,
         channel::{ChannelType, message::AllowedMentions},
         guild::Permissions,
@@ -25,15 +26,15 @@ use tokio::{
     time::timeout,
 };
 
-use super::multitrack::TrackFile;
+use super::multitrack::{Format, TrackFile};
 
 pub(super) const MAX_UPLOAD_BYTES: u32 = 10 * 1024 * 1024;
 pub(super) const MAX_RECORD_USERS: usize = 4;
 const USER_OPTIONS: [&str; MAX_RECORD_USERS] = ["user1", "user2", "user3", "user4"];
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(70);
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_FAILED: &str = "録音を停止しました。WAV を読み取れませんでした。ディスク録音は保存先に残ります。メモリ録音にはローカルファイルがありません。";
-const TOO_LARGE: &str = "録音を停止しました。WAV の合計が送信上限の 10 MiB を超えました。ディスク録音は保存先に残ります。メモリ録音にはローカルファイルがありません。";
+const READ_FAILED: &str = "録音を停止しました。録音ファイル を読み取れませんでした。ディスク録音は保存先に残ります。メモリ録音にはローカルファイルがありません。";
+const TOO_LARGE: &str = "録音を停止しました。録音ファイル の合計が送信上限の 10 MiB を超えました。ディスク録音は保存先に残ります。メモリ録音にはローカルファイルがありません。";
 
 type ControlResult<T> = std::result::Result<T, &'static str>;
 
@@ -44,9 +45,11 @@ pub(super) enum Control {
     },
     Record {
         channel: Id<ChannelMarker>,
-        mix: bool,
-        users: Vec<Id<UserMarker>>,
-        memory: bool,
+        options: RecordingOptions,
+        reply: oneshot::Sender<&'static str>,
+    },
+    PlayTest {
+        channel: Id<ChannelMarker>,
         reply: oneshot::Sender<&'static str>,
     },
     Stop {
@@ -57,14 +60,36 @@ pub(super) enum Control {
     },
 }
 
+#[derive(Clone, Copy)]
+enum CommandMode {
+    Join,
+    Record,
+    PlayTest,
+}
+
+impl CommandMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Join => "vc-join",
+            Self::Record => "vc-record",
+            Self::PlayTest => "vc-playtest",
+        }
+    }
+}
+
 pub(super) fn commands(guild: Id<GuildMarker>) -> Result<(SlashCommands, mpsc::Receiver<Control>)> {
     let (sender, receiver) = mpsc::channel(1);
     let mut commands = SlashCommands::for_guild(guild);
 
-    for (name, description, record) in [
-        ("vc-join", "ボイスチャンネルに参加します", false),
-        ("vc-record", "ボイスチャンネルの録音を開始します", true),
+    for (mode, description) in [
+        (CommandMode::Join, "ボイスチャンネルに参加します"),
+        (CommandMode::Record, "ボイスチャンネルの録音を開始します"),
+        (
+            CommandMode::PlayTest,
+            "ボイスチャンネルで短いテスト音を再生します",
+        ),
     ] {
+        let name = mode.label();
         let sender = sender.clone();
         let mut channel = SlashCommands::channel_option(
             "channel",
@@ -73,7 +98,7 @@ pub(super) fn commands(guild: Id<GuildMarker>) -> Result<(SlashCommands, mpsc::R
         );
         channel.channel_types = Some(vec![ChannelType::GuildVoice]);
         let mut options = vec![channel];
-        if record {
+        if matches!(mode, CommandMode::Record) {
             options.extend(USER_OPTIONS.iter().enumerate().map(|(index, name)| {
                 SlashCommands::user_option(
                     name,
@@ -91,19 +116,31 @@ pub(super) fn commands(guild: Id<GuildMarker>) -> Result<(SlashCommands, mpsc::R
                 "メモリに録音します（既定はディスクに保存）",
                 false,
             ));
+            let mut format =
+                SlashCommands::string_option("format", "保存形式（既定は WAV）", false);
+            format.choices = Some(
+                ["WAV", "FLAC"]
+                    .map(|name| CommandOptionChoice {
+                        name: name.into(),
+                        name_localizations: None,
+                        value: CommandOptionChoiceValue::String(name.to_ascii_lowercase()),
+                    })
+                    .to_vec(),
+            );
+            options.push(format);
         }
         commands.register_with_permissions(
             name,
             description,
             options,
             Permissions::MANAGE_GUILD,
-            async move |ctx: &mut SlashContext<'_>| join(ctx, &sender, record).await,
+            async move |ctx: &mut SlashContext<'_>| join(ctx, &sender, mode).await,
         )?;
     }
     let stop_sender = sender.clone();
     commands.register_with_permissions(
         "vc-stop",
-        "録音を終了して、このチャンネルに WAV を送信します",
+        "録音を終了して、このチャンネルに 録音ファイル を送信します",
         vec![],
         Permissions::MANAGE_GUILD,
         async move |ctx: &mut SlashContext<'_>| stop(ctx, &stop_sender).await,
@@ -126,9 +163,9 @@ pub(super) fn commands(guild: Id<GuildMarker>) -> Result<(SlashCommands, mpsc::R
 async fn join(
     ctx: &mut SlashContext<'_>,
     sender: &mpsc::Sender<Control>,
-    record: bool,
+    mode: CommandMode,
 ) -> Result<()> {
-    let recording = if record {
+    let recording = if matches!(mode, CommandMode::Record) {
         match record_options(|name| ctx.option(name)) {
             Ok(options) => Some(options),
             Err(message) => return ctx.reply_ephemeral(message).await,
@@ -136,7 +173,7 @@ async fn join(
     } else {
         None
     };
-    defer_control(ctx, if record { "vc-record" } else { "vc-join" }).await?;
+    defer_control(ctx, mode.label()).await?;
     let channel = match timeout(LOOKUP_TIMEOUT, target_channel(ctx)).await {
         Ok(Ok(channel)) => channel,
         Ok(Err(message)) => return ctx.reply_ephemeral(message).await,
@@ -147,14 +184,14 @@ async fn join(
         }
     };
     let reply = request(sender, |reply| {
-        if let Some(RecordingOptions { mix, users, memory }) = recording {
+        if let Some(options) = recording {
             Control::Record {
                 channel,
-                mix,
-                users,
-                memory,
+                options,
                 reply,
             }
+        } else if matches!(mode, CommandMode::PlayTest) {
+            Control::PlayTest { channel, reply }
         } else {
             Control::Join { channel, reply }
         }
@@ -165,10 +202,11 @@ async fn join(
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct RecordingOptions {
-    mix: bool,
-    users: Vec<Id<UserMarker>>,
-    memory: bool,
+pub(super) struct RecordingOptions {
+    pub(super) mix: bool,
+    pub(super) users: Vec<Id<UserMarker>>,
+    pub(super) memory: bool,
+    pub(super) format: Format,
 }
 
 fn record_options<'a>(
@@ -184,6 +222,12 @@ fn record_options<'a>(
         None => false,
         Some(_) => return Err("memory には true または false を指定してください。"),
     };
+    let format = match option("format") {
+        Some(CommandOptionValue::String(value)) if value == "flac" => Format::Flac,
+        Some(CommandOptionValue::String(value)) if value == "wav" => Format::Wav,
+        None => Format::Wav,
+        Some(_) => return Err("format には WAV または FLAC を指定してください。"),
+    };
     let mut users = Vec::new();
     for name in USER_OPTIONS {
         match option(name) {
@@ -198,7 +242,12 @@ fn record_options<'a>(
     if !mix && users.is_empty() {
         return Err("mix を無効にする場合は、録音するユーザーを選択してください。");
     }
-    Ok(RecordingOptions { mix, users, memory })
+    Ok(RecordingOptions {
+        mix,
+        users,
+        memory,
+        format,
+    })
 }
 
 async fn target_channel(ctx: &SlashContext<'_>) -> ControlResult<Id<ChannelMarker>> {
@@ -282,7 +331,7 @@ async fn defer_control(ctx: &mut SlashContext<'_>, operation: &'static str) -> R
 async fn stop(ctx: &mut SlashContext<'_>, sender: &mpsc::Sender<Control>) -> Result<()> {
     let Some(channel) = ctx.channel_id() else {
         return ctx
-            .reply_ephemeral("WAV を送信するチャンネルを確認できませんでした。")
+            .reply_ephemeral("録音ファイル を送信するチャンネルを確認できませんでした。")
             .await;
     };
     defer_control(ctx, "vc-stop").await?;
@@ -311,9 +360,9 @@ async fn upload_recordings(
         .allowed_mentions(Some(&AllowedMentions::default()))
         .await
         .map_err(
-            |_| "録音を停止しました。WAV をチャンネルに送れませんでした。ディスク録音は保存先に残ります。メモリ録音にはローカルファイルがありません。",
+            |_| "録音を停止しました。録音ファイル をチャンネルに送れませんでした。ディスク録音は保存先に残ります。メモリ録音にはローカルファイルがありません。",
         )?;
-    Ok("録音を停止し、このチャンネルに WAV を送信しました。")
+    Ok("録音を停止し、このチャンネルに 録音ファイル を送信しました。")
 }
 
 struct RecordingFile {
@@ -410,16 +459,17 @@ async fn open_recording(path: &Path) -> ControlResult<RecordingFile> {
 }
 
 fn valid_recording_name(name: &str) -> bool {
-    if name == "mix.wav" {
+    let Some((stem, "wav" | "flac")) = name.rsplit_once('.') else {
+        return false;
+    };
+    if stem == "mix" {
         return true;
     }
-    name.strip_prefix("user-")
-        .and_then(|rest| rest.strip_suffix(".wav"))
-        .is_some_and(|user| {
-            !user.starts_with('0')
-                && user.bytes().all(|b| b.is_ascii_digit())
-                && user.parse::<u64>().is_ok()
-        })
+    stem.strip_prefix("user-").is_some_and(|user| {
+        !user.starts_with('0')
+            && user.bytes().all(|b| b.is_ascii_digit())
+            && user.parse::<u64>().is_ok()
+    })
 }
 
 #[cfg(test)]
@@ -433,16 +483,19 @@ mod tests {
             Ok(RecordingOptions {
                 mix: true,
                 users: vec![],
-                memory: false
+                memory: false,
+                format: Format::Wav,
             })
         );
         let disabled = CommandOptionValue::Boolean(false);
         let enabled = CommandOptionValue::Boolean(true);
+        let flac = CommandOptionValue::String("flac".into());
         let one = CommandOptionValue::User(Id::new(7));
         let two = CommandOptionValue::User(Id::new(9));
         let result = record_options(|name| match name {
             "mix" => Some(&disabled),
             "memory" => Some(&enabled),
+            "format" => Some(&flac),
             "user2" => Some(&two),
             "user4" => Some(&one),
             _ => None,
@@ -452,7 +505,8 @@ mod tests {
             Ok(RecordingOptions {
                 mix: false,
                 users: vec![Id::new(9), Id::new(7)],
-                memory: true
+                memory: true,
+                format: Format::Flac,
             })
         );
         assert!(record_options(|name| (name == "mix").then_some(&disabled)).is_err());
@@ -473,7 +527,7 @@ mod tests {
         let original = bytes.as_ptr();
         let uploads = load_recordings(vec![
             memory("mix.wav", bytes),
-            memory("user-7.wav", vec![4]),
+            memory("user-7.flac", vec![4]),
         ])
         .await
         .unwrap();
@@ -482,7 +536,7 @@ mod tests {
                 .iter()
                 .map(|file| (&*file.filename, file.id))
                 .collect::<Vec<_>>(),
-            [("mix.wav", 0), ("user-7.wav", 1)]
+            [("mix.wav", 0), ("user-7.flac", 1)]
         );
         assert_eq!(uploads[0].file.as_ptr(), original);
         for invalid in [
@@ -490,7 +544,7 @@ mod tests {
             "user-0.wav",
             "user-07.wav",
             "user-18446744073709551616.wav",
-            "mix.flac",
+            "mix.mp3",
         ] {
             assert!(
                 load_recordings(vec![memory(invalid, vec![1])])

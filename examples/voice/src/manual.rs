@@ -11,7 +11,7 @@ use disnana_akari::{
         gateway::Intents,
         id::{
             Id,
-            marker::{ChannelMarker, GuildMarker, UserMarker},
+            marker::{ChannelMarker, GuildMarker},
         },
     },
 };
@@ -26,8 +26,9 @@ use tokio::{
 
 use super::{
     CONNECTION_TIMEOUT, LEAVE_TIMEOUT,
-    control::{self, Control, MAX_UPLOAD_BYTES},
+    control::{self, Control, MAX_UPLOAD_BYTES, RecordingOptions},
     multitrack::{Recorder, TrackFile},
+    playback::test_tone,
     songbird_info,
     speaker::Speakers,
 };
@@ -80,7 +81,12 @@ fn log_runtime_error(report: &ErrorReport<'_>) {
     let source = report.source;
     let name = report
         .name
-        .filter(|name| matches!(*name, "vc-join" | "vc-record" | "vc-stop" | "vc-leave"))
+        .filter(|name| {
+            matches!(
+                *name,
+                "vc-join" | "vc-record" | "vc-stop" | "vc-leave" | "vc-playtest"
+            )
+        })
         .unwrap_or("VC");
     match report.error {
         Error::CommandUnavailable => eprintln!("[{source}] {name} に一致する登録経路がありません"),
@@ -197,16 +203,24 @@ impl Session {
             }
             Control::Record {
                 channel,
-                mix,
-                users,
-                memory,
+                options,
                 reply,
             } if !reply.is_closed() => {
-                let message = match self
-                    .start_recording(channel, directory, mix, users, memory)
-                    .await
-                {
+                let message = match self.start_recording(channel, directory, options).await {
                     Ok(()) => "録音を開始しました。/vc-stop で終了してファイルを送信します。",
+                    Err(message) => message,
+                };
+                let _ = reply.send(message);
+            }
+            Control::PlayTest { channel, reply } if !reply.is_closed() => {
+                let message = match self.join(channel).await {
+                    Ok(()) => match test_tone().await {
+                        Ok(input) => {
+                            self.driver.play_only_input(input);
+                            "短いテスト音を再生します。"
+                        }
+                        Err(_) => "テスト音を準備できませんでした。",
+                    },
                     Err(message) => message,
                 };
                 let _ = reply.send(message);
@@ -296,15 +310,13 @@ impl Session {
         &mut self,
         channel: Id<ChannelMarker>,
         directory: &Path,
-        mix: bool,
-        users: Vec<Id<UserMarker>>,
-        memory: bool,
+        options: RecordingOptions,
     ) -> std::result::Result<(), &'static str> {
         if self.recording.is_some() || self.completed.is_some() {
             return Err("先に /vc-stop で今の録音を確定してください。");
         }
         self.join(channel).await?;
-        let destination = if memory {
+        let destination = if options.memory {
             None
         } else {
             let timestamp = SystemTime::now()
@@ -317,9 +329,10 @@ impl Session {
         let (recording, receiver) = tokio::task::spawn_blocking(move || {
             Recorder::start(
                 destination.as_deref(),
-                mix,
-                users,
+                options.mix,
+                options.users,
                 MAX_UPLOAD_BYTES,
+                options.format,
                 speakers,
             )
         })
@@ -342,7 +355,7 @@ impl Session {
             "録音フレーム {} 件、混雑で破棄 {} 件",
             stats.ticks_written, stats.ticks_dropped
         );
-        Ok(Some(stats.tracks))
+        Ok((!stats.tracks.is_empty()).then_some(stats.tracks))
     }
 
     async fn preserve_recording(&mut self) {
