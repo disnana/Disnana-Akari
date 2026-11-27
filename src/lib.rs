@@ -10,6 +10,8 @@ mod hybrid;
 mod interactions;
 mod limits;
 mod module;
+#[cfg(test)]
+mod permission_cache_tests;
 mod permissions;
 mod slash;
 mod timing;
@@ -205,7 +207,8 @@ impl Bot {
     /// テキストコマンドの権限確認（[`Context::require_permissions`] など）は、メッセージに権限が
     /// 付いていないため、確認のたびに Discord へ問い合わせます。既定では保存しないので、
     /// 呼び出しが多い Bot は、期間（数十秒〜数分）を指定すると問い合わせを減らせます。
-    /// 保存中にロールやチャンネルの権限を変えると、期間が過ぎるまで反映されません。
+    /// `Intents::GUILDS` を指定すると、ロールやチャンネルの変更イベントを受けた時点で該当する保存を破棄します。
+    /// 次の権限確認で Discord から取り直します。イベントを受け取れない場合には保存期間が適用されます。
     /// スラッシュコマンドは Discord が権限を送るため、この設定の影響を受けません。
     pub fn cache_permissions(mut self, ttl: Duration) -> Self {
         self.permission_cache = Some(ttl);
@@ -319,7 +322,8 @@ impl Bot {
 
         let http = Client::new(token.clone());
         let permissions = PermissionResolver::new(permission_cache);
-        let mut event_types = EventTypeFlags::READY;
+        let mut event_types = EventTypeFlags::READY
+            | permission_cache_events(needs_messages && permissions.cache_enabled(), intents);
         if hooks.info.has_hook() {
             event_types |= EventTypeFlags::RESUMED;
         }
@@ -461,6 +465,11 @@ impl Bot {
             let mut own_id = None;
             while let Some(event) = shard.next_event(event_types).await {
                 let gateway_rtt = shard.latency().recent().first().copied();
+                if permissions.cache_enabled()
+                    && let Ok(event) = &event
+                {
+                    update_permission_cache(&permissions, event);
+                }
                 match event {
                     Ok(Event::Ready(ready)) => {
                         own_id = Some(ready.user.id);
@@ -550,6 +559,41 @@ impl Bot {
         }
 
         Err(Error::GatewayEnded)
+    }
+}
+
+fn permission_cache_events(enabled: bool, intents: Intents) -> EventTypeFlags {
+    if !enabled {
+        return EventTypeFlags::empty();
+    }
+    let mut events = EventTypeFlags::RESUMED;
+    if intents.contains(Intents::GUILDS) {
+        events |= EventTypeFlags::GUILD_UPDATE
+            | EventTypeFlags::GUILD_DELETE
+            | EventTypeFlags::ROLE_CREATE
+            | EventTypeFlags::ROLE_UPDATE
+            | EventTypeFlags::ROLE_DELETE
+            | EventTypeFlags::CHANNEL_UPDATE
+            | EventTypeFlags::CHANNEL_DELETE
+            | EventTypeFlags::THREAD_UPDATE
+            | EventTypeFlags::THREAD_DELETE;
+    }
+    events
+}
+
+fn update_permission_cache(permissions: &PermissionResolver, event: &Event) {
+    match event {
+        Event::Ready(_) | Event::Resumed | Event::GatewayClose(_) => permissions.clear_cache(),
+        Event::GuildUpdate(guild) => permissions.invalidate_guild(guild.0.id),
+        Event::GuildDelete(guild) => permissions.remove_guild(guild.id),
+        Event::RoleCreate(role) => permissions.invalidate_guild(role.guild_id),
+        Event::RoleUpdate(role) => permissions.invalidate_guild(role.guild_id),
+        Event::RoleDelete(role) => permissions.invalidate_guild(role.guild_id),
+        Event::ChannelUpdate(channel) => permissions.invalidate_channel(channel.0.id),
+        Event::ChannelDelete(channel) => permissions.invalidate_channel(channel.0.id),
+        Event::ThreadUpdate(thread) => permissions.invalidate_channel(thread.0.id),
+        Event::ThreadDelete(thread) => permissions.invalidate_channel(thread.id),
+        _ => {}
     }
 }
 

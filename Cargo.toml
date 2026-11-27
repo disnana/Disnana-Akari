@@ -27,4 +27,5 @@ twilight-util = { version = "0.18", default-features = false, features = ["permi
 twilight-validate = "0.18"
 
 [dev-dependencies]
+serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "time"] }

@@ -43,7 +43,7 @@ async fn purge(ctx: CommandContext<'_>) -> Result<()> {
 DM では `CheckFailure::GuildOnly` になります。
 
 > [!TIP]
-> 確認のたびに Discord へ問い合わせます。呼び出しが多い Bot は、`Bot::cache_permissions(Duration::from_secs(60))` で取得した情報を一定時間だけ保存できます。保存中にロールやチャンネルの権限を変えると、期間が過ぎるまで反映されません。スラッシュコマンドは Discord が権限を送るため、この設定の影響を受けません。
+> 確認のたびに Discord へ問い合わせます。呼び出しが多い Bot は、`Bot::cache_permissions(Duration::from_secs(60))` で取得した情報を一定時間だけ保存できます。`Intents::GUILDS` が有効なら、ロールやチャンネルの変更イベントを受けた時点で該当する保存を破棄し、次の権限確認で情報を取得し直します。イベントが届かない場合は保存期間が反映の目安です。スラッシュコマンドの権限は Discord が送るため、この設定の影響を受けません。
 
 ## 確認に通らなかったとき
 
