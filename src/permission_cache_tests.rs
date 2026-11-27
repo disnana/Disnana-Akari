@@ -8,7 +8,7 @@ use twilight_model::gateway::payload::incoming::{ChannelUpdate, RoleDelete};
 
 use super::{
     Client, Event, EventTypeFlags, Id, Intents, Message, PermissionResolver, Permissions,
-    permission_cache_events, update_permission_cache,
+    gateway_event_types, permission_cache_events, update_permission_cache,
 };
 
 #[test]
@@ -18,7 +18,15 @@ fn cache_events_require_the_caller_to_enable_guilds() {
         permission_cache_events(true, Intents::empty()),
         EventTypeFlags::RESUMED
     );
-    assert!(permission_cache_events(true, Intents::GUILDS).contains(
+    let cache_events = permission_cache_events(true, Intents::GUILDS);
+    assert!(
+        gateway_event_types(true, true, false, cache_events).contains(
+            EventTypeFlags::READY
+                | EventTypeFlags::MESSAGE_CREATE
+                | EventTypeFlags::INTERACTION_CREATE,
+        )
+    );
+    assert!(cache_events.contains(
         EventTypeFlags::GUILD_UPDATE
             | EventTypeFlags::GUILD_DELETE
             | EventTypeFlags::ROLE_CREATE

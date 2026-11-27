@@ -322,27 +322,17 @@ impl Bot {
 
         let http = Client::new(token.clone());
         let permissions = PermissionResolver::new(permission_cache);
-        let mut event_types = EventTypeFlags::READY
-            | permission_cache_events(needs_messages && permissions.cache_enabled(), intents);
-        if hooks.info.has_hook() {
-            event_types |= EventTypeFlags::RESUMED;
-        }
+        let event_types = gateway_event_types(
+            needs_messages,
+            slash.is_some() || events.interaction_handlers.has_handlers(),
+            hooks.info.has_hook(),
+            permission_cache_events(needs_messages && permissions.cache_enabled(), intents),
+        );
 
         let slash = match slash {
-            Some(commands) => {
-                event_types |= EventTypeFlags::INTERACTION_CREATE;
-                Some(commands.sync(&http, &hooks.info).await?)
-            }
+            Some(commands) => Some(commands.sync(&http, &hooks.info).await?),
             None => None,
         };
-
-        if events.interaction_handlers.has_handlers() {
-            event_types |= EventTypeFlags::INTERACTION_CREATE;
-        }
-
-        if needs_messages {
-            event_types |= EventTypeFlags::MESSAGE_CREATE;
-        }
 
         let mut shard = Shard::new(ShardId::ONE, token, intents);
         let (event_tx, mut event_queue) = mpsc::channel(limits.queue_capacity);
@@ -560,6 +550,25 @@ impl Bot {
 
         Err(Error::GatewayEnded)
     }
+}
+
+fn gateway_event_types(
+    needs_messages: bool,
+    needs_interactions: bool,
+    reports_sessions: bool,
+    cache_events: EventTypeFlags,
+) -> EventTypeFlags {
+    let mut events = EventTypeFlags::READY | cache_events;
+    if needs_messages {
+        events |= EventTypeFlags::MESSAGE_CREATE;
+    }
+    if needs_interactions {
+        events |= EventTypeFlags::INTERACTION_CREATE;
+    }
+    if reports_sessions {
+        events |= EventTypeFlags::RESUMED;
+    }
+    events
 }
 
 fn permission_cache_events(enabled: bool, intents: Intents) -> EventTypeFlags {
