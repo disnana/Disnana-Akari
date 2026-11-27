@@ -20,13 +20,13 @@ const SAMPLE_RATE: u32 = 48_000;
 const CHANNELS: u16 = 2;
 const BITS_PER_SAMPLE: u16 = 16;
 const SAMPLES_PER_TICK: usize = 1920;
-const BYTES_PER_TICK: usize = SAMPLES_PER_TICK * size_of::<i16>();
+pub(super) const BYTES_PER_TICK: usize = SAMPLES_PER_TICK * size_of::<i16>();
 const RIFF_OVERHEAD: u32 = 36;
-const WAV_HEADER_BYTES: u32 = RIFF_OVERHEAD + 8;
+pub(super) const WAV_HEADER_BYTES: u32 = RIFF_OVERHEAD + 8;
 const QUEUE_TICKS: usize = 64;
 const WRITE_BUFFER_BYTES: usize = 64 * 1024;
-const MIX_SOURCES: usize = 128;
-type PcmTick = [i16; SAMPLES_PER_TICK];
+pub(super) const MIX_SOURCES: usize = 128;
+pub(super) type PcmTick = [i16; SAMPLES_PER_TICK];
 
 #[derive(Debug)]
 pub(super) struct RecordingStats {
@@ -44,10 +44,6 @@ pub(super) struct Recording {
 impl Recording {
     pub(super) fn start(path: &Path) -> io::Result<(Self, VoiceReceiver)> {
         Self::start_with_limit(path, None)
-    }
-
-    pub(super) fn start_limited(path: &Path, limit: u32) -> io::Result<(Self, VoiceReceiver)> {
-        Self::start_with_limit(path, Some(limit))
     }
 
     fn start_with_limit(path: &Path, limit: Option<u32>) -> io::Result<(Self, VoiceReceiver)> {
@@ -153,7 +149,7 @@ impl EventHandler for VoiceReceiver {
     }
 }
 
-fn mix<'a>(sources: impl IntoIterator<Item = &'a [i16]>) -> PcmTick {
+pub(super) fn mix<'a>(sources: impl IntoIterator<Item = &'a [i16]>) -> PcmTick {
     let mut sums = [0_i32; SAMPLES_PER_TICK];
     for source in sources.into_iter().take(MIX_SOURCES) {
         for (sum, sample) in sums.iter_mut().zip(source) {
@@ -189,13 +185,13 @@ fn write_recording<W: Write + Seek>(
     Ok(ticks_written)
 }
 
-struct WaveWriter<W> {
+pub(super) struct WaveWriter<W> {
     output: W,
     data_bytes: u32,
 }
 
 impl<W: Write + Seek> WaveWriter<W> {
-    fn new(mut output: W) -> io::Result<Self> {
+    pub(super) fn new(mut output: W) -> io::Result<Self> {
         write_header(&mut output, 0)?;
         Ok(Self {
             output,
@@ -203,7 +199,7 @@ impl<W: Write + Seek> WaveWriter<W> {
         })
     }
 
-    fn write_tick(&mut self, pcm: &PcmTick) -> io::Result<()> {
+    pub(super) fn write_tick(&mut self, pcm: &PcmTick) -> io::Result<()> {
         let size = self
             .data_bytes
             .checked_add(BYTES_PER_TICK as u32)
@@ -220,10 +216,11 @@ impl<W: Write + Seek> WaveWriter<W> {
         Ok(())
     }
 
-    fn finish(mut self) -> io::Result<()> {
+    pub(super) fn finish(mut self) -> io::Result<W> {
         self.output.seek(SeekFrom::Start(0))?;
         write_header(&mut self.output, self.data_bytes)?;
-        self.output.flush()
+        self.output.flush()?;
+        Ok(self.output)
     }
 }
 

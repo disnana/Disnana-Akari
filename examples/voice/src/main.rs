@@ -26,7 +26,9 @@ use tokio::{
 
 mod control;
 mod manual;
+mod multitrack;
 mod receive;
+mod speaker;
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const LEAVE_TIMEOUT: Duration = Duration::from_secs(5);

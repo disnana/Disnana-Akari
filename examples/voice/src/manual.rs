@@ -11,7 +11,7 @@ use disnana_akari::{
         gateway::Intents,
         id::{
             Id,
-            marker::{ChannelMarker, GuildMarker},
+            marker::{ChannelMarker, GuildMarker, UserMarker},
         },
     },
 };
@@ -27,8 +27,9 @@ use tokio::{
 use super::{
     CONNECTION_TIMEOUT, LEAVE_TIMEOUT,
     control::{self, Control, MAX_UPLOAD_BYTES},
-    receive::Recording,
+    multitrack::{Recorder, TrackFile},
     songbird_info,
+    speaker::Speakers,
 };
 
 pub(super) async fn run(guild: Id<GuildMarker>, directory: PathBuf) -> Result<()> {
@@ -74,7 +75,7 @@ pub(super) async fn run(guild: Id<GuildMarker>, directory: PathBuf) -> Result<()
 }
 
 fn log_runtime_error(report: &ErrorReport<'_>) {
-    use disnana_akari::http::error::ErrorType;
+    use disnana_akari::http::{api_error::ApiError, error::ErrorType};
 
     let source = report.source;
     let name = report
@@ -84,8 +85,15 @@ fn log_runtime_error(report: &ErrorReport<'_>) {
     match report.error {
         Error::CommandUnavailable => eprintln!("[{source}] {name} に一致する登録経路がありません"),
         Error::Http(error) => {
-            if let ErrorType::Response { status, .. } = error.kind() {
-                eprintln!("[{source}] {name} の Discord HTTP ステータスは {status}");
+            if let ErrorType::Response { status, error, .. } = error.kind() {
+                if let ApiError::General(error) = error {
+                    eprintln!(
+                        "[{source}] {name} の Discord HTTP {status}、エラー番号 {}",
+                        error.code
+                    );
+                } else {
+                    eprintln!("[{source}] {name} の Discord HTTP ステータスは {status}");
+                }
             } else {
                 eprintln!("[{source}] {name} の Discord HTTP 通信に失敗しました");
             }
@@ -98,9 +106,18 @@ struct Session {
     voice: VoiceGateway,
     guild: Id<GuildMarker>,
     driver: Driver,
+    speakers: Speakers,
     connection: Option<VoiceConnection>,
-    recording: Option<(PathBuf, Recording)>,
-    completed: Option<PathBuf>,
+    recording: Option<Recorder>,
+    completed: Option<Vec<TrackFile>>,
+}
+
+fn voice_driver() -> (Driver, Speakers) {
+    // Songbird 0.6.1 では既存の接続で Decode の有無を切り替えられません。
+    let mut driver =
+        Driver::new(Config::default().decode_mode(DecodeMode::Decode(DecodeConfig::default())));
+    let speakers = Speakers::install(&mut driver);
+    (driver, speakers)
 }
 
 async fn run_session(
@@ -110,14 +127,12 @@ async fn run_session(
     mut receiver: mpsc::Receiver<Control>,
     mut gateway_stopped: oneshot::Receiver<()>,
 ) -> Result<()> {
+    let (driver, speakers) = voice_driver();
     let mut session = Session {
         voice,
         guild,
-        // Songbird 0.6.1 の接続中の設定変更は Decode の有無を切り替えられません。
-        // 受信できる状態で接続し、録音ファイルへ渡すハンドラーだけを明示的に付け外しします。
-        driver: Driver::new(
-            Config::default().decode_mode(DecodeMode::Decode(DecodeConfig::default())),
-        ),
+        driver,
+        speakers,
         connection: None,
         recording: None,
         completed: None,
@@ -163,9 +178,9 @@ async fn watch_connection(
     }
 }
 
-async fn watch_recording(recording: Option<&mut (PathBuf, Recording)>) {
+async fn watch_recording(recording: Option<&mut Recorder>) {
     match recording {
-        Some((_, recording)) => recording.stopped().await,
+        Some(recording) => recording.stopped().await,
         None => pending().await,
     }
 }
@@ -180,8 +195,17 @@ impl Session {
                 };
                 let _ = reply.send(message);
             }
-            Control::Record { channel, reply } if !reply.is_closed() => {
-                let message = match self.start_recording(channel, directory).await {
+            Control::Record {
+                channel,
+                mix,
+                users,
+                memory,
+                reply,
+            } if !reply.is_closed() => {
+                let message = match self
+                    .start_recording(channel, directory, mix, users, memory)
+                    .await
+                {
                     Ok(()) => "録音を開始しました。/vc-stop で終了してファイルを送信します。",
                     Err(message) => message,
                 };
@@ -198,7 +222,7 @@ impl Session {
             }
             Control::Leave { reply } if !reply.is_closed() => {
                 let message = match self.disconnect(true).await {
-                    Ok(()) => "退出しました。録音があればローカルに保存しました。",
+                    Ok(()) => "退出しました。録音が残っていれば /vc-stop で送信できます。",
                     Err(_) => "退出または録音の確定を確認できませんでした。",
                 };
                 let _ = reply.send(message);
@@ -238,6 +262,7 @@ impl Session {
     }
 
     async fn connect_driver(&mut self, info: &super::VoiceConnectionInfo) -> Result<()> {
+        (self.driver, self.speakers) = voice_driver();
         timeout(CONNECTION_TIMEOUT, self.driver.connect(songbird_info(info)))
             .await
             .map_err(|_| Error::msg("音声サーバーへの接続が時間切れです"))?
@@ -250,12 +275,14 @@ impl Session {
         match status {
             Some(VoiceConnectionStatus::Ready(info)) => {
                 self.driver.leave();
+                self.preserve_recording().await;
                 if self.connect_driver(&info).await.is_err() {
                     let _ = self.disconnect(true).await;
                 }
             }
             Some(VoiceConnectionStatus::AwaitingServer) => {
                 self.driver.leave();
+                self.preserve_recording().await;
                 println!("音声サーバーの再割り当てを待っています");
             }
             _ => {
@@ -269,55 +296,74 @@ impl Session {
         &mut self,
         channel: Id<ChannelMarker>,
         directory: &Path,
+        mix: bool,
+        users: Vec<Id<UserMarker>>,
+        memory: bool,
     ) -> std::result::Result<(), &'static str> {
         if self.recording.is_some() || self.completed.is_some() {
             return Err("先に /vc-stop で今の録音を確定してください。");
         }
         self.join(channel).await?;
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| "録音ファイル名を作成できませんでした。")?
-            .as_nanos();
-        let path = directory.join(format!(
-            "akari-voice-{timestamp}-{}.wav",
-            std::process::id()
-        ));
-        let output = path.clone();
+        let destination = if memory {
+            None
+        } else {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| "録音ファイル名を作成できませんでした。")?
+                .as_nanos();
+            Some(directory.join(format!("akari-voice-{timestamp}-{}", std::process::id())))
+        };
+        let speakers = self.speakers.clone();
         let (recording, receiver) = tokio::task::spawn_blocking(move || {
-            Recording::start_limited(&output, MAX_UPLOAD_BYTES)
+            Recorder::start(
+                destination.as_deref(),
+                mix,
+                users,
+                MAX_UPLOAD_BYTES,
+                speakers,
+            )
         })
         .await
         .map_err(|_| "録音タスクを起動できませんでした。")?
-        .map_err(|_| "録音ファイルを作成できませんでした。")?;
+        .map_err(|_| "録音先を準備できませんでした。")?;
 
         self.driver
             .add_global_event(Event::Core(CoreEvent::VoiceTick), receiver);
-        self.recording = Some((path, recording));
+        self.recording = Some(recording);
         Ok(())
     }
 
-    async fn finish_recording(&mut self) -> Result<Option<PathBuf>> {
-        let Some((path, recording)) = self.recording.take() else {
+    async fn finish_recording(&mut self) -> Result<Option<Vec<TrackFile>>> {
+        let Some(recording) = self.recording.take() else {
             return Ok(None);
         };
-        self.driver.remove_all_global_events();
         let stats = recording.finish().await.map_err(Error::handler)?;
         println!(
             "録音フレーム {} 件、混雑で破棄 {} 件",
             stats.ticks_written, stats.ticks_dropped
         );
-        Ok(Some(path))
+        Ok(Some(stats.tracks))
+    }
+
+    async fn preserve_recording(&mut self) {
+        match self.finish_recording().await {
+            Ok(Some(tracks)) => self.completed = Some(tracks),
+            Ok(None) => {}
+            Err(error) => eprintln!("録音の確定に失敗しました: {error}"),
+        }
     }
 
     async fn disconnect(&mut self, leave: bool) -> Result<()> {
         let connection = self.connection.take();
         self.driver.leave();
-        let recording = self.finish_recording().await;
-        self.completed = None;
+        let recording = self.finish_recording().await.map(|tracks| {
+            if tracks.is_some() {
+                self.completed = tracks;
+            }
+        });
         if leave && connection.is_some() {
             self.voice.leave(self.guild, LEAVE_TIMEOUT).await?;
         }
-        recording?;
-        Ok(())
+        recording
     }
 }

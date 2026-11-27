@@ -1,6 +1,6 @@
 use std::{
-    path::{Path, PathBuf},
-    time::Duration,
+    path::Path,
+    time::{Duration, Instant},
 };
 
 use disnana_akari::{
@@ -13,20 +13,27 @@ use disnana_akari::{
         http::attachment::Attachment,
         id::{
             Id,
-            marker::{ChannelMarker, GuildMarker},
+            marker::{ChannelMarker, GuildMarker, UserMarker},
         },
     },
     validation::AttachmentLimits,
 };
 use tokio::{
+    fs::File,
     io::AsyncReadExt,
     sync::{mpsc, oneshot},
     time::timeout,
 };
 
+use super::multitrack::TrackFile;
+
 pub(super) const MAX_UPLOAD_BYTES: u32 = 10 * 1024 * 1024;
+pub(super) const MAX_RECORD_USERS: usize = 4;
+const USER_OPTIONS: [&str; MAX_RECORD_USERS] = ["user1", "user2", "user3", "user4"];
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(70);
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_FAILED: &str = "録音を停止しました。WAV を読み取れませんでした。ディスク録音は保存先に残ります。メモリ録音にはローカルファイルがありません。";
+const TOO_LARGE: &str = "録音を停止しました。WAV の合計が送信上限の 10 MiB を超えました。ディスク録音は保存先に残ります。メモリ録音にはローカルファイルがありません。";
 
 type ControlResult<T> = std::result::Result<T, &'static str>;
 
@@ -37,10 +44,13 @@ pub(super) enum Control {
     },
     Record {
         channel: Id<ChannelMarker>,
+        mix: bool,
+        users: Vec<Id<UserMarker>>,
+        memory: bool,
         reply: oneshot::Sender<&'static str>,
     },
     Stop {
-        reply: oneshot::Sender<ControlResult<PathBuf>>,
+        reply: oneshot::Sender<ControlResult<Vec<TrackFile>>>,
     },
     Leave {
         reply: oneshot::Sender<&'static str>,
@@ -62,10 +72,30 @@ pub(super) fn commands(guild: Id<GuildMarker>) -> Result<(SlashCommands, mpsc::R
             false,
         );
         channel.channel_types = Some(vec![ChannelType::GuildVoice]);
+        let mut options = vec![channel];
+        if record {
+            options.extend(USER_OPTIONS.iter().enumerate().map(|(index, name)| {
+                SlashCommands::user_option(
+                    name,
+                    &format!("個別に録音するユーザー {}", index + 1),
+                    false,
+                )
+            }));
+            options.push(SlashCommands::boolean_option(
+                "mix",
+                "全体のミックスを録音します（既定は有効）",
+                false,
+            ));
+            options.push(SlashCommands::boolean_option(
+                "memory",
+                "メモリに録音します（既定はディスクに保存）",
+                false,
+            ));
+        }
         commands.register_with_permissions(
             name,
             description,
-            vec![channel],
+            options,
             Permissions::MANAGE_GUILD,
             async move |ctx: &mut SlashContext<'_>| join(ctx, &sender, record).await,
         )?;
@@ -84,7 +114,7 @@ pub(super) fn commands(guild: Id<GuildMarker>) -> Result<(SlashCommands, mpsc::R
         vec![],
         Permissions::MANAGE_GUILD,
         async move |ctx: &mut SlashContext<'_>| -> Result<()> {
-            ctx.defer_ephemeral().await?;
+            defer_control(ctx, "vc-leave").await?;
             let reply = request(&sender, |reply| Control::Leave { reply }).await;
             ctx.reply_ephemeral(reply.unwrap_or_else(|message| message))
                 .await
@@ -98,7 +128,15 @@ async fn join(
     sender: &mpsc::Sender<Control>,
     record: bool,
 ) -> Result<()> {
-    ctx.defer_ephemeral().await?;
+    let recording = if record {
+        match record_options(|name| ctx.option(name)) {
+            Ok(options) => Some(options),
+            Err(message) => return ctx.reply_ephemeral(message).await,
+        }
+    } else {
+        None
+    };
+    defer_control(ctx, if record { "vc-record" } else { "vc-join" }).await?;
     let channel = match timeout(LOOKUP_TIMEOUT, target_channel(ctx)).await {
         Ok(Ok(channel)) => channel,
         Ok(Err(message)) => return ctx.reply_ephemeral(message).await,
@@ -109,8 +147,14 @@ async fn join(
         }
     };
     let reply = request(sender, |reply| {
-        if record {
-            Control::Record { channel, reply }
+        if let Some(RecordingOptions { mix, users, memory }) = recording {
+            Control::Record {
+                channel,
+                mix,
+                users,
+                memory,
+                reply,
+            }
         } else {
             Control::Join { channel, reply }
         }
@@ -118,6 +162,43 @@ async fn join(
     .await;
     ctx.reply_ephemeral(reply.unwrap_or_else(|message| message))
         .await
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct RecordingOptions {
+    mix: bool,
+    users: Vec<Id<UserMarker>>,
+    memory: bool,
+}
+
+fn record_options<'a>(
+    mut option: impl FnMut(&str) -> Option<&'a CommandOptionValue>,
+) -> ControlResult<RecordingOptions> {
+    let mix = match option("mix") {
+        Some(CommandOptionValue::Boolean(value)) => *value,
+        None => true,
+        Some(_) => return Err("mix には true または false を指定してください。"),
+    };
+    let memory = match option("memory") {
+        Some(CommandOptionValue::Boolean(value)) => *value,
+        None => false,
+        Some(_) => return Err("memory には true または false を指定してください。"),
+    };
+    let mut users = Vec::new();
+    for name in USER_OPTIONS {
+        match option(name) {
+            Some(CommandOptionValue::User(user)) if !users.contains(user) => users.push(*user),
+            Some(CommandOptionValue::User(_)) => {
+                return Err("同じユーザーが複数回指定されています。");
+            }
+            Some(_) => return Err("録音するユーザーを選択してください。"),
+            None => {}
+        }
+    }
+    if !mix && users.is_empty() {
+        return Err("mix を無効にする場合は、録音するユーザーを選択してください。");
+    }
+    Ok(RecordingOptions { mix, users, memory })
 }
 
 async fn target_channel(ctx: &SlashContext<'_>) -> ControlResult<Id<ChannelMarker>> {
@@ -182,61 +263,285 @@ async fn request<T>(
     }
 }
 
+async fn defer_control(ctx: &mut SlashContext<'_>, operation: &'static str) -> Result<()> {
+    let timing = ctx.timing();
+    let before = timing.handler_elapsed();
+    let started = Instant::now();
+    let result = ctx.defer_ephemeral().await;
+    if result.is_err() {
+        eprintln!(
+            "[{operation}] defer に失敗しました。キュー待機 {} ms、defer 前 {} ms、defer {} ms",
+            timing.queue_wait().as_millis(),
+            before.as_millis(),
+            started.elapsed().as_millis(),
+        );
+    }
+    result
+}
+
 async fn stop(ctx: &mut SlashContext<'_>, sender: &mpsc::Sender<Control>) -> Result<()> {
     let Some(channel) = ctx.channel_id() else {
         return ctx
             .reply_ephemeral("WAV を送信するチャンネルを確認できませんでした。")
             .await;
     };
-    ctx.defer_ephemeral().await?;
+    defer_control(ctx, "vc-stop").await?;
     let result = request(sender, |reply| Control::Stop { reply })
         .await
         .and_then(|result| result);
-    let path = match result {
-        Ok(path) => path,
+    let tracks = match result {
+        Ok(tracks) => tracks,
         Err(message) => return ctx.reply_ephemeral(message).await,
     };
-    let feedback = upload_recording(ctx, channel, &path)
+    let feedback = upload_recordings(ctx, channel, tracks)
         .await
         .unwrap_or_else(|message| message);
     ctx.reply_ephemeral(feedback).await
 }
 
-async fn upload_recording(
+async fn upload_recordings(
     ctx: &SlashContext<'_>,
     channel: Id<ChannelMarker>,
-    path: &Path,
+    tracks: Vec<TrackFile>,
 ) -> ControlResult<&'static str> {
-    const READ_FAILED: &str =
-        "録音を停止しました。WAV を読み取れなかったため、ローカルの保存先を確認してください。";
-    const TOO_LARGE: &str =
-        "録音を停止しました。WAV は送信上限の 10 MiB を超えたため、ローカルに保存しました。";
-    let file = tokio::fs::File::open(path).await.map_err(|_| READ_FAILED)?;
-    let metadata = file.metadata().await.map_err(|_| READ_FAILED)?;
-    if !metadata.is_file() {
-        return Err(READ_FAILED);
-    }
-    let max_bytes = u64::from(MAX_UPLOAD_BYTES);
-    let limits = AttachmentLimits::default().max_file_bytes(Some(max_bytes));
-    if limits.validate(0, [metadata.len()], None).is_err() {
-        return Err(TOO_LARGE);
-    }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(max_bytes + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| READ_FAILED)?;
-    if limits.validate(0, [bytes.len() as u64], None).is_err() {
-        return Err(TOO_LARGE);
-    }
-    let files = [Attachment::from_bytes("akari-voice.wav".into(), bytes, 0)];
+    let files = load_recordings(tracks).await?;
     ctx.http()
         .create_message(channel)
         .attachments(&files)
         .allowed_mentions(Some(&AllowedMentions::default()))
         .await
         .map_err(
-            |_| "録音を停止しました。WAV をチャンネルに送れなかったため、ローカルに保存しました。",
+            |_| "録音を停止しました。WAV をチャンネルに送れませんでした。ディスク録音は保存先に残ります。メモリ録音にはローカルファイルがありません。",
         )?;
     Ok("録音を停止し、このチャンネルに WAV を送信しました。")
+}
+
+struct RecordingFile {
+    name: String,
+    data: RecordingData,
+}
+
+enum RecordingData {
+    Disk { file: File, length: u64 },
+    Memory(Vec<u8>),
+}
+
+impl RecordingData {
+    fn length(&self) -> u64 {
+        match self {
+            Self::Disk { length, .. } => *length,
+            Self::Memory(bytes) => bytes.len() as u64,
+        }
+    }
+
+    async fn bytes(self) -> ControlResult<Vec<u8>> {
+        match self {
+            Self::Memory(bytes) => Ok(bytes),
+            Self::Disk { mut file, length } => {
+                let mut bytes = vec![0; length as usize];
+                // サイズ確認後にファイルが変わっても、元の長さ + 1 バイトで読み取りを止める。
+                file.read_exact(&mut bytes).await.map_err(|_| READ_FAILED)?;
+                if file.read(&mut [0]).await.map_err(|_| READ_FAILED)? != 0 {
+                    return Err(READ_FAILED);
+                }
+                Ok(bytes)
+            }
+        }
+    }
+}
+
+async fn load_recordings(tracks: Vec<TrackFile>) -> ControlResult<Vec<Attachment>> {
+    if tracks.is_empty() || tracks.len() > MAX_RECORD_USERS + 1 {
+        return Err(READ_FAILED);
+    }
+    let mut opened: Vec<RecordingFile> = Vec::with_capacity(tracks.len());
+    for track in tracks {
+        let entry = match track {
+            TrackFile::Memory { name, bytes } if valid_recording_name(&name) => RecordingFile {
+                name,
+                data: RecordingData::Memory(bytes),
+            },
+            TrackFile::Memory { .. } => return Err(READ_FAILED),
+            TrackFile::Disk(path) => open_recording(&path).await?,
+        };
+        if opened.iter().any(|existing| existing.name == entry.name) {
+            return Err(READ_FAILED);
+        }
+        opened.push(entry);
+    }
+    AttachmentLimits::default()
+        .max_total_bytes(Some(u64::from(MAX_UPLOAD_BYTES)))
+        .validate(0, opened.iter().map(|entry| entry.data.length()), None)
+        .map_err(|_| TOO_LARGE)?;
+
+    let mut files = Vec::with_capacity(opened.len());
+    for (index, entry) in opened.into_iter().enumerate() {
+        let bytes = entry.data.bytes().await?;
+        files.push(Attachment::from_bytes(entry.name, bytes, index as u64));
+    }
+    Ok(files)
+}
+
+async fn open_recording(path: &Path) -> ControlResult<RecordingFile> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| valid_recording_name(name))
+        .ok_or(READ_FAILED)?;
+    let file_type = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|_| READ_FAILED)?
+        .file_type();
+    if !file_type.is_file() {
+        return Err(READ_FAILED);
+    }
+    let file = File::open(path).await.map_err(|_| READ_FAILED)?;
+    let metadata = file.metadata().await.map_err(|_| READ_FAILED)?;
+    if !metadata.is_file() {
+        return Err(READ_FAILED);
+    }
+    Ok(RecordingFile {
+        name: name.into(),
+        data: RecordingData::Disk {
+            file,
+            length: metadata.len(),
+        },
+    })
+}
+
+fn valid_recording_name(name: &str) -> bool {
+    if name == "mix.wav" {
+        return true;
+    }
+    name.strip_prefix("user-")
+        .and_then(|rest| rest.strip_suffix(".wav"))
+        .is_some_and(|user| {
+            !user.starts_with('0')
+                && user.bytes().all(|b| b.is_ascii_digit())
+                && user.parse::<u64>().is_ok()
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recording_defaults_and_user_selection_are_checked() {
+        assert_eq!(
+            record_options(|_| None),
+            Ok(RecordingOptions {
+                mix: true,
+                users: vec![],
+                memory: false
+            })
+        );
+        let disabled = CommandOptionValue::Boolean(false);
+        let enabled = CommandOptionValue::Boolean(true);
+        let one = CommandOptionValue::User(Id::new(7));
+        let two = CommandOptionValue::User(Id::new(9));
+        let result = record_options(|name| match name {
+            "mix" => Some(&disabled),
+            "memory" => Some(&enabled),
+            "user2" => Some(&two),
+            "user4" => Some(&one),
+            _ => None,
+        });
+        assert_eq!(
+            result,
+            Ok(RecordingOptions {
+                mix: false,
+                users: vec![Id::new(9), Id::new(7)],
+                memory: true
+            })
+        );
+        assert!(record_options(|name| (name == "mix").then_some(&disabled)).is_err());
+        assert!(record_options(|name| matches!(name, "user1" | "user3").then_some(&one)).is_err());
+        assert!(record_options(|name| (name == "user1").then_some(&enabled)).is_err());
+    }
+
+    fn memory(name: &str, bytes: Vec<u8>) -> TrackFile {
+        TrackFile::Memory {
+            name: name.into(),
+            bytes,
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_uses_safe_filenames_and_moves_memory_buffers() {
+        let bytes = vec![1, 2, 3];
+        let original = bytes.as_ptr();
+        let uploads = load_recordings(vec![
+            memory("mix.wav", bytes),
+            memory("user-7.wav", vec![4]),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(
+            uploads
+                .iter()
+                .map(|file| (&*file.filename, file.id))
+                .collect::<Vec<_>>(),
+            [("mix.wav", 0), ("user-7.wav", 1)]
+        );
+        assert_eq!(uploads[0].file.as_ptr(), original);
+        for invalid in [
+            "../mix.wav",
+            "user-0.wav",
+            "user-07.wav",
+            "user-18446744073709551616.wav",
+            "mix.flac",
+        ] {
+            assert!(
+                load_recordings(vec![memory(invalid, vec![1])])
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            load_recordings(vec![memory("mix.wav", vec![1]), memory("mix.wav", vec![2])])
+                .await
+                .is_err()
+        );
+        assert!(load_recordings(vec![]).await.is_err());
+        let tracks = (1..=(MAX_RECORD_USERS + 2))
+            .map(|user| memory(&format!("user-{user}.wav"), vec![0]))
+            .collect();
+        assert!(load_recordings(tracks).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn aggregate_limit_covers_disk_and_memory_and_keeps_the_disk_file() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("akari-control-{}-{suffix}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("mix.wav");
+        std::fs::write(&path, [1, 2, 3]).unwrap();
+
+        let too_large = load_recordings(vec![
+            TrackFile::Disk(path.clone()),
+            memory("user-7.wav", vec![0; MAX_UPLOAD_BYTES as usize]),
+        ])
+        .await;
+        let existing = std::fs::read(&path).unwrap();
+        let valid = load_recordings(vec![
+            TrackFile::Disk(path.clone()),
+            memory("user-7.wav", vec![4]),
+        ])
+        .await;
+        let changed = open_recording(&path).await.unwrap();
+        std::fs::write(&path, [1, 2, 3, 4]).unwrap();
+        let changed = changed.data.bytes().await;
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+
+        assert_eq!(too_large.unwrap_err(), TOO_LARGE);
+        assert_eq!(existing, [1, 2, 3]);
+        assert_eq!(valid.unwrap()[0].file, [1, 2, 3]);
+        assert_eq!(changed.unwrap_err(), READ_FAILED);
+    }
 }
