@@ -160,6 +160,16 @@ impl Overwrite {
         self.allow | self.deny
     }
 
+    /// チャンネルの作成に渡す形にする。
+    pub(crate) fn into_model(self, target: OverwriteTarget) -> PermissionOverwrite {
+        PermissionOverwrite {
+            allow: self.allow,
+            deny: self.deny,
+            id: Id::new(target.raw_id()),
+            kind: target.kind(),
+        }
+    }
+
     /// Discord に送る形にする。許可も拒否も空のときは、空の権限として送る。
     pub(crate) fn into_request(self, target: OverwriteTarget) -> RequestOverwrite {
         RequestOverwrite {

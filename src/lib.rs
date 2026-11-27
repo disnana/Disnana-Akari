@@ -17,6 +17,7 @@ mod hybrid;
 mod interactions;
 mod limits;
 mod manage;
+mod manage_types;
 mod member_cache;
 mod message_cache;
 mod message_events;
@@ -96,6 +97,10 @@ pub use interactions::{
 };
 pub use limits::Limits;
 pub use manage::{MAX_BAN_MESSAGE_DELETE, MAX_TIMEOUT, Manage};
+pub use manage_types::{
+    NewCategory, NewRole, NewTextChannel, NewVoiceChannel, RoleEdit, TextChannelEdit,
+    VoiceChannelEdit,
+};
 pub use member_cache::{CachedMemberRemove, CachedMemberUpdate, MemberCacheHandle};
 pub use message_cache::CachedMessageEdit;
 pub use message_events::MessageUpdate;

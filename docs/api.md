@@ -590,7 +590,9 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 
 権限の上書きとロールの権限は、`Access` の `overwrite_of`、`set_overwrite`、`delete_overwrite`、`role_permissions`、`set_role_permissions` で読み書きします。`Overwrite` は、`allow`、`deny`、`inherit` で権限ごとの状態を指定する型で、`state` が `Tri`（`Allow`、`Deny`、`Inherit`）を返します。対象は `OverwriteTarget`（`Role` か `Member`）で指定します。書き込みは、送る前に Bot の権限とロールの位置を確認しますが、実行した人への確認は、呼ぶ側の責任です。
 
-`ctx.manage()` が返す `Manage` で、`kick_member`、`ban_member`、`unban_member`、`timeout_member`、`set_nickname`、`add_role`、`remove_role`、`move_member`、`set_voice_mute`、`set_voice_deafen` を呼べます。送る前に Bot の権限とロールの階層を確認し、実行した人への確認は呼ぶ側の責任です。タイムアウトは `MAX_TIMEOUT`（28 日）、BAN と一緒に削除するメッセージは `MAX_BAN_MESSAGE_DELETE`（7 日）までで、超えると `InvalidArgument` で、通信せずに失敗します。ロールの階層で断られた理由は、`CheckFailure::Hierarchy` が持つ `HierarchyDenied` で分かります。
+`ctx.manage()` が返す `Manage` で、`kick_member`、`ban_member`、`unban_member`、`timeout_member`、`set_nickname`、`add_role`、`remove_role`、`move_member`、`set_voice_mute`、`set_voice_deafen` を呼べます。送る前に Bot の権限とロールの階層を確認し、実行した人への確認は呼ぶ側の責任です。チャンネルは `create_text_channel`（`NewTextChannel`）、`create_voice_channel`（`NewVoiceChannel`）、`create_category`（`NewCategory`）で作成し、`edit_text_channel`（`TextChannelEdit`）、`edit_voice_channel`（`VoiceChannelEdit`）で編集し、`delete_channel` で削除します。ロールは `create_role`（`NewRole`）、`edit_role`（`RoleEdit`）、`delete_role` です。編集は指定した項目だけを変更し、何も指定しないと `InvalidArgument::NothingToChange` で失敗します。
+
+タイムアウトは `MAX_TIMEOUT`（28 日）、BAN と一緒に削除するメッセージは `MAX_BAN_MESSAGE_DELETE`（7 日）までで、超えると `InvalidArgument` で、通信せずに失敗します。ロールの階層で断られた理由は、`CheckFailure::Hierarchy` が持つ `HierarchyDenied` で分かります。
 
 ## 権限やフラグを名前で扱う
 

@@ -2,8 +2,9 @@ use twilight_gateway::{Intents, error::ReceiveMessageError};
 use twilight_http::{error::Error as HttpError, response::DeserializeBodyError};
 use twilight_model::guild::Permissions;
 use twilight_validate::{
-    command::CommandValidationError, component::ComponentValidationError,
-    embed::EmbedValidationError, message::MessageValidationError,
+    channel::ChannelValidationError, command::CommandValidationError,
+    component::ComponentValidationError, embed::EmbedValidationError,
+    message::MessageValidationError,
 };
 
 /// Akari の処理や、利用者が登録したハンドラーから返るエラーです。
@@ -101,6 +102,9 @@ pub enum Error {
     /// Twilight がメッセージを無効と判定しました。
     #[error(transparent)]
     MessageValidation(#[from] MessageValidationError),
+    /// Twilight がチャンネルの設定（名前、トピック、ビットレートなど）を無効と判定しました。
+    #[error(transparent)]
+    ChannelValidation(#[from] ChannelValidationError),
     /// Twilight が埋め込みを無効と判定しました。
     #[error(transparent)]
     EmbedValidation(#[from] EmbedValidationError),
@@ -418,6 +422,9 @@ pub enum InvalidArgument {
     /// BAN と一緒に削除するメッセージの期間が 7 日を超えています。
     #[error("メッセージを一緒に削除できる期間は 7 日以内です")]
     BanMessageWindowTooLong,
+    /// 編集に、変更する項目が 1 つも指定されていません。
+    #[error("編集する項目が指定されていません")]
+    NothingToChange,
 }
 
 /// ロールの階層により、対象のメンバーを操作できない理由です。
