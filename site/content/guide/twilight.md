@@ -36,6 +36,22 @@ async fn channel_name(ctx: CommandContext<'_>) -> Result<()> {
 
 `disnana_akari::http` は `twilight_http` の再エクスポートです。
 
+## 長い処理の間だけ入力中と表示する
+
+`TypingIndicator::while_running` は処理と並行して入力中表示を送り、成功した送信から5秒後に更新します。処理が終わるか取り消されると更新も止まり、表示は最後の送信から10秒で Discord 側の期限が切れます。入力中表示に失敗しても元の処理は続きます。単発送信の成否を扱うには `trigger` を使います。 [Discord の入力中表示](https://docs.discord.com/developers/resources/channel#trigger-typing-indicator) · [discord.py の入力中表示](https://github.com/Rapptz/discord.py/blob/v2.7.1/discord/context_managers.py)
+
+```rust
+use disnana_akari::{CommandContext, Result, TypingIndicator};
+use std::time::Duration;
+
+async fn report(ctx: CommandContext<'_>) -> Result<()> {
+    TypingIndicator::new(ctx.http(), ctx.context().message().channel_id)
+        .while_running(tokio::time::sleep(Duration::from_secs(6)))
+        .await;
+    ctx.reply("集計が終わりました").await
+}
+```
+
 ## メッセージ履歴をページ単位で読む
 
 `MessageHistory` は、ページを要求するたびに Discord から取得します。1ページ最大100件です。取得結果を処理したあとページを破棄すれば、読み進めても全件をメモリに保持しません。

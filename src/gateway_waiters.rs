@@ -10,6 +10,7 @@ pub(crate) struct WaiterRuntime {
     handle: Option<EventWaiters>,
     messages: bool,
     reactions: bool,
+    voice_states: bool,
 }
 
 impl WaiterRuntime {
@@ -21,6 +22,7 @@ impl WaiterRuntime {
                 && intents.intersects(
                     Intents::GUILD_MESSAGE_REACTIONS | Intents::DIRECT_MESSAGE_REACTIONS,
                 ),
+            voice_states: handle.is_some() && intents.contains(Intents::GUILD_VOICE_STATES),
             handle,
         }
     }
@@ -33,12 +35,15 @@ impl WaiterRuntime {
         if self.reactions {
             events |= EventTypeFlags::REACTION_ADD;
         }
+        if self.voice_states {
+            events |= EventTypeFlags::VOICE_STATE_UPDATE;
+        }
         events
     }
 
     pub(crate) fn activate(&self) {
         if let Some(handle) = &self.handle {
-            handle.activate(self.messages, self.reactions);
+            handle.activate(self.messages, self.reactions, self.voice_states);
         }
     }
 
@@ -54,12 +59,25 @@ impl WaiterRuntime {
         }
     }
 
-    pub(crate) fn observe_reaction(&self, incoming: &Result<IncomingEvent>) {
-        if let Some(handle) = &self.handle
-            && let Ok(IncomingEvent::Standard(Event::ReactionAdd(reaction))) = incoming
-            && let Some(cutoff) = handle.reaction_cutoff(reaction.channel_id, reaction.user_id)
-        {
-            handle.deliver_reaction(Arc::new(reaction.as_ref().clone()), cutoff);
+    pub(crate) fn observe(&self, incoming: &Result<IncomingEvent>) {
+        let Some(handle) = &self.handle else {
+            return;
+        };
+        match incoming {
+            Ok(IncomingEvent::Standard(Event::ReactionAdd(reaction))) => {
+                if let Some(cutoff) = handle.reaction_cutoff(reaction.channel_id, reaction.user_id)
+                {
+                    handle.deliver_reaction(Arc::new(reaction.as_ref().clone()), cutoff);
+                }
+            }
+            Ok(IncomingEvent::Standard(Event::VoiceStateUpdate(update))) => {
+                if let Some(guild) = update.guild_id
+                    && let Some(cutoff) = handle.voice_state_cutoff(guild, update.user_id)
+                {
+                    handle.deliver_voice_state(Arc::new(update.0.clone()), cutoff);
+                }
+            }
+            _ => {}
         }
     }
 

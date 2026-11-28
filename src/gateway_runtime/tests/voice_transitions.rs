@@ -82,3 +82,56 @@ fn state(channel: Option<&str>) -> Value {
         "deaf":false, "mute":false, "self_deaf":false, "self_mute":false, "self_video":false, "suppress":false
     })
 }
+
+#[tokio::test]
+async fn raw_voice_wait_subscribes_and_observes_leave_without_event_handler() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready, mut ready_rx) = mpsc::channel(1);
+    let mut events = Events::new();
+    events.on_ready(async move |_: &Ready| ready.send(()).await);
+    let (bot, waiters) = Bot::new(FIXTURE_TOKEN)
+        .unwrap()
+        .with_intents(Intents::GUILD_VOICE_STATES)
+        .with_events(events)
+        .with_waiters(crate::WaitLimits::default())
+        .unwrap();
+    let (mut bot, shutdown) = bot.with_shutdown();
+    bot.gateway_test_port = Some(address.port());
+    let server = async {
+        let mut socket = accept(&listener).await;
+        let identify = receive_opcode(&mut socket, 2).await;
+        assert_eq!(identify["d"]["intents"], Intents::GUILD_VOICE_STATES.bits());
+        send_ready(
+            &mut socket,
+            &format!("ws://{address}"),
+            "voice-waits",
+            [0, 1],
+        )
+        .await;
+        ready_rx.recv().await.unwrap();
+
+        let leave = waiters
+            .wait_for_voice_state_where(Id::new(4), Id::new(6), Duration::from_secs(5), |state| {
+                state.channel_id.is_none()
+            })
+            .unwrap();
+        let mut unrelated = state(None);
+        unrelated["guild_id"] = json!("5");
+        send_dispatch(&mut socket, 2, "VOICE_STATE_UPDATE", unrelated).await;
+        send_dispatch(&mut socket, 3, "VOICE_STATE_UPDATE", state(Some("10"))).await;
+        send_dispatch(&mut socket, 4, "VOICE_STATE_UPDATE", state(None)).await;
+        let update = leave.await.unwrap();
+        assert_eq!(update.guild_id, Some(Id::new(4)));
+        assert!(update.channel_id.is_none());
+
+        shutdown.request();
+        expect_close(&mut socket, 1000).await;
+    };
+    let (result, ()) = timeout(Duration::from_secs(10), async {
+        tokio::join!(bot.start(), server)
+    })
+    .await
+    .unwrap();
+    assert!(result.is_ok(), "{result:?}");
+}

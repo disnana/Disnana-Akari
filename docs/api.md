@@ -570,6 +570,8 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 
 `Bot::with_waiters(WaitLimits)` で `EventWaiters` を取得します。`wait_for_message`、`wait_for_reaction_add` と、それぞれの `_where` 版は、チャンネル ID、ユーザー ID、待ち時間を指定して `EventWait<T>` を作ります。`await` すると、受け取ったメッセージやリアクションを `Arc<T>` で返します。失敗は `WaitError` で判定できます。ハンドルは必要な Gateway Intent がある種類だけを有効にし、待機の登録は通常のイベント配信と独立しています。
 
+サーバーとユーザーを指定してボイス状態の更新を待つには `wait_for_voice_state` を使います。 `wait_for_voice_state_where(guild, user, timeout, |state| state.channel_id.is_none())` なら退出を待てます。`GUILD_VOICE_STATES` Intent が必要です。受け取るのは Gateway の状態更新で、キャッシュにある現在の状態や初期同期の一覧は返しません。
+
 ## フォームを開いたメッセージの更新
 
 コンポーネントから開いたフォームの `ModalContext` では `source_message`、`defer_update`、`update_message`、`update_v2` を使えます。`defer_update` 後は、同じ元メッセージを編集し、別のフォローアップを送れます。元メッセージがない場合は `ResponseStateError::SourceMessageUnavailable` です。
@@ -785,6 +787,8 @@ async fn ready(_event: &Ready) -> Result<()> {
 
 - `UiSessions` は `UiSessionLimits` の範囲で実行者と元メッセージに紐づく操作を管理します。`UiSessionActions` で操作を登録し、`UiSessionDraft` を画面に紐づけて `UiSession` を作ります。準備や登録の失敗は `UiSessionError`、終了は `UiSessionOutcome` で判別できます。
 - `Bot::with_command_check_once` は実際に呼び出されたコマンドの実行前に `CommandCheck` を一度だけ実行します。補完やヘルプの候補を調べる処理には適用しません。
+
+`resolve_user` はサーバーを問わず、ユーザー ID またはユーザーメンションを解決します。`TypingIndicator` は任意の非同期処理の間、チャンネルの入力中表示を更新できます。
 
 ## REST のページ取得
 

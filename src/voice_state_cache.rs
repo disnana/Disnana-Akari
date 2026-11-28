@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, hash_map},
     num::NonZeroUsize,
 };
 
@@ -153,7 +153,7 @@ struct Entry {
 pub(crate) struct VoiceStateCache {
     shard: ShardId,
     capacity: NonZeroUsize,
-    by_member: HashMap<Key, Entry>,
+    by_guild: HashMap<Id<GuildMarker>, HashMap<Id<UserMarker>, Entry>>,
     oldest: BTreeMap<u64, Key>,
     sequence: u64,
 }
@@ -163,14 +163,14 @@ impl VoiceStateCache {
         Self {
             shard,
             capacity,
-            by_member: HashMap::new(),
+            by_guild: HashMap::new(),
             oldest: BTreeMap::new(),
             sequence: 0,
         }
     }
 
     pub(crate) fn reset(&mut self) {
-        self.by_member.clear();
+        self.by_guild.clear();
         self.oldest.clear();
         self.sequence = 0;
     }
@@ -211,36 +211,58 @@ impl VoiceStateCache {
     }
 
     fn forget_guild(&mut self, guild: Id<GuildMarker>) {
-        self.by_member.retain(|(guild_id, _), entry| {
-            if *guild_id == guild {
+        // GuildCreate は起動時に連続するので、対象サーバーの状態だけを走査する。
+        if let Some(members) = self.by_guild.remove(&guild) {
+            for entry in members.into_values() {
                 self.oldest.remove(&entry.sequence);
-                false
-            } else {
-                true
             }
-        });
+        }
+    }
+
+    fn remove_member(&mut self, (guild_id, user_id): Key) -> Option<Entry> {
+        let hash_map::Entry::Occupied(mut guild) = self.by_guild.entry(guild_id) else {
+            return None;
+        };
+        let entry = guild.get_mut().remove(&user_id);
+        if guild.get().is_empty() {
+            guild.remove();
+        }
+        entry
     }
 
     fn store(&mut self, key: Key, snapshot: VoiceStateSnapshot) -> Option<VoiceStateSnapshot> {
-        let before = self.by_member.remove(&key).map(|entry| {
+        let (guild_id, user_id) = key;
+        let connected = snapshot.channel_id().is_some();
+        let entry = if connected {
+            self.by_guild
+                .get_mut(&guild_id)
+                .and_then(|members| members.remove(&user_id))
+        } else {
+            self.remove_member(key)
+        };
+        let before = entry.map(|entry| {
             self.oldest.remove(&entry.sequence);
             entry.snapshot
         });
-        if snapshot.channel_id().is_none() {
+        if !connected {
             return before;
         }
         if self.sequence == u64::MAX {
             self.reset();
         }
-        if self.by_member.len() >= self.capacity.get()
+        if self.oldest.len() >= self.capacity.get()
             && let Some((_, oldest)) = self.oldest.pop_first()
         {
-            self.by_member.remove(&oldest);
+            let evicted = self.remove_member(oldest);
+            debug_assert!(evicted.is_some());
         }
         let sequence = self.sequence;
         self.sequence += 1;
         self.oldest.insert(sequence, key);
-        self.by_member.insert(key, Entry { snapshot, sequence });
+        self.by_guild
+            .entry(guild_id)
+            .or_default()
+            .insert(user_id, Entry { snapshot, sequence });
         before
     }
 }
@@ -376,7 +398,7 @@ mod tests {
                 .is_none()
         );
         assert!(update(&mut cache, voice(None, 3, Some(10))).is_none());
-        assert!(cache.by_member.is_empty());
+        assert!(cache.by_guild.is_empty());
         assert!(cache.oldest.is_empty());
     }
 
@@ -394,7 +416,7 @@ mod tests {
             );
         }
         update(&mut cache, voice(Some(1), 5, Some(10))).unwrap();
-        assert_eq!(cache.by_member.len(), 2);
+        assert_eq!(cache.by_guild[&Id::new(1)].len(), 2);
         assert_eq!(cache.oldest.len(), 2);
         assert!(
             update(&mut cache, voice(Some(1), 3, Some(10)))
@@ -404,6 +426,54 @@ mod tests {
         );
         assert!(
             update(&mut cache, voice(Some(1), 4, Some(10)))
+                .unwrap()
+                .before()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn guild_resync_releases_capacity_and_eviction_removes_empty_guilds() {
+        let mut cache = cache(3);
+        update(&mut cache, voice(Some(1), 3, Some(10))).unwrap();
+        update(&mut cache, voice(Some(1), 4, Some(10))).unwrap();
+        update(&mut cache, voice(Some(2), 3, Some(20))).unwrap();
+
+        assert!(
+            cache
+                .observe(&create(1, &[voice(None, 3, Some(11))]))
+                .is_none()
+        );
+        assert_eq!(cache.oldest.len(), 2);
+        assert_eq!(cache.by_guild[&Id::new(1)].len(), 1);
+        assert_eq!(cache.by_guild[&Id::new(2)].len(), 1);
+        update(&mut cache, voice(Some(3), 3, Some(30))).unwrap();
+
+        // The oldest state belongs to guild 2 even though guild 1 was added first.
+        update(&mut cache, voice(Some(3), 4, Some(30))).unwrap();
+        assert!(!cache.by_guild.contains_key(&Id::new(2)));
+        assert_eq!(cache.oldest.len(), 3);
+        assert_eq!(
+            update(&mut cache, voice(Some(1), 3, Some(12)))
+                .unwrap()
+                .before()
+                .unwrap()
+                .channel_id(),
+            Some(Id::new(11))
+        );
+
+        assert!(
+            cache
+                .observe(&Event::GuildDelete(GuildDelete {
+                    id: Id::new(3),
+                    unavailable: None,
+                }))
+                .is_none()
+        );
+        assert_eq!(cache.oldest.len(), 1);
+        assert_eq!(cache.by_guild.len(), 1);
+        assert!(
+            update(&mut cache, voice(Some(3), 4, Some(30)))
                 .unwrap()
                 .before()
                 .is_none()

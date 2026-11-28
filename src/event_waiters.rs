@@ -21,16 +21,17 @@ use twilight_model::{
     gateway::payload::incoming::ReactionAdd,
     id::{
         Id,
-        marker::{ChannelMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, UserMarker},
     },
+    voice::VoiceState,
 };
 
 /// 同時に待てるイベントの数と、各待機の受信枠です。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WaitLimits {
-    /// 全チャンネルとイベント種類を合わせた、同時待機の上限です。
+    /// 対象とイベント種類を問わず、同時待機の上限です。
     pub max_pending: usize,
-    /// チャンネルやイベント種類を問わず、同じユーザーについての同時待機の上限です。
+    /// 対象やイベント種類を問わず、同じユーザーについての同時待機の上限です。
     pub per_user: usize,
     /// 1 件の待機について、一時的に受け取れるイベント候補の上限です。
     pub queue_capacity: usize,
@@ -82,7 +83,7 @@ pub enum WaitError {
     Closed,
 }
 
-/// 指定したチャンネルとユーザーの、今後のイベントだけを待つためのハンドルです。
+/// 指定したチャンネルまたはサーバーとユーザーについて、今後のイベントを待つハンドルです。
 ///
 /// 一致する複数の待機には、同じイベントをそれぞれ配ります。
 /// 登録の時点から期限が進み、返される [EventWait] を破棄すると待機を取り消します。
@@ -109,7 +110,7 @@ impl EventWaiters {
         timeout: Duration,
     ) -> Result<EventWait<Message>, WaitError> {
         self.register(
-            Key::new(channel, user, Kind::Message),
+            Key::new(Scope::Message(channel), user),
             timeout,
             None,
             Sender::Message,
@@ -132,7 +133,7 @@ impl EventWaiters {
         predicate: impl FnMut(&Message) -> bool + Send + 'static,
     ) -> Result<EventWait<Message>, WaitError> {
         self.register(
-            Key::new(channel, user, Kind::Message),
+            Key::new(Scope::Message(channel), user),
             timeout,
             Some(Box::new(predicate)),
             Sender::Message,
@@ -151,7 +152,7 @@ impl EventWaiters {
         timeout: Duration,
     ) -> Result<EventWait<ReactionAdd>, WaitError> {
         self.register(
-            Key::new(channel, user, Kind::Reaction),
+            Key::new(Scope::Reaction(channel), user),
             timeout,
             None,
             Sender::Reaction,
@@ -173,10 +174,54 @@ impl EventWaiters {
         predicate: impl FnMut(&ReactionAdd) -> bool + Send + 'static,
     ) -> Result<EventWait<ReactionAdd>, WaitError> {
         self.register(
-            Key::new(channel, user, Kind::Reaction),
+            Key::new(Scope::Reaction(channel), user),
             timeout,
             Some(Box::new(predicate)),
             Sender::Reaction,
+        )
+    }
+
+    /// 指定したサーバーで、ユーザーの次のボイス状態更新を待ちます。
+    ///
+    /// 参加や移動のほか、ミュートなどの更新も届きます。退出時の
+    /// `channel_id` は `None` です。`GUILD_VOICE_STATES` Intent が必要です。
+    ///
+    /// # エラー
+    ///
+    /// 時間の指定、Intent、同時待機枠、または Tokio タイマーに問題がある場合に失敗します。
+    pub fn wait_for_voice_state(
+        &self,
+        guild: Id<GuildMarker>,
+        user: Id<UserMarker>,
+        timeout: Duration,
+    ) -> Result<EventWait<VoiceState>, WaitError> {
+        self.register(
+            Key::new(Scope::VoiceState(guild), user),
+            timeout,
+            None,
+            Sender::VoiceState,
+        )
+    }
+
+    /// ボイス状態更新を、移動先や退出などの条件で絞り込んで待ちます。
+    ///
+    /// 条件の実行場所と受信枠については [Self::wait_for_message_where] を参照してください。
+    ///
+    /// # エラー
+    ///
+    /// [Self::wait_for_voice_state] と同じです。
+    pub fn wait_for_voice_state_where(
+        &self,
+        guild: Id<GuildMarker>,
+        user: Id<UserMarker>,
+        timeout: Duration,
+        predicate: impl FnMut(&VoiceState) -> bool + Send + 'static,
+    ) -> Result<EventWait<VoiceState>, WaitError> {
+        self.register(
+            Key::new(Scope::VoiceState(guild), user),
+            timeout,
+            Some(Box::new(predicate)),
+            Sender::VoiceState,
         )
     }
 
@@ -198,10 +243,11 @@ impl EventWaiters {
         })
     }
 
-    pub(crate) fn activate(&self, messages: bool, reactions: bool) {
+    pub(crate) fn activate(&self, messages: bool, reactions: bool, voice_states: bool) {
         if let Ok(mut state) = self.shared.state.lock() {
             state.messages = messages;
             state.reactions = reactions;
+            state.voice_states = voice_states;
         }
     }
 
@@ -223,7 +269,7 @@ impl EventWaiters {
         channel: Id<ChannelMarker>,
         user: Id<UserMarker>,
     ) -> Option<u64> {
-        self.cutoff(Key::new(channel, user, Kind::Message))
+        self.cutoff(Key::new(Scope::Message(channel), user))
     }
 
     pub(crate) fn reaction_cutoff(
@@ -231,11 +277,19 @@ impl EventWaiters {
         channel: Id<ChannelMarker>,
         user: Id<UserMarker>,
     ) -> Option<u64> {
-        self.cutoff(Key::new(channel, user, Kind::Reaction))
+        self.cutoff(Key::new(Scope::Reaction(channel), user))
+    }
+
+    pub(crate) fn voice_state_cutoff(
+        &self,
+        guild: Id<GuildMarker>,
+        user: Id<UserMarker>,
+    ) -> Option<u64> {
+        self.cutoff(Key::new(Scope::VoiceState(guild), user))
     }
 
     pub(crate) fn deliver_message(&self, event: Arc<Message>, cutoff: u64) {
-        let key = Key::new(event.channel_id, event.author.id, Kind::Message);
+        let key = Key::new(Scope::Message(event.channel_id), event.author.id);
         self.deliver(key, cutoff, |sender| match sender {
             Sender::Message(sender) => {
                 matches!(
@@ -243,12 +297,12 @@ impl EventWaiters {
                     Err(mpsc::error::TrySendError::Full(_))
                 )
             }
-            Sender::Reaction(_) => false,
+            _ => false,
         });
     }
 
     pub(crate) fn deliver_reaction(&self, event: Arc<ReactionAdd>, cutoff: u64) {
-        let key = Key::new(event.channel_id, event.user_id, Kind::Reaction);
+        let key = Key::new(Scope::Reaction(event.channel_id), event.user_id);
         self.deliver(key, cutoff, |sender| match sender {
             Sender::Reaction(sender) => {
                 matches!(
@@ -256,7 +310,21 @@ impl EventWaiters {
                     Err(mpsc::error::TrySendError::Full(_))
                 )
             }
-            Sender::Message(_) => false,
+            _ => false,
+        });
+    }
+
+    pub(crate) fn deliver_voice_state(&self, event: Arc<VoiceState>, cutoff: u64) {
+        let Some(guild) = event.guild_id else {
+            return;
+        };
+        let key = Key::new(Scope::VoiceState(guild), event.user_id);
+        self.deliver(key, cutoff, |sender| match sender {
+            Sender::VoiceState(sender) => matches!(
+                sender.try_send(Arc::clone(&event)),
+                Err(mpsc::error::TrySendError::Full(_))
+            ),
+            _ => false,
         });
     }
 
@@ -276,7 +344,7 @@ impl EventWaiters {
         if shared.closed.load(Ordering::Acquire) {
             return Err(WaitError::Closed);
         }
-        if !state.enabled(key.kind) {
+        if !state.enabled(key.scope) {
             return Err(WaitError::NotEnabled);
         }
         let limits = shared.limits;
@@ -479,25 +547,21 @@ impl Drop for Registration {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum Kind {
-    Message,
-    Reaction,
+enum Scope {
+    Message(Id<ChannelMarker>),
+    Reaction(Id<ChannelMarker>),
+    VoiceState(Id<GuildMarker>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Key {
-    channel: Id<ChannelMarker>,
+    scope: Scope,
     user: Id<UserMarker>,
-    kind: Kind,
 }
 
 impl Key {
-    fn new(channel: Id<ChannelMarker>, user: Id<UserMarker>, kind: Kind) -> Self {
-        Self {
-            channel,
-            user,
-            kind,
-        }
+    fn new(scope: Scope, user: Id<UserMarker>) -> Self {
+        Self { scope, user }
     }
 }
 
@@ -505,6 +569,7 @@ impl Key {
 enum Sender {
     Message(mpsc::Sender<Arc<Message>>),
     Reaction(mpsc::Sender<Arc<ReactionAdd>>),
+    VoiceState(mpsc::Sender<Arc<VoiceState>>),
 }
 
 #[derive(Debug)]
@@ -519,6 +584,7 @@ struct Slot {
 struct State {
     messages: bool,
     reactions: bool,
+    voice_states: bool,
     sequence: u64,
     pending: usize,
     slots: HashMap<Key, Vec<Slot>>,
@@ -526,10 +592,11 @@ struct State {
 }
 
 impl State {
-    fn enabled(&self, kind: Kind) -> bool {
-        match kind {
-            Kind::Message => self.messages,
-            Kind::Reaction => self.reactions,
+    fn enabled(&self, scope: Scope) -> bool {
+        match scope {
+            Scope::Message(_) => self.messages,
+            Scope::Reaction(_) => self.reactions,
+            Scope::VoiceState(_) => self.voice_states,
         }
     }
 
@@ -588,6 +655,7 @@ mod tests {
     use super::*;
 
     const CHANNEL: Id<ChannelMarker> = Id::new(2);
+    const GUILD: Id<GuildMarker> = Id::new(2);
     const USER: Id<UserMarker> = Id::new(3);
     const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -612,14 +680,36 @@ mod tests {
         }
     }
 
+    fn voice(
+        guild: Option<Id<GuildMarker>>,
+        user: Id<UserMarker>,
+        channel: Option<Id<ChannelMarker>>,
+    ) -> Arc<VoiceState> {
+        Arc::new(VoiceState {
+            channel_id: channel,
+            guild_id: guild,
+            member: None,
+            user_id: user,
+            deaf: false,
+            mute: false,
+            self_deaf: false,
+            self_mute: false,
+            self_stream: false,
+            self_video: false,
+            suppress: false,
+            request_to_speak_timestamp: None,
+            session_id: "fixture".into(),
+        })
+    }
+
     fn active(limits: WaitLimits) -> EventWaiters {
         let waiters = EventWaiters::new(limits).unwrap();
-        waiters.activate(true, true);
+        waiters.activate(true, true, true);
         waiters
     }
 
     #[tokio::test]
-    async fn quotas_count_both_event_types_and_drop_releases_them() {
+    async fn quotas_count_all_event_types_and_drop_releases_them() {
         let limits = WaitLimits {
             max_pending: 2,
             per_user: 1,
@@ -632,18 +722,30 @@ mod tests {
                 .unwrap_err(),
             WaitError::NotEnabled
         );
-        waiters.activate(true, false);
+        waiters.activate(true, false, false);
         assert_eq!(
             waiters
                 .wait_for_reaction_add(CHANNEL, USER, TIMEOUT)
                 .unwrap_err(),
             WaitError::NotEnabled
         );
-        waiters.activate(true, true);
+        assert_eq!(
+            waiters
+                .wait_for_voice_state(GUILD, USER, TIMEOUT)
+                .unwrap_err(),
+            WaitError::NotEnabled
+        );
+        waiters.activate(true, true, true);
         let first = waiters.wait_for_message(CHANNEL, USER, TIMEOUT).unwrap();
         assert_eq!(
             waiters
                 .wait_for_reaction_add(Id::new(8), USER, TIMEOUT)
+                .unwrap_err(),
+            WaitError::UserCapacity
+        );
+        assert_eq!(
+            waiters
+                .wait_for_voice_state(GUILD, USER, TIMEOUT)
                 .unwrap_err(),
             WaitError::UserCapacity
         );
@@ -657,11 +759,53 @@ mod tests {
             WaitError::Capacity
         );
         drop(first);
-        let replacement = waiters.wait_for_message(CHANNEL, USER, TIMEOUT).unwrap();
+        let replacement = waiters.wait_for_voice_state(GUILD, USER, TIMEOUT).unwrap();
+        assert!(waiters.voice_state_cutoff(GUILD, USER).is_some());
         drop(second);
         drop(replacement);
         assert!(waiters.message_cutoff(CHANNEL, USER).is_none());
         assert!(waiters.reaction_cutoff(CHANNEL, Id::new(4)).is_none());
+        assert!(waiters.voice_state_cutoff(GUILD, USER).is_none());
+    }
+
+    #[tokio::test]
+    async fn voice_waiters_match_guild_user_predicate_and_registration_watermark() {
+        let waiters = active(WaitLimits::default());
+        let old = waiters.wait_for_voice_state(GUILD, USER, TIMEOUT).unwrap();
+        let cutoff = waiters.voice_state_cutoff(GUILD, USER).unwrap();
+        let first = waiters
+            .wait_for_voice_state_where(GUILD, USER, TIMEOUT, |event| event.channel_id.is_none())
+            .unwrap();
+        let second = waiters
+            .wait_for_voice_state_where(GUILD, USER, TIMEOUT, |event| event.channel_id.is_none())
+            .unwrap();
+        let other_guild = Id::new(8);
+        let other = waiters
+            .wait_for_voice_state(other_guild, USER, TIMEOUT)
+            .unwrap();
+
+        // 新しい待機を登録する前の退出イベントは、後から登録した条件に一致しても配らない。
+        let stale_leave = voice(Some(GUILD), USER, None);
+        waiters.deliver_voice_state(Arc::clone(&stale_leave), cutoff);
+        assert!(Arc::ptr_eq(&old.await.unwrap(), &stale_leave));
+
+        let cutoff = waiters.voice_state_cutoff(GUILD, USER).unwrap();
+        for unrelated in [
+            voice(None, USER, None),
+            voice(Some(GUILD), Id::new(4), None),
+            voice(Some(GUILD), USER, Some(CHANNEL)),
+        ] {
+            waiters.deliver_voice_state(unrelated, cutoff);
+        }
+        let other_leave = voice(Some(other_guild), USER, None);
+        waiters.deliver_voice_state(Arc::clone(&other_leave), cutoff);
+        let leave = voice(Some(GUILD), USER, None);
+        waiters.deliver_voice_state(Arc::clone(&leave), cutoff);
+        assert!(Arc::ptr_eq(&other.await.unwrap(), &other_leave));
+        assert!(Arc::ptr_eq(&first.await.unwrap(), &leave));
+        assert!(Arc::ptr_eq(&second.await.unwrap(), &leave));
+        assert!(waiters.voice_state_cutoff(GUILD, USER).is_none());
+        assert!(waiters.voice_state_cutoff(other_guild, USER).is_none());
     }
 
     #[tokio::test(start_paused = true)]

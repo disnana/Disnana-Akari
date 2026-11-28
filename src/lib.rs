@@ -52,6 +52,7 @@ pub mod soundboard;
 mod startup_readiness;
 mod thread_pages;
 mod timing;
+mod typing_indicator;
 pub mod ui;
 mod ui_sessions;
 pub mod validation;
@@ -89,7 +90,7 @@ use twilight_model::{
 
 pub use access::{Access, Needs, PermissionSnapshot};
 pub use argument_resolution::{
-    ArgumentResolutionError, resolve_channel, resolve_member, resolve_role,
+    ArgumentResolutionError, resolve_channel, resolve_member, resolve_role, resolve_user,
 };
 pub use audit_log_pages::{AuditLogPages, AuditLogPagesError};
 pub use autocomplete::AutocompleteContext;
@@ -161,6 +162,7 @@ pub use thread_pages::{ThreadPages, ThreadPagesError};
 pub use timing::Timing;
 pub use twilight_http as http;
 pub use twilight_model as model;
+pub use typing_indicator::TypingIndicator;
 pub use ui_sessions::{
     UiSession, UiSessionActions, UiSessionDraft, UiSessionError, UiSessionLimits, UiSessionOutcome,
     UiSessions,
@@ -386,7 +388,7 @@ impl Bot {
         (self, handle)
     }
 
-    /// メッセージやリアクションを期限付きで待つためのハンドルを作ります。
+    /// メッセージ、リアクション、ユーザーのボイス状態を期限付きで待つハンドルを作ります。
     ///
     /// Bot の起動と必要な Intent の指定が必要です。Intent は自動で追加しません。
     /// ハンドルはコマンドなどに渡して共有できます。
@@ -841,7 +843,7 @@ impl Bot {
                 gateway_lost(shard, &permissions, member_cache.as_ref());
             },
             |gateway, event| {
-                waiters.observe_reaction(&event);
+                waiters.observe(&event);
                 let shard = gateway.id();
                 observe_startup(startup.as_ref(), shard, &event);
                 let derived = gateway.observe_derived_gateway_event(&event);

@@ -328,6 +328,8 @@ async fn check(ctx: CommandContext<'_>) -> Result<()> {
 
 `CommandContext` の `resolve_member`、`resolve_role`、`resolve_channel` は、コマンドが実行されたサーバーで ID・メンション・名前を解決します。名前は完全一致で比較し、同名の異なる候補があると `ArgumentResolutionError::Ambiguous` を返します。空白を含む名前は引用符で囲めます。
 
+`ctx.resolve_user(argument)` は ID またはユーザーメンションで Discord ユーザーを取得し、DM でも使えます。名前からサーバーメンバーを探す場合は `resolve_member` を使います。 [discord.py の UserConverter](https://discordpy.readthedocs.io/en/v2.7.1/ext/commands/api.html#discord.ext.commands.UserConverter)
+
 ```rust
 use disnana_akari::{CommandContext, Error, Result};
 

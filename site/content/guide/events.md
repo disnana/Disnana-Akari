@@ -113,6 +113,8 @@ async fn answer(
 
 `wait_for_message` と `wait_for_reaction_add` は、指定のチャンネルとユーザーに一致する次のイベントを返します。`_where` 付きのメソッドでは、本文・メッセージ ID・絵文字などに条件を追加できます。待機を作れるのは Bot の起動後です。メッセージには `GUILD_MESSAGES` または `DIRECT_MESSAGES`、リアクションには `GUILD_MESSAGE_REACTIONS` または `DIRECT_MESSAGE_REACTIONS` を指定します。上の例は本文を読むため `MESSAGE_CONTENT` も使います。
 
+サーバーとユーザーを指定してボイス状態の更新を待つには `wait_for_voice_state` を使います。 `wait_for_voice_state_where(guild, user, timeout, |state| state.channel_id.is_none())` なら退出を待てます。`GUILD_VOICE_STATES` Intent が必要です。受け取るのは Gateway の状態更新で、キャッシュにある現在の状態や初期同期の一覧は返しません。
+
 イベントは通常のハンドラーにも届きます。同じ対象を待つ複数のタスクがあれば、それぞれがイベントを受け取れます。待機数は Bot 全体とユーザー単位で制限され、待機を破棄するか期限が来ると枠が空きます。Bot が停止すると待機はキャンセルされます。条件関数は待機タスクで実行されるので、同期処理は短く保ってください。条件付き待機で候補の待ち行列があふれた場合は `WaitError::Overflow` を返します。 [discord.py の wait_for](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.Client.wait_for)
 
 ## 編集・削除を受け取る

@@ -7,8 +7,9 @@ use twilight_model::{
     guild::Role,
     id::{
         Id,
-        marker::{ChannelMarker, GuildMarker, RoleMarker},
+        marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
     },
+    user::User,
 };
 
 use crate::DiscordArgument;
@@ -19,6 +20,7 @@ pub use member::resolve as resolve_member;
 const MAX_NAME_CHARS: usize = 100;
 const UNKNOWN_CHANNEL: u64 = 10_003;
 const UNKNOWN_ROLE: u64 = 10_011;
+const UNKNOWN_USER: u64 = 10_013;
 
 /// テキスト入力から Discord の対象を特定できなかった理由です。
 #[derive(Debug, thiserror::Error)]
@@ -30,8 +32,8 @@ pub enum ArgumentResolutionError {
     /// 空の名前、長さの上限、または ID やメンションの形式が無効です。
     #[error("対象の名前や ID の形式が無効です")]
     InvalidInput,
-    /// このサーバーで対象を特定できませんでした。
-    #[error("このサーバーに対象が見つかりません")]
+    /// 指定された範囲で対象を特定できませんでした。
+    #[error("対象が見つかりません")]
     NotFound,
     /// 同じ名前の候補が複数あり、対象を一意に特定できませんでした。
     #[error("対象を一意に特定できません。ID またはメンションで指定してください")]
@@ -58,6 +60,29 @@ impl From<DeserializeBodyError> for ArgumentResolutionError {
     fn from(error: DeserializeBodyError) -> Self {
         Self::HttpBody(error)
     }
+}
+
+/// ユーザー ID またはユーザーのメンションから、Discord のユーザーを取得します。
+///
+/// REST でユーザーを直接取得するため、サーバー情報がない DM でも使えます。
+/// ユーザー名やニックネームからサーバー内で探す場合は [`resolve_member`] を使います。
+///
+/// # エラー
+///
+/// 入力形式が無効な場合、ユーザーが見つからない場合、または通信に失敗した場合に
+/// [`ArgumentResolutionError`] を返します。
+pub async fn resolve_user(http: &Client, argument: &str) -> Result<User, ArgumentResolutionError> {
+    let id = Id::<UserMarker>::parse_discord_argument(argument)
+        .ok_or(ArgumentResolutionError::InvalidInput)?;
+    let user = http
+        .user(id)
+        .await
+        .map_err(|error| unknown_or_http(error, UNKNOWN_USER))?
+        .model()
+        .await?;
+    (user.id == id)
+        .then_some(user)
+        .ok_or(ArgumentResolutionError::NotFound)
 }
 
 /// 指定したサーバーのロールを、名前、ID、またはロールのメンションから特定します。
@@ -199,6 +224,61 @@ mod tests {
         let mut value: Value = serde_json::from_str(&role_json(id, 1)).unwrap();
         value["name"] = json!(name);
         value
+    }
+
+    #[tokio::test]
+    async fn direct_user_lookup_accepts_ids_and_mentions_and_checks_returned_identity() {
+        let clockwork = r#"{"id":"35","username":"clockwork","discriminator":"0"}"#;
+        let server = Mock::start_with_errors(
+            vec![
+                ("/users/35".into(), clockwork.into()),
+                ("/users/36".into(), clockwork.into()),
+            ],
+            vec![
+                (
+                    "/users/37",
+                    "404 Not Found",
+                    r#"{"code":10013,"message":"Unknown User"}"#,
+                ),
+                (
+                    "/users/38",
+                    "403 Forbidden",
+                    r#"{"code":50001,"message":"Missing Access"}"#,
+                ),
+            ],
+        )
+        .await;
+        let http = server.client();
+        for input in [
+            "",
+            "0",
+            "<@&35>",
+            "<#35>",
+            "clockwork",
+            "https://discord.com/users/35",
+        ] {
+            assert!(matches!(
+                resolve_user(&http, input).await,
+                Err(ArgumentResolutionError::InvalidInput)
+            ));
+        }
+        assert_eq!(server.count("GET /users/35"), 0);
+        for input in ["35", "<@35>", "<@!35>"] {
+            let user = resolve_user(&http, input).await.unwrap();
+            assert_eq!(user.id, Id::new(35));
+            assert_eq!(user.name, "clockwork");
+        }
+        assert_eq!(server.count("GET /users/35"), 3);
+        for input in ["36", "37"] {
+            assert!(matches!(
+                resolve_user(&http, input).await,
+                Err(ArgumentResolutionError::NotFound)
+            ));
+        }
+        assert!(matches!(
+            resolve_user(&http, "38").await,
+            Err(ArgumentResolutionError::Http(_))
+        ));
     }
 
     #[tokio::test]
