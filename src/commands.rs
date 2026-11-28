@@ -13,7 +13,7 @@ pub use help::{CommandInfo, CommandMetadata};
 use invoke::{InvocationHooks, parsed_handler};
 pub use prefix::CommandPrefixes;
 use prefix::PrefixPolicy;
-pub(crate) use workers::text_workers;
+pub(crate) use workers::{TextIngress, text_workers};
 
 use twilight_model::{
     channel::Message,
@@ -143,6 +143,7 @@ impl Commands {
     /// 一覧と個別の使い方を返す、標準のヘルプコマンドを指定の名前で登録します。
     ///
     /// 例えば `help` を登録すると `!help` や `!help config set` で使えます。
+    /// 1 メッセージに収まらない場合は、行の区切りを優先し、複数の返信に分けて順番に送ります。
     /// 非表示に設定したコマンドとその配下は出しません。ヘルプを実行する際は通常のチェックを行い、
     /// 一覧に表示する各コマンドのチェックは呼びません。利用者に表示したくないコマンドは
     /// [`CommandMetadata::hidden`] で隠せます。

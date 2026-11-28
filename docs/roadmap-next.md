@@ -404,32 +404,6 @@ ctx.manage().create_forum_post(
 
 ## wait_for
 
-### 使い方
+`Bot::with_waiters` から取得した `EventWaiters` で、メッセージとリアクション追加の待機を登録できます。イベントの種類、チャンネル、ユーザーで索引し、全体・ユーザー別の待機数と各待機の候補数に上限を設けます。期間と終了は Future が管理し、条件関数はそのタスクで評価します。 [登録例と Intent](../site/content/guide/events.md#次のメッセージやリアクションを待つ)
 
-<!-- no-check -->
-```rust
-let answer = ctx.wait_message(
-    |m| m.author.id == author && m.channel_id == channel,
-    Duration::from_secs(30),
-).await;   // Result<Message, WaitError>
-```
-
-`WaitError` は、`Timeout`、`Cancelled`、`TooManyWaiters`、`NotEnabled` です。
-
-### 制約
-
-1. **opt-in**: `Bot::with_waiters(WaitLimits { max_pending, per_user })` を呼ぶまで無効です。未設定で呼ぶと `NotEnabled` を返します。
-2. **タイムアウト必須**: 無期限の待機は書けません。
-3. **上限つき**: 全体とユーザーごとの上限を超えたら `TooManyWaiters` を返します。
-4. **後始末**: 待機中の Future が捨てられたら登録を外します（`Drop`）。シャットダウンでは全員に `Cancelled` を返します。
-5. **高速**: 待機を（種類、チャンネル）で索引し、イベントごとの検査を、そのチャンネルの待機者だけにします。条件は同期で軽く、パニックしても Bot は止めません。
-6. **規則性**: 一致したイベントは、通常のハンドラーにも渡します。待機が奪うことはありません。
-
-### 制限と段階
-
-- 再起動すると待機は消えます。再起動後も続けたい操作には `DynamicId` を使います。
-- 第 1 段階はメッセージとリアクションです。ボタン、セレクト、モーダルは 3 秒以内の応答が必要でライフタイムも難しいので、別に設計します。
-
-### テスト
-
-タイムアウト、`Drop` での解除、シャットダウン、上限超過、条件のパニック、同時多数の待機でメモリが一定に収まること。
+再起動をまたぐ操作は `DynamicId` で登録します。ボタン、セレクト、モーダルを待つ場合は Discord の初回応答期限と応答の所有権を管理する仕組みが別途必要です。

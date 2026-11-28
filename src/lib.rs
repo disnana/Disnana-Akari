@@ -8,10 +8,12 @@ mod commands;
 mod concurrency;
 mod cooldown;
 mod error;
+mod event_waiters;
 mod events;
 mod flags;
 mod gateway_runtime;
 mod gateway_status;
+mod gateway_waiters;
 mod guild_lifecycle;
 mod hooks;
 mod hybrid;
@@ -42,6 +44,7 @@ use std::{env, fmt, num::NonZeroU16, sync::Arc, time::Duration};
 
 use events::{ActivityEvent, ReactionEvent, VoiceNotification};
 use gateway_runtime::GatewayPlan;
+use gateway_waiters::WaiterRuntime;
 use member_cache::{
     BootstrapConfig, BootstrapWorker, CachedMemberEvent, MemberCacheRoute, MemberCacheRuntime,
 };
@@ -76,6 +79,7 @@ pub use error::{
     CheckFailure, CommandSyncError, Error, HandlerError, HandlerKind, HierarchyDenied,
     InvalidArgument, QueueKind, RegistrationError, ResponseStateError, SelectionError,
 };
+pub use event_waiters::{EventWait, EventWaiters, WaitError, WaitLimits};
 pub use events::{
     Events, GatewayPayload, GuildSoundboardSoundCreate, GuildSoundboardSoundDelete,
     GuildSoundboardSoundUpdate, GuildSoundboardSoundsUpdate, MessageDelete, MessageDeleteBulk,
@@ -165,6 +169,7 @@ pub struct Bot {
     recommended_shards: bool,
     gateway_status: Option<GatewayStatusHandle>,
     voice_gateway: Option<VoiceGateway>,
+    event_waiters: Option<EventWaiters>,
     #[cfg(test)]
     gateway_test_port: Option<u16>,
     #[cfg(test)]
@@ -187,6 +192,7 @@ impl fmt::Debug for Bot {
             .field("message_cache_capacity", &self.message_cache_capacity)
             .field("member_cache_capacity", &self.member_cache_capacity)
             .field("has_shutdown_handle", &self.shutdown.is_some())
+            .field("has_event_waiters", &self.event_waiters.is_some())
             .field("recommended_shards", &self.recommended_shards)
             .finish()
     }
@@ -225,6 +231,7 @@ impl Bot {
             recommended_shards: false,
             gateway_status: None,
             voice_gateway: None,
+            event_waiters: None,
             #[cfg(test)]
             gateway_test_port: None,
             #[cfg(test)]
@@ -290,6 +297,20 @@ impl Bot {
             .get_or_insert_with(ShutdownHandle::new)
             .clone();
         (self, handle)
+    }
+
+    /// メッセージやリアクションを期限付きで待つためのハンドルを作ります。
+    ///
+    /// Bot の起動と必要な Intent の指定が必要です。Intent は自動で追加しません。
+    /// ハンドルはコマンドなどに渡して共有できます。
+    ///
+    /// # エラー
+    ///
+    /// 待機数や待ち行列の上限が無効なときは失敗します。
+    pub fn with_waiters(mut self, limits: WaitLimits) -> Result<(Self, EventWaiters), WaitError> {
+        let waiters = EventWaiters::new(limits)?;
+        self.event_waiters = Some(waiters.clone());
+        Ok((self, waiters))
     }
 
     /// 指定されたサーバーでスラッシュコマンドを有効にします。
@@ -527,6 +548,7 @@ impl Bot {
             recommended_shards,
             gateway_status,
             voice_gateway,
+            event_waiters,
             #[cfg(test)]
             gateway_test_port,
             #[cfg(test)]
@@ -548,6 +570,7 @@ impl Bot {
         let text_commands = text_commands.as_ref();
         let needs_messages = observe_messages || text_commands.is_some();
         let intents = intents.unwrap_or_else(Intents::empty) | additional_intents;
+        let waiters = WaiterRuntime::new(event_waiters, intents);
         check_intents(intents, needs_messages)?;
         let handler_events = handler_event_types(&events, intents)?;
         let voice_notifications = events.voice_notification_types(intents)?;
@@ -577,6 +600,7 @@ impl Bot {
             slash.is_some() || events.interaction_handlers.has_handlers(),
             permission_cache_events(needs_messages && permissions.cache_enabled(), intents),
         ) | handler_events
+            | waiters.event_types()
             | message_cache
                 .as_ref()
                 .map_or_else(EventTypeFlags::empty, MessageCacheRuntime::event_types)
@@ -614,6 +638,14 @@ impl Bot {
             mpsc::channel::<Pending<InteractionEvent>>(limits.queue_capacity);
         let (busy, busy_queue) = mpsc::channel(limits.queue_capacity);
         let slash = slash.as_ref();
+        let message_ingress = GatewayMessageIngress {
+            include_bots,
+            observe_messages,
+            text: &text_ingress,
+            events: &event_tx,
+            waiters: &waiters,
+            hooks: &hooks,
+        };
 
         let handle_events = dispatch_events(
             event_queue,
@@ -636,6 +668,7 @@ impl Bot {
             respond_interaction_busy(pending, &http, &hooks)
         });
 
+        waiters.activate();
         let receive = gateways.drive(
             event_types,
             GatewayDecodeOptions {
@@ -645,6 +678,7 @@ impl Bot {
             },
             |shard| gateway_lost(shard, &permissions, member_cache.as_ref()),
             |gateway, event| {
+                waiters.observe_reaction(&event);
                 let shard = gateway.id();
                 let lifecycle = gateway.observe_guild_lifecycle(&event);
                 let cache = message_cache.as_ref().map(|cache| cache.shard(shard));
@@ -680,38 +714,7 @@ impl Bot {
                         hooks.info.report(InfoEvent::GatewayResumed);
                     }
                     Event::MessageCreate(message) => {
-                        let accepted = accepts_message(
-                            include_bots,
-                            gateway.own_id(),
-                            message.author.id,
-                            message.author.bot,
-                            message.webhook_id.is_some(),
-                        );
-                        let text_route = accepted
-                            .then(|| text_ingress.classify(&message.content))
-                            .flatten();
-                        let observe = accepted && observe_messages;
-                        if !observe && text_route.is_none() && cache.is_none() {
-                            return;
-                        }
-                        let message = Arc::new(message.message);
-                        if let Some(cache) = cache {
-                            cache.store(Arc::clone(&message));
-                        }
-                        if observe {
-                            queue_event(
-                                &event_tx,
-                                MessageEvent::Message(Pending::new(
-                                    Arc::clone(&message),
-                                    gateway_rtt,
-                                )),
-                                "MESSAGE_CREATE",
-                                &hooks.reporter,
-                            );
-                        }
-                        if let Some(route) = text_route {
-                            text_ingress.submit(route, Pending::new(message, gateway_rtt), &hooks);
-                        }
+                        message_ingress.route(message.message, gateway.own_id(), gateway_rtt, cache)
                     }
                     Event::InteractionCreate(interaction)
                         if events.interaction_handlers.accepts(&interaction.0)
@@ -752,6 +755,7 @@ impl Bot {
             shutdown::drive(receive, workers.as_mut(), &mut shutdown),
         )
         .await;
+        waiters.close();
         suspend_member_reads(member_cache.as_ref());
         if let Err(error) = stopped {
             if recommended_shards {
@@ -763,6 +767,60 @@ impl Bot {
         drop((event_tx, text_ingress, interactions, busy));
         shutdown::finish(gateways.close(), workers).await;
         Ok(())
+    }
+}
+
+struct GatewayMessageIngress<'a> {
+    include_bots: bool,
+    observe_messages: bool,
+    text: &'a commands::TextIngress<'a>,
+    events: &'a mpsc::Sender<MessageEvent>,
+    waiters: &'a WaiterRuntime,
+    hooks: &'a Hooks,
+}
+
+impl GatewayMessageIngress<'_> {
+    fn route(
+        &self,
+        message: Message,
+        own_id: Option<Id<UserMarker>>,
+        gateway_rtt: Option<Duration>,
+        cache: Option<MessageCacheRoute<'_>>,
+    ) {
+        let accepted = accepts_message(
+            self.include_bots,
+            own_id,
+            message.author.id,
+            message.author.bot,
+            message.webhook_id.is_some(),
+        );
+        let text_route = accepted
+            .then(|| self.text.classify(&message.content))
+            .flatten();
+        let observe = accepted && self.observe_messages;
+        let cutoff = self.waiters.message_cutoff(&message);
+        if !observe && text_route.is_none() && cache.is_none() && cutoff.is_none() {
+            return;
+        }
+        let message = Arc::new(message);
+        if let Some(cache) = cache {
+            cache.store(Arc::clone(&message));
+        }
+        if let Some(cutoff) = cutoff {
+            self.waiters.deliver_message(Arc::clone(&message), cutoff);
+        }
+        if observe {
+            queue_event(
+                self.events,
+                MessageEvent::Message(Pending::new(Arc::clone(&message), gateway_rtt)),
+                "MESSAGE_CREATE",
+                &self.hooks.reporter,
+            );
+        }
+        if let Some(route) = text_route {
+            self.text
+                .submit(route, Pending::new(message, gateway_rtt), self.hooks);
+        }
     }
 }
 

@@ -254,6 +254,93 @@ fn available_guild_payload(id: u64) -> Value {
     payload
 }
 
+#[tokio::test]
+async fn loopback_gateway_fulfills_event_waits_and_cancels_on_shutdown() {
+    use crate::{WaitError, WaitLimits, model::channel::Message};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready, mut ready_rx) = mpsc::unbounded_channel();
+    let (ordinary, mut ordinary_rx) = mpsc::unbounded_channel();
+    let (from_handler, mut from_handler_rx) = mpsc::unbounded_channel();
+    let intents =
+        Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT | Intents::GUILD_MESSAGE_REACTIONS;
+    let (bot, waiters) = Bot::new(FIXTURE_TOKEN)
+        .unwrap()
+        .with_intents(intents)
+        .with_waiters(WaitLimits::default())
+        .unwrap();
+    let channel = Id::new(5);
+    let user = Id::new(6);
+    let deadline = Duration::from_secs(3);
+    let handler_waiters = waiters.clone();
+    let mut events = Events::new();
+    events.on_ready(async move |_: &Ready| -> crate::Result<()> {
+        // on_ready が通常のイベントキューを処理中でも、待機は Gateway から解決される。
+        let pending = handler_waiters
+            .wait_for_message(channel, user, deadline)
+            .map_err(Error::handler)?;
+        ready.send(()).map_err(Error::handler)?;
+        from_handler
+            .send(pending.await.map_err(Error::handler)?.id)
+            .map_err(Error::handler)
+    });
+    events.on_message(async move |message: &Message| ordinary.send(message.id));
+    let (mut bot, shutdown) = bot.with_events(events).with_shutdown();
+    bot.gateway_test_port = Some(address.port());
+    assert!(matches!(
+        waiters.wait_for_message(channel, user, deadline),
+        Err(WaitError::NotEnabled)
+    ));
+    let gateway = async {
+        let mut socket = accept(&listener).await;
+        let identify = receive_opcode(&mut socket, 2).await;
+        assert_eq!(identify["d"]["intents"], intents.bits());
+        send_ready(
+            &mut socket,
+            &format!("ws://{address}"),
+            "event-wait",
+            [0, 1],
+        )
+        .await;
+        assert_eq!(ready_rx.recv().await, Some(()));
+
+        let message = waiters
+            .wait_for_message_where(channel, user, deadline, |message| {
+                message.content == "verify heartbeat RTT"
+            })
+            .unwrap();
+        let reaction = waiters
+            .wait_for_reaction_add(channel, user, deadline)
+            .unwrap();
+        socket.send(Frame::text(MESSAGE)).await.unwrap();
+        send_dispatch(
+            &mut socket,
+            3,
+            "MESSAGE_REACTION_ADD",
+            json!({
+                "channel_id":"5", "message_id":"10", "guild_id":"4", "user_id":"6",
+                "emoji":{"id":null, "name":"👍"}, "burst":false, "type":0
+            }),
+        )
+        .await;
+        assert_eq!(message.await.unwrap().id, Id::new(10));
+        assert_eq!(reaction.await.unwrap().message_id, Id::new(10));
+        assert_eq!(from_handler_rx.recv().await, Some(Id::new(10)));
+        assert_eq!(ordinary_rx.recv().await, Some(Id::new(10)));
+        let pending = waiters.wait_for_message(channel, user, deadline).unwrap();
+        shutdown.request();
+        assert!(matches!(pending.await, Err(WaitError::Closed)));
+        expect_close(&mut socket, 1000).await;
+    };
+    let (result, ()) = timeout(Duration::from_secs(10), async {
+        tokio::join!(bot.start(), gateway)
+    })
+    .await
+    .unwrap();
+    assert!(result.is_ok(), "{result:?}");
+}
+
 async fn mock_gateway(
     listener: TcpListener,
     url: &str,

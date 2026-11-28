@@ -21,7 +21,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 twilight-gateway = "0.18"
 twilight-http = "0.18"

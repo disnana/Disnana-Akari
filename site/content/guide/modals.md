@@ -197,7 +197,7 @@ async fn submit(ctx: &mut ModalContext<'_>) -> Result<()> {
 | `ctx.reply(text)` / `ctx.reply_ephemeral(text)` | 返信します。 |
 | `ctx.defer()` / `ctx.defer_ephemeral()` | 「処理中」を出して、あとで `reply` で置き換えます。 |
 | `ctx.followup(text)` / `ctx.followup_ephemeral(text)` | 追加のメッセージを送ります。 |
-| `ctx.followup_files(text, &files, limits)` / `ctx.followup_files_ephemeral(text, &files, limits)` | 添付付きの追加メッセージを送ります。遅延応答後は先に `reply` などで待機表示を完成させます。[添付付きフォローアップ](responding.md#追加のメッセージにファイルを添付する) |
+| `ctx.followup_files(text, &files, limits)` / `ctx.followup_files_ephemeral(text, &files, limits)` | 添付付きの追加メッセージを送ります。`defer` で作った待機表示があれば、先に `reply` などで完成させます。`defer_update` 後はそのまま送れます。[添付付きフォローアップ](responding.md#追加のメッセージにファイルを添付する) |
 
 ```rust
 use disnana_akari::{ModalContext, Result};

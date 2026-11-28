@@ -78,6 +78,43 @@ async fn on_guild_lifecycle(event: &GuildLifecycleEvent) -> Result<()> {
 
 状態はシャードごとに管理します。再開（Resume）では状態を引き継ぎ、新しい `Ready` で読み込みをやり直します。関連する Gateway ペイロードの解釈に失敗すると、そのシャードの分類は次の `Ready` まで停止します。サーバーの詳しいデータも必要なら、`on_gateway` で `GuildCreate` や `GuildDelete` をあわせて受け取れます。 [Discord の Gateway イベント](https://docs.discord.com/developers/events/gateway-events#guild-create) · [discord.py のサーバーイベント](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.on_guild_join)
 
+## 次のメッセージやリアクションを待つ
+
+`Bot::with_waiters` で待機を有効にし、返された `EventWaiters` をコマンドやタスクで共有します。チャンネルとユーザーを指定し、次の投稿やリアクションが届くまで期限付きで待てます。登録は呼び出した時点で行われるので、ボットが質問を送る前に待機を作っておくと、すぐに返った回答も受け取れます。
+
+```rust
+use std::time::Duration;
+use disnana_akari::{
+    Bot, EventWaiters, Error, Result, WaitLimits,
+    model::{gateway::Intents, id::{Id, marker::{ChannelMarker, UserMarker}}},
+};
+
+fn configure(bot: Bot) -> Result<(Bot, EventWaiters)> {
+    bot.add_intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
+        .with_waiters(WaitLimits::default())
+        .map_err(Error::handler)
+}
+
+async fn answer(
+    waiters: &EventWaiters,
+    channel: Id<ChannelMarker>,
+    user: Id<UserMarker>,
+) -> Result<String> {
+    let pending = waiters.wait_for_message_where(
+        channel,
+        user,
+        Duration::from_secs(30),
+        |message| matches!(message.content.as_str(), "はい" | "いいえ"),
+    ).map_err(Error::handler)?;
+    let message = pending.await.map_err(Error::handler)?;
+    Ok(message.content.clone())
+}
+```
+
+`wait_for_message` と `wait_for_reaction_add` は、指定のチャンネルとユーザーに一致する次のイベントを返します。`_where` 付きのメソッドでは、本文・メッセージ ID・絵文字などに条件を追加できます。待機を作れるのは Bot の起動後です。メッセージには `GUILD_MESSAGES` または `DIRECT_MESSAGES`、リアクションには `GUILD_MESSAGE_REACTIONS` または `DIRECT_MESSAGE_REACTIONS` を指定します。上の例は本文を読むため `MESSAGE_CONTENT` も使います。
+
+イベントは通常のハンドラーにも届きます。同じ対象を待つ複数のタスクがあれば、それぞれがイベントを受け取れます。待機数は Bot 全体とユーザー単位で制限され、待機を破棄するか期限が来ると枠が空きます。Bot が停止すると待機はキャンセルされます。条件関数は待機タスクで実行されるので、同期処理は短く保ってください。条件付き待機で候補の待ち行列があふれた場合は `WaitError::Overflow` を返します。 [discord.py の wait_for](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.Client.wait_for)
+
 ## 編集・削除を受け取る
 
 キャッシュに依存しない、discord.py の raw イベントに対応しています。

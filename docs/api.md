@@ -553,7 +553,7 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 
 `SlashContext`、`ModalContext`、`ButtonContext` と各選択メニューのコンテキストでは、公開の `followup_files(&self, content: &str, files: &[Attachment], limits: AttachmentLimits)` と、本人だけに送る `followup_files_ephemeral` を使えます。`Attachment` は `model::http::attachment::Attachment`、`AttachmentLimits` は `validation::AttachmentLimits` です。添付だけを送るときは本文に空文字を指定します。本文と添付が両方空の場合はエラーになります。
 
-スラッシュコマンドとフォーム送信では、遅延応答の待機表示を `reply` などで完成させた後に送れます。ボタンと選択メニューでは、`defer_update` で操作を受け付けた後にすぐ送れます。公開範囲は追加メッセージごとに選べます。送信前に本文、添付の件数・名前・ID・サイズを検証し、Discord が Interaction に通知した1ファイルのサイズ上限と `AttachmentLimits` が適用されます。[Discord の追加メッセージ API](https://docs.discord.com/developers/interactions/receiving-and-responding#create-followup-message)
+`defer` で待機表示を作った場合は、`reply` などで完成させた後に送れます。ボタン、選択メニュー、元メッセージのあるフォーム送信では、`defer_update` で受け付けた後にすぐ送れます。公開範囲は追加メッセージごとに選べます。送信前に本文、添付の件数・名前・ID・サイズを検証し、Discord が Interaction に通知した1ファイルのサイズ上限と `AttachmentLimits` が適用されます。[Discord の追加メッセージ API](https://docs.discord.com/developers/interactions/receiving-and-responding#create-followup-message)
 
 ### テキストコマンドの実行フック
 
@@ -565,13 +565,21 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 
 `Events::on_guild_lifecycle` で `GuildLifecycleEvent` を受け取ります。イベントには `guild_id()`、`shard()`、`kind()` があります。`GuildLifecycleKind` は初回読み込み、参加、一時停止、復旧、退出を区別します。必要な Intent は `model::gateway::Intents::GUILDS` です。
 
+## イベントを期限付きで待つ
+
+`Bot::with_waiters(WaitLimits)` で `EventWaiters` を取得します。`wait_for_message`、`wait_for_reaction_add` と、それぞれの `_where` 版は、チャンネル ID、ユーザー ID、待ち時間を指定して `EventWait<T>` を作ります。`await` すると、受け取ったメッセージやリアクションを `Arc<T>` で返します。失敗は `WaitError` で判定できます。ハンドルは必要な Gateway Intent がある種類だけを有効にし、待機の登録は通常のイベント配信と独立しています。
+
+## フォームを開いたメッセージの更新
+
+コンポーネントから開いたフォームの `ModalContext` では `source_message`、`defer_update`、`update_message`、`update_v2` を使えます。`defer_update` 後は、同じ元メッセージを編集し、別のフォローアップを送れます。元メッセージがない場合は `ResponseStateError::SourceMessageUnavailable` です。
+
 ## 送信前の検証
 
 `validation::message_content`、`attachment_count`、`attachment_sizes` で、本文の文字数、保持分を含む添付件数、Discord が通知した1ファイルのバイト上限を確認します。本文は上限超過を検出した時点で走査を打ち切ります。 `AttachmentLimits` では、保持分を含む件数、1 ファイルのサイズ、新規送信分の合計サイズにアプリ独自の上限を設定できます。値を `None` にすると、その項目のアプリ独自の検査を外します。`ComponentsV2::attachment_limits` で返信と編集に適用できます。`UiMessage::validate`、`ComponentsV2::validate`、`Modal::validate` は各ビルダーの構成を検証します。
 
 ## テキストコマンドのメタデータとヘルプ
 
-`CommandMetadata` で説明、使い方、標準ヘルプの表示有無を設定できます。`Commands::set_metadata` は正式名または別名から指定し、`command_info(path)` と `command_infos()` で登録情報を参照できます。`Commands::register_help(name)` で一覧と詳細を表示するテキストコマンドを追加します。
+`CommandMetadata` で説明、使い方、標準ヘルプの表示有無を設定できます。`Commands::set_metadata` は正式名または別名から指定し、`command_info(path)` と `command_infos()` で登録情報を参照できます。`Commands::register_help(name)` で一覧と詳細を表示するテキストコマンドを追加します。長い一覧や説明は、本文上限に収まる複数の返信へ分けます。
 
 ## そのほかの公開型
 
