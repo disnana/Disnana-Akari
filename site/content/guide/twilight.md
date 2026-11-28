@@ -140,9 +140,9 @@ async fn list_archived(http: &Client, channel: Id<ChannelMarker>) -> Result<()> 
 
 ## 監査ログ・予定イベントの登録ユーザー・ピン留めを読む
 
-`AuditLogPages` は監査ログを最大100件ずつ取得し、エントリーに関連するユーザーやスレッドなどの情報もページごとに返します。既定は新しい順で、`oldest_first()` または `after(entry_id)` を指定すると古い順です。`actor` と `action` で絞り込めます。Bot に `VIEW_AUDIT_LOG` が必要です。 [Discord の監査ログ API](https://docs.discord.com/developers/resources/audit-log#get-guild-audit-log)
+`AuditLogPages` は監査ログを最大100件ずつ取得し、エントリーに関連するユーザーやスレッドなどの情報もページごとに返します。既定は新しい順で、`oldest_first()` または `after(entry_id)` を指定すると古い順です。`actor` と `action` で絞り込めます。Bot に `VIEW_AUDIT_LOG` が必要です。Discord が操作種別を `null` で返す行は読み飛ばします。そのページの項目が空でも、`next_page()` が `None` を返すまで読み進められます。 [Discord の監査ログ API](https://docs.discord.com/developers/resources/audit-log#get-guild-audit-log) · [discord.py の監査ログ実装](https://github.com/Rapptz/discord.py/blob/v2.7.1/discord/guild.py#L4008-L4013)
 
-`ScheduledEventUserPages` は予定イベントに「興味あり」を登録したユーザーを最大100件ずつ取得します。`with_member(true)` を指定すると、Discord が返せる場合にサーバーメンバー情報も取得できます。`before` を指定してもページ内は ID の昇順で、ページを進めるごとに小さい ID の範囲に移ります。 [Discord の予定イベント登録ユーザー API](https://docs.discord.com/developers/resources/guild-scheduled-event#get-guild-scheduled-event-users)
+`ScheduledEventUserPages` は予定イベントに「興味あり」を登録したユーザーを最大100件ずつ取得します。`with_member(true)` を指定すると、Discord が返せる場合にサーバーメンバー情報も取得できます。メンバー内でユーザー情報が省略された場合は、同じ登録項目のユーザー情報を使います。`before` を指定してもページ内は ID の昇順で、ページを進めるごとに小さい ID の範囲に移ります。 [Discord の予定イベント登録ユーザー API](https://docs.discord.com/developers/resources/guild-scheduled-event#get-guild-scheduled-event-users)
 
 `PinPages` はピン留めを最大50件ずつ、ピン留めされた日時の新しい順に取得します。同じピン留め日時がページ境界にまたがると、Discord の日時カーソルで区別できません。スレッドの日時カーソルにも同じ制約があります。 [Discord のピン留め一覧 API](https://docs.discord.com/developers/resources/message#get-channel-pins)
 

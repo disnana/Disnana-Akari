@@ -1,12 +1,19 @@
 use std::num::NonZeroU16;
 
-use twilight_http::{Client, Error as HttpError, response::DeserializeBodyError};
+use serde::{Deserialize, Deserializer};
+use twilight_http::{
+    Client, Error as HttpError,
+    request::TryIntoRequest,
+    response::{DeserializeBodyError, marker::ListBody},
+};
 use twilight_model::{
-    guild::scheduled_event::GuildScheduledEventUser,
+    guild::{Member, MemberFlags, scheduled_event::GuildScheduledEventUser},
     id::{
         Id,
-        marker::{GuildMarker, ScheduledEventMarker, UserMarker},
+        marker::{GuildMarker, RoleMarker, ScheduledEventMarker, UserMarker},
     },
+    user::{AvatarDecorationData, User},
+    util::{ImageHash, Timestamp},
 };
 
 use crate::rest_pagination::advance_after;
@@ -121,7 +128,15 @@ impl<'http> ScheduledEventUserPages<'http> {
             Cursor::After(Some(id)) => request.after(id),
             Cursor::Before(id) => request.before(id),
         };
-        let mut users = request.await?.models().await?;
+        let mut users: Vec<_> = self
+            .http
+            .request::<ListBody<Subscriber>>(request.try_into_request()?)
+            .await?
+            .models()
+            .await?
+            .into_iter()
+            .map(|subscriber| subscriber.0)
+            .collect();
         let limit = usize::from(limit);
         if users.len() > limit
             || users.iter().any(|entry| {
@@ -141,6 +156,66 @@ impl<'http> ScheduledEventUserPages<'http> {
         }
         self.cursor = cursor;
         Ok((!users.is_empty()).then_some(users))
+    }
+}
+
+struct Subscriber(GuildScheduledEventUser);
+
+impl<'de> Deserialize<'de> for Subscriber {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            guild_scheduled_event_id: Id<ScheduledEventMarker>,
+            user: User,
+            member: Option<MemberWire>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self(GuildScheduledEventUser {
+            guild_scheduled_event_id: wire.guild_scheduled_event_id,
+            member: wire.member.map(|member| member.into_member(&wire.user)),
+            user: wire.user,
+        }))
+    }
+}
+
+// A scheduled-event member can omit its user. Read fields directly to preserve
+// pending (which PartialMember omits) without buffering flattened fields.
+#[derive(Deserialize)]
+struct MemberWire {
+    avatar: Option<ImageHash>,
+    avatar_decoration_data: Option<AvatarDecorationData>,
+    banner: Option<ImageHash>,
+    communication_disabled_until: Option<Timestamp>,
+    deaf: bool,
+    flags: MemberFlags,
+    joined_at: Option<Timestamp>,
+    mute: bool,
+    nick: Option<String>,
+    #[serde(default)]
+    pending: bool,
+    premium_since: Option<Timestamp>,
+    roles: Vec<Id<RoleMarker>>,
+    user: Option<User>,
+}
+
+impl MemberWire {
+    fn into_member(self, subscriber: &User) -> Member {
+        Member {
+            avatar: self.avatar,
+            avatar_decoration_data: self.avatar_decoration_data,
+            banner: self.banner,
+            communication_disabled_until: self.communication_disabled_until,
+            deaf: self.deaf,
+            flags: self.flags,
+            joined_at: self.joined_at,
+            mute: self.mute,
+            nick: self.nick,
+            pending: self.pending,
+            premium_since: self.premium_since,
+            roles: self.roles,
+            user: self.user.unwrap_or_else(|| subscriber.clone()),
+        }
     }
 }
 

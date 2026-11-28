@@ -70,10 +70,21 @@ async fn after_uses_maximum_id_and_requests_exact_remaining_count() {
         .page_size(NonZeroU16::new(2).unwrap())
         .limit(3);
     let server = tokio::spawn(async move {
+        let mut explicit = subscriber(3, 5, Some(5));
+        explicit["member"]["user"]["username"] = json!("explicit-member");
+        let mut omitted = subscriber(3, 6, None);
+        omitted["member"] = json!({
+            "deaf": false,
+            "mute": false,
+            "flags": 0,
+            "roles": ["8"],
+            "nick": "pending member",
+            "pending": true
+        });
         page(
             &listener,
             "after=4&limit=2&with_member=true",
-            &[subscriber(3, 6, None), subscriber(3, 5, Some(5))],
+            &[omitted, explicit],
         )
         .await;
         page(
@@ -85,10 +96,18 @@ async fn after_uses_maximum_id_and_requests_exact_remaining_count() {
     });
     timeout(Duration::from_secs(5), async {
         let first = pages.next_page().await.unwrap().unwrap();
-        let member = first.first().and_then(|entry| entry.member.as_ref());
-        assert_eq!(member.map(|member| member.user.id.get()), Some(5));
+        let explicit = first[0].member.as_ref().unwrap();
+        assert_eq!(explicit.user.id, Id::new(5));
+        assert_eq!(explicit.user.name, "explicit-member");
+        let omitted = first[1].member.as_ref().unwrap();
+        assert_eq!(omitted.user, first[1].user);
+        assert!(omitted.pending);
+        assert_eq!(omitted.nick.as_deref(), Some("pending member"));
+        assert_eq!(omitted.roles, [Id::new(8)]);
         assert_eq!(ids(first), [5, 6]);
-        assert_eq!(ids(pages.next_page().await.unwrap().unwrap()), [9]);
+        let last = pages.next_page().await.unwrap().unwrap();
+        assert!(last[0].member.is_none());
+        assert_eq!(ids(last), [9]);
         assert!(pages.next_page().await.unwrap().is_none());
         server.await.unwrap();
     })
@@ -102,9 +121,10 @@ async fn before_retries_same_cursor_then_uses_minimum_id() {
     let mut pages = ScheduledEventUserPages::new(&http, Id::new(2), Id::new(3))
         .before(Id::new(20))
         .page_size(NonZeroU16::new(2).unwrap())
+        .with_member(true)
         .limit(3);
     let server = tokio::spawn(async move {
-        let query = "before=20&limit=2";
+        let query = "before=20&limit=2&with_member=true";
         reply(
             &listener,
             query,
@@ -132,7 +152,12 @@ async fn before_retries_same_cursor_then_uses_minimum_id() {
             &[subscriber(3, 17, None), subscriber(3, 18, None)],
         )
         .await;
-        page(&listener, "before=17&limit=1", &[subscriber(3, 16, None)]).await;
+        page(
+            &listener,
+            "before=17&limit=1&with_member=true",
+            &[subscriber(3, 16, None)],
+        )
+        .await;
     });
     timeout(Duration::from_secs(5), async {
         assert!(matches!(

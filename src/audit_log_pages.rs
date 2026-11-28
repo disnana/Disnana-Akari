@@ -1,5 +1,7 @@
 use std::num::NonZeroU16;
 
+use serde::Deserialize;
+use serde_json::value::RawValue;
 use twilight_http::{Client, Error as HttpError, response::DeserializeBodyError};
 use twilight_model::{
     guild::audit_log::{AuditLog, AuditLogEntry, AuditLogEventType},
@@ -89,7 +91,7 @@ impl<'http> AuditLogPages<'http> {
         self
     }
 
-    /// 返す監査ログ項目の総件数の上限を設定します。0 件の場合はリクエストを送りません。
+    /// 返す有効な監査ログ項目の総件数の上限を設定します。0 件の場合はリクエストを送りません。
     #[must_use]
     pub fn limit(mut self, limit: usize) -> Self {
         self.remaining = Some(limit);
@@ -106,7 +108,8 @@ impl<'http> AuditLogPages<'http> {
     /// 次の監査ログページを、関連情報と一緒に取得します。
     ///
     /// `after` または `oldest_first` では項目を古い順に、それ以外では新しい順に返します。
-    /// 空の応答を受け取ったか、総件数に達した場合は `None` です。
+    /// Discord が操作の種類を `null` とした項目は読み飛ばします。そのような項目だけのページも、
+    /// 関連情報とともに `Some` で返します。Discord 側の項目が空か、総件数に達した場合は `None` です。
     ///
     /// # エラー
     ///
@@ -133,12 +136,21 @@ impl<'http> AuditLogPages<'http> {
         if let Some(action) = self.action {
             request = request.action_type(action);
         }
-        let mut page = request.await?.model().await?;
+        let bytes = request.await?.bytes().await?;
+        let (mut page, mut raw_ids) = decode_page(&bytes)?;
         let limit = usize::from(limit);
-        if page.entries.len() > limit || page.entries.iter().any(|entry| !self.matches(entry)) {
+        if page.entries.iter().any(|entry| !self.matches(entry)) {
             return Err(AuditLogPagesError::InvalidPage);
         }
-        let cursor = self.cursor.advance(&mut page.entries, limit)?;
+        let cursor = if let Some(ids) = &mut raw_ids {
+            let cursor = self.cursor.advance(ids, limit, |id| *id)?;
+            self.cursor
+                .advance(&mut page.entries, limit, |entry| entry.id)?;
+            cursor
+        } else {
+            self.cursor
+                .advance(&mut page.entries, limit, |entry| entry.id)?
+        };
         let Some(cursor) = cursor else {
             self.exhausted = true;
             return Ok(None);
@@ -157,18 +169,88 @@ impl<'http> AuditLogPages<'http> {
     }
 }
 
+type EntryId = Id<AuditLogEntryMarker>;
+
+#[derive(Deserialize)]
+struct AuditRows<'a> {
+    #[serde(borrow)]
+    audit_log_entries: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct SkippableEntry<'a> {
+    id: EntryId,
+    #[serde(borrow)]
+    action_type: &'a RawValue,
+}
+
+fn decode_page(bytes: &[u8]) -> Result<(AuditLog, Option<Vec<EntryId>>), AuditLogPagesError> {
+    let strict_error = match serde_json::from_slice(bytes) {
+        Ok(page) => return Ok((page, None)),
+        Err(error) => error,
+    };
+
+    // Only the compatibility path retains raw entries to advance the cursor past null actions.
+    let envelope: AuditRows<'_> = serde_json::from_slice(bytes)?;
+    let raw_array = envelope.audit_log_entries.get();
+    let raw_entries: Vec<&RawValue> = serde_json::from_str(raw_array)?;
+    let mut ids = Vec::with_capacity(raw_entries.len());
+    let mut entries = Vec::with_capacity(raw_entries.len());
+    let mut skipped = false;
+    for raw in raw_entries {
+        match serde_json::from_str::<AuditLogEntry>(raw.get()) {
+            Ok(entry) => {
+                ids.push(entry.id);
+                entries.push(entry);
+            }
+            Err(error) => {
+                let candidate: SkippableEntry<'_> = serde_json::from_str(raw.get())?;
+                if candidate.action_type.get() != "null" {
+                    return Err(error.into());
+                }
+                ids.push(candidate.id);
+                skipped = true;
+            }
+        }
+    }
+    if !skipped {
+        return Err(strict_error.into());
+    }
+    let mut page = decode_side_tables(bytes, raw_array)?;
+    page.entries = entries;
+    Ok((page, Some(ids)))
+}
+
+fn decode_side_tables(bytes: &[u8], raw_array: &str) -> Result<AuditLog, AuditLogPagesError> {
+    // `RawValue` here borrows the entry array directly from `bytes`. Only replace that
+    // array so Twilight still interprets and validates every side table itself.
+    let start = raw_array.as_ptr().addr().checked_sub(bytes.as_ptr().addr());
+    let (head, tail) = start
+        .and_then(|start| bytes.split_at_checked(start))
+        .ok_or(AuditLogPagesError::InvalidPage)?;
+    let tail = tail
+        .get(raw_array.len()..)
+        .ok_or(AuditLogPagesError::InvalidPage)?;
+    let mut corrected = Vec::with_capacity(head.len() + 2 + tail.len());
+    corrected.extend_from_slice(head);
+    corrected.extend_from_slice(b"[]");
+    corrected.extend_from_slice(tail);
+    Ok(serde_json::from_slice(&corrected)?)
+}
+
 impl Cursor {
-    fn advance(
+    fn advance<T>(
         self,
-        entries: &mut [AuditLogEntry],
+        entries: &mut [T],
         limit: usize,
+        id: impl Fn(&T) -> EntryId,
     ) -> Result<Option<Self>, AuditLogPagesError> {
         let after = match self {
             Self::After(after) => after,
             Self::Before(_) => None,
         };
-        let newest = advance_after(entries, limit, after, |entry| entry.id)
-            .ok_or(AuditLogPagesError::InvalidPage)?;
+        let newest =
+            advance_after(entries, limit, after, &id).ok_or(AuditLogPagesError::InvalidPage)?;
         let Some(newest) = newest else {
             return Ok(None);
         };
@@ -178,7 +260,10 @@ impl Cursor {
                 if before.is_some_and(|bound| newest >= bound) {
                     return Err(AuditLogPagesError::InvalidPage);
                 }
-                let oldest = entries.first().ok_or(AuditLogPagesError::InvalidPage)?.id;
+                let oldest = entries
+                    .first()
+                    .map(id)
+                    .ok_or(AuditLogPagesError::InvalidPage)?;
                 entries.reverse();
                 Ok(Some(Self::Before(Some(oldest))))
             }
@@ -193,9 +278,12 @@ pub enum AuditLogPagesError {
     /// Discord へのリクエストが失敗しました。
     #[error("Discord の監査ログを取得できませんでした")]
     Http(HttpError),
-    /// Discord の応答本文を監査ログとして読み取れませんでした。
+    /// Discord の応答本文を受信できませんでした。
     #[error("Discord の監査ログの応答を読み取れませんでした")]
     HttpBody(DeserializeBodyError),
+    /// Discord の応答を監査ログとして解釈できませんでした。
+    #[error("Discord の監査ログの応答形式が無効です")]
+    Decode(#[from] serde_json::Error),
     /// 応答がカーソル、件数、ID の一意性、または指定フィルターの条件を満たしません。
     #[error("Discord の監査ログのページが無効です")]
     InvalidPage,

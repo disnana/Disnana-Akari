@@ -33,6 +33,12 @@ fn entries(ids: &[u64]) -> Vec<Value> {
         .collect()
 }
 
+fn null_action(id: u64) -> Value {
+    let mut entry = raw_entry(id, ACTOR.get(), AuditLogEventType::MemberBanAdd);
+    entry["action_type"] = Value::Null;
+    entry
+}
+
 async fn reply(listener: &TcpListener, expected_query: &[&str], entries: Vec<Value>) {
     let (socket, _) = listener.accept().await.unwrap();
     let mut socket = BufReader::new(socket);
@@ -202,6 +208,91 @@ async fn invalid_filtered_pages_can_retry_with_the_same_cursor_and_budget() {
     exchange(serve, consume).await;
 }
 
+#[tokio::test]
+async fn null_actions_advance_the_wire_cursor_without_counting_toward_the_total() {
+    let (listener, http) = local().await;
+    let mut pages = AuditLogPages::new(&http, GUILD)
+        .after(Id::new(10))
+        .page_size(NonZeroU16::new(2).unwrap())
+        .limit(3);
+    let serve = async {
+        reply(
+            &listener,
+            &["after=10", "limit=2"],
+            vec![
+                null_action(12),
+                raw_entry(11, 7, AuditLogEventType::MemberBanAdd),
+            ],
+        )
+        .await;
+        reply(
+            &listener,
+            &["after=12", "limit=2"],
+            vec![null_action(14), null_action(13)],
+        )
+        .await;
+        reply(&listener, &["after=14", "limit=2"], entries(&[16, 15])).await;
+    };
+    let consume = async {
+        let mixed = pages.next_page().await.unwrap().unwrap();
+        assert_eq!(ids(&mixed), [11]);
+        assert_eq!(mixed.users.first().unwrap().id, ACTOR);
+        let skipped = pages.next_page().await.unwrap().unwrap();
+        assert!(skipped.entries.is_empty());
+        assert_eq!(skipped.threads.first().unwrap().id, Id::new(12));
+        assert_eq!(ids(&pages.next_page().await.unwrap().unwrap()), [15, 16]);
+        assert!(pages.next_page().await.unwrap().is_none());
+    };
+    exchange(serve, consume).await;
+}
+
+#[tokio::test]
+async fn fallback_rejects_malformed_entries_and_duplicate_raw_ids_without_advancing() {
+    let (listener, http) = local().await;
+    let mut pages = AuditLogPages::new(&http, GUILD)
+        .before(Id::new(20))
+        .limit(2);
+    let serve = async {
+        let query = ["before=20", "limit=2"];
+        let mut malformed = raw_entry(19, 7, AuditLogEventType::MemberBanAdd);
+        malformed["user_id"] = json!("invalid-snowflake");
+        reply(&listener, &query, vec![null_action(18), malformed]).await;
+        reply(
+            &listener,
+            &query,
+            vec![
+                null_action(18),
+                raw_entry(18, 7, AuditLogEventType::MemberBanAdd),
+            ],
+        )
+        .await;
+        reply(
+            &listener,
+            &query,
+            vec![
+                null_action(18),
+                raw_entry(19, 7, AuditLogEventType::MemberBanAdd),
+            ],
+        )
+        .await;
+        reply(&listener, &["before=18", "limit=1"], entries(&[17])).await;
+    };
+    let consume = async {
+        assert!(matches!(
+            pages.next_page().await,
+            Err(AuditLogPagesError::Decode(_))
+        ));
+        assert!(matches!(
+            pages.next_page().await,
+            Err(AuditLogPagesError::InvalidPage)
+        ));
+        assert_eq!(ids(&pages.next_page().await.unwrap().unwrap()), [19]);
+        assert_eq!(ids(&pages.next_page().await.unwrap().unwrap()), [17]);
+        assert!(pages.next_page().await.unwrap().is_none());
+    };
+    exchange(serve, consume).await;
+}
+
 #[test]
 fn validates_duplicate_and_overfull_pages() {
     let entry = |id| {
@@ -210,11 +301,11 @@ fn validates_duplicate_and_overfull_pages() {
     };
     let after = Cursor::After(Some(Id::new(10)));
     assert!(matches!(
-        after.advance(&mut [entry(11), entry(11)], 2),
+        after.advance(&mut [entry(11), entry(11)], 2, |entry| entry.id),
         Err(AuditLogPagesError::InvalidPage)
     ));
     assert!(matches!(
-        after.advance(&mut [entry(11), entry(12)], 1),
+        after.advance(&mut [entry(11), entry(12)], 1, |entry| entry.id),
         Err(AuditLogPagesError::InvalidPage)
     ));
 }
