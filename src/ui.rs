@@ -33,7 +33,7 @@ use twilight_model::{
 };
 use twilight_validate::component;
 
-use crate::{Error, Mentionable, Result};
+use crate::{Error, Mentionable, Result, validation::exceeds_character_limit};
 
 /// タイトル、説明、色、項目を持つ Discord の埋め込みです。
 #[derive(Clone, Debug)]
@@ -1336,11 +1336,6 @@ fn check_custom_id<'a>(ids: &mut HashSet<&'a str>, id: &'a str) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn exceeds_character_limit(value: &str, limit: usize) -> bool {
-    value.len() > limit
-        && (value.len() > limit.saturating_mul(4) || value.chars().nth(limit).is_some())
 }
 
 fn validate_custom_id(id: &str) -> Result<()> {

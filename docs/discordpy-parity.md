@@ -37,6 +37,8 @@ discord.py 2.7.1 は pytest、pytest-asyncio、pytest-mock とカバレッジを
 
 ## 送信前検証の残り
 
+`PollDraft` はチャンネルに投票を投稿する前に質問・選択肢・期間を検証します。回答 ID は Discord の応答から取り、既存の `PollVoterPages` に渡せます。Interaction の応答での投票添付と、投票の作成から終了までの実機試験は残っています。 [Discord の投票 API](https://docs.discord.com/developers/resources/poll)
+
 本文、Embed、添付、フォーム、Components V2 の検証は既存の共通関数とビルダーにあります。添付は Discord の固定件数、Interaction の通知するファイル上限、アプリの追加制限を区別し、Components V2 の返信と編集、通常のテキスト・スラッシュ・ハイブリッド返信、Interaction の添付付き追加メッセージに適用します。残りの送信経路にもこの区分を広げます。
 
 - 送信経路と作成・編集の区分ごとに検証範囲を記録します。編集では追加分と保持分を合算し、既存値が必要な操作はその値を呼び出し側から受け取ります。

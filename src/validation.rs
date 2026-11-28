@@ -11,6 +11,11 @@ pub const MESSAGE_CONTENT_MAX: usize = twilight_validate::message::MESSAGE_CONTE
 /// 一つのメッセージに保持できる添付ファイルの最大数です。
 pub const MESSAGE_ATTACHMENTS_MAX: usize = 10;
 
+pub(crate) fn exceeds_character_limit(value: &str, limit: usize) -> bool {
+    value.len() > limit
+        && (value.len() > limit.saturating_mul(4) || value.chars().nth(limit).is_some())
+}
+
 /// 本文が Discord の文字数制限に収まるか調べます。
 ///
 /// 文字数が上限を超えた時点で検証を終えます。

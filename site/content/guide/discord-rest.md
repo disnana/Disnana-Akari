@@ -173,7 +173,43 @@ async fn schedule(
 
 作成・更新・削除の通知も受け取る場合は、[イベントのガイド](events.md) から Intent と登録方法を確認できます。[Discord の予定イベント API](https://docs.discord.com/developers/resources/guild-scheduled-event)
 
-## 絵文字・投票・有料機能を扱う
+## 投票を作成する
+
+`PollDraft` は質問を300文字、選択肢を2～10件、各選択肢を55文字、受付時間を1～768時間までに制限します。設定を省略すると24時間、単一選択です。投稿先のギルドチャンネルで Bot に `SEND_POLLS` と投稿権限が必要です。コマンドから投稿する場合、実行者に求める条件はコマンド側に書きます。 [Discord の投票 API](https://docs.discord.com/developers/resources/poll#poll-create-request-object) · [discord.py の Poll](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.Poll)
+
+```rust
+use disnana_akari::{PollAnswerInput, PollDraft, PollVoterPages, Error, Result, http::Client};
+use disnana_akari::model::{channel::Message, id::{Id, marker::ChannelMarker}};
+use std::num::NonZeroU8;
+
+async fn publish_poll(http: &Client, channel: Id<ChannelMarker>) -> Result<Message> {
+    let answers = [PollAnswerInput::new("土曜日"), PollAnswerInput::new("日曜日")];
+    let poll = PollDraft::new("いつ集まる？", &answers)
+        .and_then(|poll| poll.duration_hours(48))
+        .map_err(Error::handler)?
+        .allow_multiselect(true);
+    poll.send(http, channel).await.map_err(Error::handler)
+}
+
+async fn first_answer_voters(http: &Client, message: &Message) -> Result<usize> {
+    let Some(answer) = message.poll.as_ref()
+        .and_then(|poll| poll.answers.first())
+        .and_then(|answer| NonZeroU8::new(answer.answer_id))
+    else {
+        return Ok(0);
+    };
+    let mut voters = PollVoterPages::new(http, message.channel_id, message.id, answer);
+    let mut count = 0;
+    while let Some(page) = voters.next_page().await.map_err(Error::handler)? {
+        count += page.len();
+    }
+    Ok(count)
+}
+```
+
+選択肢に絵文字を付けるには `PollAnswerInput::emoji` に `parse_reaction_emoji` で変換した値を渡します。投票者の取得には投稿結果の回答 ID を使います。`send` はチャンネルへの投稿なので、スラッシュコマンドから使う場合はコマンドにも応答してください。
+
+## 絵文字・投票の終了・有料機能を扱う
 
 ```rust
 use disnana_akari::{EntitlementPages, Error, Result, SubscriptionPages, http::Client};
