@@ -40,6 +40,7 @@ use crate::{
 
 mod context_menu;
 mod file_response;
+mod followup_message;
 mod invoke;
 mod localizations;
 mod original_response;
@@ -49,6 +50,7 @@ mod validation;
 pub use context_menu::UserMenuTarget;
 use context_menu::{MenuCommands, MenuKind, replace_application_commands};
 pub(crate) use file_response::send_followup_files;
+pub use followup_message::{FollowupMessage, Followups};
 pub(crate) use invoke::InvocationHooks;
 use invoke::{PreparedSlashHandler, slash_handler};
 pub use localizations::CommandOptionLocalizations;

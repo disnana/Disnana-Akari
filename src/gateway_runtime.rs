@@ -9,8 +9,10 @@ use twilight_gateway::{ConfigBuilder, Event, EventTypeFlags, Shard, ShardId, Sha
 use twilight_model::id::{Id, marker::UserMarker};
 
 use crate::{
-    Error, GatewayShardState, GatewayStatusHandle, GuildLifecycleEvent, PresenceHandle, Result,
+    Error, GatewayShardState, GatewayStatusHandle, GuildLifecycleEvent, MemberQuery,
+    PresenceHandle, Result,
     guild_lifecycle::{GuildLifecycleTracker, LIFECYCLE_EVENTS},
+    member_query::MemberQueryCommand,
     message_events::{self, GatewayDecodeOptions, IncomingEvent},
     presence::PresenceUpdates,
     shutdown,
@@ -21,6 +23,41 @@ mod plan;
 pub(crate) use plan::GatewayPlan;
 
 const WAVE_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub(crate) struct MemberQueryRuntime(pub(crate) Option<MemberQuery>);
+
+impl MemberQueryRuntime {
+    pub(crate) fn close(&self) {
+        if let Some(handle) = &self.0 {
+            handle.close();
+        }
+    }
+}
+
+impl Drop for MemberQueryRuntime {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+struct MemberQueryIngress {
+    handle: MemberQuery,
+    commands: mpsc::Receiver<MemberQueryCommand>,
+}
+
+impl MemberQueryIngress {
+    fn observe(&self, shard: ShardId, event: &Result<IncomingEvent>) {
+        match event {
+            Ok(IncomingEvent::Standard(Event::Ready(_) | Event::Resumed)) => {
+                self.handle.ready(shard)
+            }
+            Ok(IncomingEvent::Standard(Event::MemberChunk(chunk))) => {
+                self.handle.observe_chunk(shard, chunk)
+            }
+            _ => {}
+        }
+    }
+}
 
 pub(crate) struct GatewaySet {
     sessions: Vec<GatewaySession>,
@@ -40,6 +77,7 @@ impl GatewaySet {
         &mut self,
         status: Option<&GatewayStatusHandle>,
         voice: Option<&VoiceGateway>,
+        member_query: Option<&MemberQuery>,
     ) {
         if let Some(status) = status {
             status.initialize(self.sessions.iter().map(GatewaySession::id));
@@ -51,6 +89,15 @@ impl GatewaySet {
             let receivers = voice.initialize(self.sessions.len());
             for (session, ingress) in self.sessions.iter_mut().zip(receivers) {
                 session.voice = Some(ingress);
+            }
+        }
+        if let Some(handle) = member_query {
+            let receivers = handle.initialize(self.sessions.iter().map(GatewaySession::id));
+            for (session, commands) in self.sessions.iter_mut().zip(receivers) {
+                session.member_query = Some(MemberQueryIngress {
+                    handle: handle.clone(),
+                    commands,
+                });
             }
         }
     }
@@ -126,6 +173,7 @@ pub(crate) struct GatewaySession {
     own_id: Option<Id<UserMarker>>,
     status: Option<GatewayStatusHandle>,
     voice: Option<VoiceIngress>,
+    member_query: Option<MemberQueryIngress>,
     guild_lifecycle: Option<GuildLifecycleTracker>,
 }
 
@@ -145,6 +193,7 @@ impl GatewaySession {
             own_id: None,
             status: None,
             voice: None,
+            member_query: None,
             guild_lifecycle: None,
         }
     }
@@ -173,9 +222,17 @@ impl GatewaySession {
         let had_session = self.own_id.is_some();
         let id = self.id();
         let (mut voice_rx, voice) = self.voice.as_mut().map(VoiceIngress::parts).unzip();
+        let (mut query_rx, query) = self
+            .member_query
+            .as_mut()
+            .map(|ingress| (&mut ingress.commands, &ingress.handle))
+            .unzip();
         let observe_state = |previous, state| {
             if lost_gateway_session(previous, state) {
                 invalidate_permissions(id);
+                if let Some(query) = query {
+                    query.disconnect(id);
+                }
                 if let Some(voice) = voice {
                     VoiceIngress::transition(voice.generation, false);
                     if let Ok(mut managed) = voice.managed.lock() {
@@ -203,7 +260,7 @@ impl GatewaySession {
             let active = self.shard.state() == ShardState::Active;
             let presence_ready = active && self.presence.is_some();
             let deadline = voice.and_then(|voice| voice.managed.lock().ok()?.next_deadline());
-            if !presence_ready && voice_rx.is_none() {
+            if !presence_ready && voice_rx.is_none() && query_rx.is_none() {
                 return message_events::next_event(
                     &mut self.shard,
                     event_types,
@@ -214,6 +271,25 @@ impl GatewaySession {
             }
             tokio::select! {
                 event = message_events::next_event(&mut self.shard, event_types, decode, observe_state) => return event,
+                command = async {
+                    match &mut query_rx {
+                        Some(commands) => commands.recv().await,
+                        None => pending().await,
+                    }
+                }, if query_rx.is_some() => {
+                    let Some(command) = command else {
+                        query_rx = None;
+                        continue;
+                    };
+                    if let Some(query) = query
+                        && let Some(request) = query.request(id, &command)
+                        && (self.shard.state() != ShardState::Active
+                            || self.shard.ratelimiter().is_some_and(|limiter| limiter.available() == 0)
+                            || self.shard.sender().command(request).is_err())
+                    {
+                        query.send_failed(id, &command);
+                    }
+                }
                 update = async {
                     match &mut self.presence {
                         Some(updates) => updates.next().await,
@@ -278,11 +354,17 @@ impl GatewaySession {
         if self.voice.is_some() {
             event_types |= EventTypeFlags::VOICE_STATE_UPDATE | EventTypeFlags::VOICE_SERVER_UPDATE;
         }
+        if self.member_query.is_some() {
+            event_types |= EventTypeFlags::MEMBER_CHUNK;
+        }
         while let Some(event) = self
             .next_event(event_types, decode, invalidate_permissions)
             .await
         {
             let is_ready = matches!(&event, Ok(IncomingEvent::Standard(Event::Ready(_))));
+            if let Some(query) = &self.member_query {
+                query.observe(self.id(), &event);
+            }
             if let Some(voice) = &self.voice
                 && let Ok(IncomingEvent::Standard(event)) = &event
             {

@@ -1,12 +1,25 @@
 use twilight_model::http::attachment::Attachment;
 
-use crate::{Result, slash::send_followup_files, validation::AttachmentLimits};
+use crate::{
+    Result,
+    slash::{Followups, send_followup_files},
+    validation::AttachmentLimits,
+};
 
 use super::{
     ButtonContext, EntitySelectContext, MentionableSelectContext, ModalContext, SelectContext,
 };
 
-impl ButtonContext<'_> {
+impl<'a> ButtonContext<'a> {
+    /// 操作を受け付けた後、追加応答を送信・編集するためのハンドルを返します。
+    ///
+    /// # エラー
+    /// 操作を受け付けていない場合は失敗します。
+    pub fn followups(&self) -> Result<Followups<'a>> {
+        self.response.require_followup()?;
+        Ok(Followups::new(self.initial))
+    }
+
     /// 操作を受け付けた後、本文とファイルをチャンネルに追加で送ります。
     /// ファイルだけの場合は空の本文を指定できます。
     ///
@@ -46,7 +59,16 @@ impl ButtonContext<'_> {
     }
 }
 
-impl ModalContext<'_> {
+impl<'a> ModalContext<'a> {
+    /// 返信を完成させるか元のメッセージの更新を受け付けた後、追加応答のハンドルを返します。
+    ///
+    /// # エラー
+    /// 返信が未完成で、元のメッセージの更新も受け付けていない場合は失敗します。
+    pub fn followups(&self) -> Result<Followups<'a>> {
+        self.response.require_followup()?;
+        Ok(Followups::new(self.initial))
+    }
+
     /// モーダル送信へ返信した後、または元のメッセージの更新を受け付けた後に、本文とファイルをチャンネルへ送ります。
     /// ファイルだけの場合は空の本文を指定できます。
     ///
@@ -87,7 +109,15 @@ impl ModalContext<'_> {
 }
 
 macro_rules! select_followups {
-    () => {
+    ($lifetime:lifetime) => {
+        /// 操作を受け付けた後、追加応答を送信・編集するためのハンドルを返します。
+        ///
+        /// # エラー
+        /// [`ButtonContext::followups`] と同じ条件で失敗します。
+        pub fn followups(&self) -> Result<Followups<$lifetime>> {
+            self.inner.followups()
+        }
+
         /// セレクト操作を受け付けた後、本文とファイルをチャンネルに追加で送ります。
         /// ファイルだけの場合は空の本文を指定できます。
         ///
@@ -119,14 +149,14 @@ macro_rules! select_followups {
     };
 }
 
-impl SelectContext<'_> {
-    select_followups!();
+impl<'a> SelectContext<'a> {
+    select_followups!('a);
 }
 
-impl<M> EntitySelectContext<'_, M> {
-    select_followups!();
+impl<'a, M> EntitySelectContext<'a, M> {
+    select_followups!('a);
 }
 
-impl MentionableSelectContext<'_> {
-    select_followups!();
+impl<'a> MentionableSelectContext<'a> {
+    select_followups!('a);
 }

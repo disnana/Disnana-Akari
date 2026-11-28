@@ -22,6 +22,7 @@ mod limits;
 mod manage;
 mod manage_types;
 mod member_cache;
+mod member_query;
 mod message_cache;
 mod message_events;
 mod module;
@@ -108,6 +109,7 @@ pub use manage_types::{
     VoiceChannelEdit,
 };
 pub use member_cache::{CachedMemberRemove, CachedMemberUpdate, MemberCacheHandle};
+pub use member_query::{MemberQuery, MemberQueryError, MemberQueryResult};
 pub use message_cache::CachedMessageEdit;
 pub use message_events::MessageUpdate;
 pub use module::{Module, Registry};
@@ -115,8 +117,8 @@ pub use overwrite::{Overwrite, OverwriteTarget, Tri};
 pub use presence::{Presence, PresenceHandle};
 pub use shutdown::ShutdownHandle;
 pub use slash::{
-    CommandGroup, CommandOptionLocalizations, CommandSettings, SlashCommands, SlashContext,
-    UserMenuTarget,
+    CommandGroup, CommandOptionLocalizations, CommandSettings, FollowupMessage, Followups,
+    SlashCommands, SlashContext, UserMenuTarget,
 };
 pub use timing::Timing;
 pub use twilight_http as http;
@@ -164,6 +166,7 @@ pub struct Bot {
     member_cache_capacity: usize,
     member_cache_handle: Option<MemberCacheHandle>,
     member_cache_bootstrap: Option<BootstrapConfig>,
+    member_query: Option<MemberQuery>,
     presence: Option<PresenceHandle>,
     shutdown: Option<ShutdownHandle>,
     recommended_shards: bool,
@@ -226,6 +229,7 @@ impl Bot {
             member_cache_capacity: 0,
             member_cache_handle: None,
             member_cache_bootstrap: None,
+            member_query: None,
             presence: None,
             shutdown: None,
             recommended_shards: false,
@@ -311,6 +315,18 @@ impl Bot {
         let waiters = EventWaiters::new(limits)?;
         self.event_waiters = Some(waiters.clone());
         Ok((self, waiters))
+    }
+
+    /// Gateway で参加中のサーバーのメンバーを照会するハンドルを取得します。
+    ///
+    /// 接続後に、名前の先頭やユーザー ID から照会します。Intent は自動で追加しません。
+    /// 繰り返し呼ぶと同じハンドルを共有します。
+    pub fn with_member_query(mut self) -> (Self, MemberQuery) {
+        let query = self
+            .member_query
+            .get_or_insert_with(MemberQuery::new)
+            .clone();
+        (self, query)
     }
 
     /// 指定されたサーバーでスラッシュコマンドを有効にします。
@@ -543,6 +559,7 @@ impl Bot {
             member_cache_capacity,
             member_cache_handle,
             member_cache_bootstrap,
+            member_query,
             presence,
             shutdown,
             recommended_shards,
@@ -554,6 +571,7 @@ impl Bot {
             #[cfg(test)]
             http_test_port,
         } = self;
+        let member_query = gateway_runtime::MemberQueryRuntime(member_query);
         let mut shutdown = shutdown.as_ref().map(ShutdownHandle::subscribe);
         if shutdown.as_ref().is_some_and(|request| *request.borrow()) {
             return Ok(());
@@ -629,7 +647,11 @@ impl Bot {
             None => config,
         };
         let mut gateways = plan.prepare(config, presence.as_ref())?;
-        gateways.install_handles(gateway_status.as_ref(), voice_gateway.as_ref());
+        gateways.install_handles(
+            gateway_status.as_ref(),
+            voice_gateway.as_ref(),
+            member_query.0.as_ref(),
+        );
         gateways.configure_guild_lifecycle(events.has_guild_lifecycle_handlers());
         let (event_tx, event_queue) = mpsc::channel(limits.queue_capacity);
         let (text_ingress, handle_text) =
@@ -755,6 +777,7 @@ impl Bot {
             shutdown::drive(receive, workers.as_mut(), &mut shutdown),
         )
         .await;
+        member_query.close();
         waiters.close();
         suspend_member_reads(member_cache.as_ref());
         if let Err(error) = stopped {

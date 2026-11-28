@@ -573,6 +573,14 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 
 コンポーネントから開いたフォームの `ModalContext` では `source_message`、`defer_update`、`update_message`、`update_v2` を使えます。`defer_update` 後は、同じ元メッセージを編集し、別のフォローアップを送れます。元メッセージがない場合は `ResponseStateError::SourceMessageUnavailable` です。
 
+## 追加返信の取得・編集・削除
+
+初回応答を済ませたスラッシュ、フォーム、ボタン、セレクトのコンテキストから `ctx.followups()` で `Followups` を取得します。`send`、`send_ui`、`send_v2`、`send_files` が返す `FollowupMessage` の `id()` と `message()` で送信結果を参照できます。`edit`、`edit_ui`、`edit_v2`、`delete` は、その追加返信を対象にします。
+
+## Gateway のメンバー照会
+
+`Bot::with_member_query` が返す `MemberQuery` の `query_prefix` と `query_ids` で、ユーザー名の先頭またはユーザー ID を指定して照会します。どちらも最大100件で、期限付きです。`MemberQueryResult` から `members()` と `not_found()` を参照します。設定・接続・応答に関する失敗は `MemberQueryError` で判別できます。
+
 ## 送信前の検証
 
 `validation::message_content`、`attachment_count`、`attachment_sizes` で、本文の文字数、保持分を含む添付件数、Discord が通知した1ファイルのバイト上限を確認します。本文は上限超過を検出した時点で走査を打ち切ります。 `AttachmentLimits` では、保持分を含む件数、1 ファイルのサイズ、新規送信分の合計サイズにアプリ独自の上限を設定できます。値を `None` にすると、その項目のアプリ独自の検査を外します。`ComponentsV2::attachment_limits` で返信と編集に適用できます。`UiMessage::validate`、`ComponentsV2::validate`、`Modal::validate` は各ビルダーの構成を検証します。
@@ -580,6 +588,8 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 ## テキストコマンドのメタデータとヘルプ
 
 `CommandMetadata` で説明、使い方、標準ヘルプの表示有無を設定できます。`Commands::set_metadata` は正式名または別名から指定し、`command_info(path)` と `command_infos()` で登録情報を参照できます。`Commands::register_help(name)` で一覧と詳細を表示するテキストコマンドを追加します。長い一覧や説明は、本文上限に収まる複数の返信へ分けます。
+
+`Commands::register_help_with_checks(name)` を選ぶと、実行者とチャンネルに対するコマンドチェックを通過した候補だけを表示します。別名付きの候補も正式なコマンドパスで確認します。表示対象の引数変換、フック、ハンドラーは起動しません。
 
 ## そのほかの公開型
 

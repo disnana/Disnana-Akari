@@ -109,7 +109,10 @@ pub(crate) async fn edit_v2_response(
     Ok(())
 }
 
-fn retained_ids(uploads: &[Upload], retained: &[Attachment]) -> Result<Vec<Id<AttachmentMarker>>> {
+pub(super) fn retained_ids(
+    uploads: &[Upload],
+    retained: &[Attachment],
+) -> Result<Vec<Id<AttachmentMarker>>> {
     if retained.iter().any(|existing| {
         uploads
             .iter()

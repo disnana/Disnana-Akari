@@ -148,6 +148,22 @@ async fn export_report(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 ボタンと選択メニューでは `defer_update` で操作を受け付けた時点から、同じメソッドでファイル付きの追加メッセージを送れます。ボタンやメニューが付いた元の投稿はそのままです。
 
+## 追加返信をあとから編集・削除する
+
+初回応答を済ませ、`ctx.followups()?` から追加返信を送ると、作成したメッセージを `FollowupMessage` として受け取れます。ID と Discord が返したメッセージを `id()` と `message()` で参照し、`edit` や `delete` でその追加返信を操作できます。
+
+```rust
+use disnana_akari::{Result, SlashContext};
+
+async fn report(ctx: &mut SlashContext<'_>) -> Result<()> {
+    ctx.reply_ephemeral("結果を取りまとめています。").await?;
+    let mut followup = ctx.followups()?.send("暫定結果です。", true).await?;
+    followup.edit("結果を更新しました。").await
+}
+```
+
+本文、従来の UI、Components V2、ファイル付き本文は、それぞれ `send`、`send_ui`、`send_v2`、`send_files` で送れます。従来の UI を置き換えるときは `edit_ui`、Components V2 の追加返信を更新するときは `edit_v2` を使います。公開範囲は送信時に指定します。ハンドルは元の Interaction を借りるため、ハンドラー内で使います。 [Discord の追加返信 API](https://docs.discord.com/developers/interactions/receiving-and-responding#create-followup-message)
+
 ## 初回応答の失敗を調べる
 
 `Bot::on_info` の `InfoEvent::InteractionResponseFailed` は、初回応答の HTTP リクエストが失敗したときに届きます。JSON と添付付きのどちらでも、Interaction ID、HTTP ステータス、Discord の数値エラーコード、キュー待ち、REST 待ちを確認できます。トークンとレスポンス本文は含みません。

@@ -433,6 +433,110 @@ async fn mock_gateway(
 }
 
 #[tokio::test]
+async fn loopback_gateway_routes_member_queries_and_matches_nonce() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready, mut ready_rx) = mpsc::channel(1);
+    let mut events = Events::new();
+    events.on_ready(async move |_: &Ready| ready.send(()).await);
+    let (bot, query) = Bot::new(FIXTURE_TOKEN)
+        .unwrap()
+        .with_events(events)
+        .with_member_query();
+    let (mut bot, shutdown) = bot.with_shutdown();
+    bot.gateway_test_port = Some(address.port());
+    let gateway = async {
+        let mut socket = accept(&listener).await;
+        let identify = receive_opcode(&mut socket, 2).await;
+        assert_eq!(identify["d"]["intents"], 0);
+        send_ready(
+            &mut socket,
+            &format!("ws://{address}"),
+            "member-query",
+            [0, 1],
+        )
+        .await;
+        let prefix = receive_opcode(&mut socket, 8).await;
+        assert_eq!(prefix["d"]["guild_id"], "4");
+        assert_eq!(prefix["d"]["query"], "mem");
+        assert_eq!(prefix["d"]["limit"], 2);
+        send_dispatch(
+            &mut socket,
+            2,
+            "GUILD_MEMBERS_CHUNK",
+            member_query_chunk("unrelated", "8", &[]),
+        )
+        .await;
+        send_dispatch(
+            &mut socket,
+            3,
+            "GUILD_MEMBERS_CHUNK",
+            member_query_chunk(prefix["d"]["nonce"].as_str().unwrap(), "6", &[]),
+        )
+        .await;
+
+        let ids = receive_opcode(&mut socket, 8).await;
+        assert_eq!(ids["d"]["guild_id"], "4");
+        assert_eq!(ids["d"]["user_ids"], json!(["6", "7"]));
+        assert_ne!(prefix["d"]["nonce"], ids["d"]["nonce"]);
+        send_dispatch(
+            &mut socket,
+            4,
+            "GUILD_MEMBERS_CHUNK",
+            member_query_chunk(ids["d"]["nonce"].as_str().unwrap(), "6", &["7"]),
+        )
+        .await;
+        expect_close(&mut socket, 1000).await;
+    };
+    let request = async {
+        assert_eq!(ready_rx.recv().await, Some(()));
+        let deadline = Duration::from_secs(4);
+        let guild = Id::new(4);
+        let found = query.query_prefix(guild, "mem", 2, deadline).await.unwrap();
+        assert_eq!(
+            found
+                .members()
+                .iter()
+                .map(|member| member.user.id)
+                .collect::<Vec<_>>(),
+            [Id::new(6)]
+        );
+        let found = query
+            .query_ids(guild, &[Id::new(6), Id::new(7)], deadline)
+            .await
+            .unwrap();
+        assert_eq!(
+            found
+                .members()
+                .iter()
+                .map(|member| member.user.id)
+                .collect::<Vec<_>>(),
+            [Id::new(6)]
+        );
+        assert_eq!(found.not_found(), &[Id::new(7)]);
+        shutdown.request();
+    };
+    let (result, (), ()) = timeout(Duration::from_secs(10), async {
+        tokio::join!(bot.start(), gateway, request)
+    })
+    .await
+    .unwrap();
+    assert!(result.is_ok(), "{result:?}");
+}
+
+fn member_query_chunk(nonce: &str, user: &str, not_found: &[&str]) -> Value {
+    json!({
+        "guild_id":"4", "chunk_index":0, "chunk_count":1, "nonce":nonce,
+        "members":[{
+            "user":{"id":user, "username":"member", "discriminator":"0"},
+            "roles":[], "joined_at":"2026-01-01T00:00:00+00:00",
+            "deaf":false, "mute":false, "flags":0
+        }],
+        "not_found":not_found
+    })
+}
+
+#[tokio::test]
 async fn recommended_shards_launch_in_waves_and_resume_independently() {
     let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();

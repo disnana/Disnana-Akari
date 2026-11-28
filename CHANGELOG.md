@@ -8,6 +8,9 @@
 - `Commands::register_parsed` と `TextCommandGroup::subcommand_parsed` で、テキストコマンド専用の非同期引数変換を実行前フックより先に行えます。どちらも別名付きで登録できます。
 - `Bot::with_waiters` で、チャンネルとユーザーを指定して次のメッセージやリアクションを期限付きで待てます。
 - コンポーネントから開いたモーダルの送信時に、`ModalContext` から元メッセージを更新できます。すぐに更新する方法と、先に `defer_update` する方法があります。
+- `Bot::with_member_query` で、ユーザー名の先頭とユーザー ID から Gateway 経由でメンバーを照会できます。
+- `ctx.followups()` から本文・UI・Components V2・添付付きの追加返信を送り、返されたハンドルで ID を確認したり、編集・削除したりできます。
+- `Commands::register_help_with_checks` で、実行者がコマンドのチェックを通過した場合だけ、標準ヘルプに表示できます。
 
 ### 改善
 
