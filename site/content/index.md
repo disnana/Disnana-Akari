@@ -60,7 +60,7 @@ async fn ping(ctx: CommandContext<'_>) -> Result<()> {
 ```
 
 ```sh
-cargo add disnana-akari@0.3
+cargo add disnana-akari@0.4
 cargo add tokio --features macros,rt
 ```
 

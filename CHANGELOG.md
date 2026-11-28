@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.4.0
+
+コマンドの実行制御、状態を持つ UI、起動準備の待機とキャッシュを拡充しました。権限・管理操作、投票、フォーラム、Webhook の操作にも対応しました。0.3 系からの更新では依存を `disnana-akari = "0.4"` に変更してください。
+
 ### 追加
 
 - Webhook のメッセージを、スレッド内も含めて取得・部分編集・削除できるようにしました。編集では既存の添付を残しながら新しい添付を追加できます。
@@ -54,11 +58,9 @@
 - ボイス状態のキャッシュで、サーバーの再同期や退出時に対象サーバーの保存分だけを処理するようにしました。
 - 長い標準ヘルプは、Discord の本文上限に収まるページに分けて送ります。
 
-## 0.3.1
+### 権限と管理操作
 
-権限の確認と、チャンネル、ロール、メンバーの管理を、数値やビットを書かずに、安全に行えるようにしました。0.3.0 から更新する場合は、`disnana-akari = "0.3"` のまま `cargo update` で更新できます。公開 API は追加だけです。
-
-### 追加
+権限の確認と、チャンネル、ロール、メンバーの管理を、数値やビットを書かずに行えるようにしました。
 
 - `use disnana_akari::prelude::*;` で、権限とフラグを名前で調べられます（`perms.manage_messages()`、`names()`、`labels()`、`unknown_bits()`）。`Permissions::text()`、`voice()`、`moderator()` のプリセットと、チャンネルの種類や認証レベルなどの日本語名（`label()`）もあります。Twilight が新しい権限を足したときは、テストが失敗して気づけます。
 - `ctx.access()` で `Access` を取得できます。実行者、Bot、ほかのメンバーの権限を調べ（`can`、`missing`、`bot_can`、`permissions_of`）、確認し（`require_permissions`、`require_bot_permissions`、`require_guild_owner`、`require_role`、`require_any_role`）、まとめて取得できます（`snapshot`）。スラッシュコマンドでは、Discord が送る値を使うので、通信しません。

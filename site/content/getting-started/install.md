@@ -16,7 +16,7 @@ rustc --version
 ```sh
 cargo new my-bot
 cd my-bot
-cargo add disnana-akari@0.3
+cargo add disnana-akari@0.4
 cargo add tokio --features macros,rt
 ```
 
@@ -24,7 +24,7 @@ cargo add tokio --features macros,rt
 
 ```toml
 [dependencies]
-disnana-akari = "0.3"
+disnana-akari = "0.4"
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 

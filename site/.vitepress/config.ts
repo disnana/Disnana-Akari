@@ -82,6 +82,7 @@ export default defineConfig({
           { text: 'よくある質問', link: '/reference/faq' },
           { text: '用語集', link: '/reference/glossary' },
           { text: '変更履歴', link: '/reference/changelog' },
+          { text: '0.3 から 0.4 への移行', link: '/reference/migrating-0.4' },
           { text: '0.1 から 0.2 への移行', link: '/reference/migrating-0.2' },
         ],
       },

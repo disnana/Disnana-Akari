@@ -83,7 +83,7 @@ def undocumented_exports() -> list[str]:
 
 
 def stale_version_pins() -> list[str]:
-    """ドキュメントの `disnana-akari = "X.Y"` が、Cargo.toml の版と合っているか確認する。
+    """ドキュメントの TOML と cargo add の版指定を Cargo.toml と照合する。
 
     0.x では、`"0.1"` は 0.2 以降を含まない。古い指定のままだと、読者は古い版を取得してしまう。
     """
@@ -93,13 +93,15 @@ def stale_version_pins() -> list[str]:
     major, minor, *_ = version.split(".")
     expected = f"{major}.{minor}" if major == "0" else major
     problems = []
+    pins = re.compile(r'^disnana-akari[ \t]*=[ \t]*"([^"\n]+)"|^cargo add disnana-akari@([^\s]+)', re.M)
     for path in documents():
         text = path.read_text(encoding="utf-8")
-        for match in re.finditer(r'^disnana-akari\s*=\s*"([^"]+)"', text, re.M):
-            if match.group(1) != expected:
+        for match in pins.finditer(text):
+            pin = match.group(1) or match.group(2)
+            if pin != expected:
                 line = text[: match.start()].count("\n") + 1
                 problems.append(
-                    f"{path.relative_to(ROOT)}:{line}: disnana-akari = \"{match.group(1)}\" は、現在の版 {version} と合いません（\"{expected}\" にしてください）"
+                    f"{path.relative_to(ROOT)}:{line}: disnana-akari の版指定 \"{pin}\" は、現在の版 {version} と合いません（\"{expected}\" にしてください）"
                 )
     return problems
 

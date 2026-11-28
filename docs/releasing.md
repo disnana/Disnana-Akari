@@ -51,7 +51,17 @@ cargo package --offline --list
 
 `--include-bots` で別の Bot と Webhook の投稿から `!ping` が起動するかは未確認です。
 
-## 0.3.1 の管理操作を確認する
+## 0.4.0 候補を Discord で確認する
+
+候補コミットと結果を記録します。テストには専用 Bot、専用サーバー、使い捨てのチャンネルと Webhook を使います。
+
+- [ ] 通常起動でギルドコマンドの同期とテキスト・スラッシュの返信を確認する。
+- [ ] 管理者と一般メンバーで権限チェックを試す。公開の `defer()` 後の拒否文が実行者だけに届くことを確認する。
+- [ ] 投票を公開し、複数選択、投票者取得、投票終了を確認する。公開の `defer()` 後は元の応答に投票が付くことを確認する。
+- [ ] Webhook でスレッドに投稿し、同じメッセージを取得・編集・削除する。編集では添付を保持して追加できることを確認する。
+- [ ] Akari を対象とした推奨のログ設定で試行し、Webhook トークンがログに含まれないことを確認する。
+
+### 管理操作を確認する
 
 ローカル HTTP テストで、別サーバーのチャンネルへの変更が送信されないこと、同じ位置のロールが ID 順になること、BAN で対象の Unknown Member だけを特例にすること、VC 操作が Discord の拒否を返すことを確認します。
 
@@ -104,11 +114,11 @@ cargo publish --locked --registry crates-io
 
 初回公開後は crates.io のクレート設定から GitHub の Trusted Publisher を登録します。Repository owner は `disnana`、Repository name は `Disnana-Akari`、Workflow filename は `publish.yml`、Environment name は `crates-io` です。GitHub の同名環境では `v*` タグを許可します。タグルールでは `v*` の作成・変更・削除をリポジトリ管理者に限定しています。[crates.io のクレート設定](https://crates.io/crates/disnana-akari/settings) · [GitHub の環境設定](https://github.com/disnana/Disnana-Akari/settings/environments)
 
-次の版では `Cargo.toml` と `Cargo.lock` のバージョンを更新し、変更履歴を揃えて `main` に反映します。公開対象のコミットに、その版と一致する `v` 付きタグを作って push します。たとえば、`0.2.1` を公開する場合は次のように実行します。
+次の版では `Cargo.toml` と `Cargo.lock` のバージョンを更新し、変更履歴を揃えて `main` に反映します。公開対象のコミットに、その版と一致する `v` 付きタグを作って push します。たとえば、`0.4.0` を公開する場合は次のように実行します。
 
 ```sh
-git tag -a v0.3.1 -m "Release v0.3.1"
-git push origin refs/tags/v0.3.1
+git tag -a v0.4.0 -m "Release v0.4.0"
+git push origin refs/tags/v0.4.0
 ```
 
 GitHub Actions はタグ名と `Cargo.toml` のバージョン、公開対象コミットが `main` の履歴に含まれることを確認します。CI と RustSec 監査の成功後、GitHub の OIDC で取得した短期トークンを使って公開します。Actions の **Run workflow** では検証だけ実行できます。[Publish to crates.io](https://github.com/disnana/Disnana-Akari/actions/workflows/publish.yml) · [Trusted Publishing の公式ガイド](https://crates.io/docs/trusted-publishing)
