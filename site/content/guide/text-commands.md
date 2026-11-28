@@ -273,6 +273,20 @@ async fn count(ctx: CommandContext<'_>) -> Result<()> {
 }
 ```
 
+### 同じ型の引数を読めるところまで読む
+
+`parse_greedy` は型に変換できる引数を連続して読みます。最初に変換できなかった引数は後続の読み取りに残ります。例えば `!numbers 3 7 完了` では数値が `[3, 7]`、残りが「完了」です。変換規則を指定する場合は `convert_greedy` を使います。閉じていない引用符などの構文エラーは呼び出し元に返ります。
+
+```rust
+use disnana_akari::{CommandContext, Error, Result};
+
+async fn numbers(ctx: CommandContext<'_>) -> Result<()> {
+    let mut args = ctx.arguments();
+    let values = args.parse_greedy::<u32>().map_err(Error::handler)?;
+    ctx.reply(&format!("{values:?} / {}", args.remaining())).await
+}
+```
+
 ### 引数変換を実行前フックより先に行う
 
 `register_parsed` に変換関数とハンドラーを渡すと、両方のフックが有効でも、変換を通過した呼び出しだけが実行前フックへ進みます。変換関数は非同期なので、必要ならアプリのデータを照会できます。ハンドラーに渡す変換結果には `String` などの所有型を使います。

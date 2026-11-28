@@ -65,6 +65,45 @@ impl<'a> Arguments<'a> {
         self.parse_next()?.ok_or(ArgumentValueError::Missing)
     }
 
+    /// 指定した型に変換できる引数を連続して読み取ります。
+    ///
+    /// 最初に変換できなかった引数は、次の読み取りに残します。最初から変換できる値がなければ
+    /// 空の一覧を返します。たとえば、数値の一覧を読み取ったあとに [`remaining`](Self::remaining) で
+    /// 説明文を取得できます。
+    ///
+    /// # エラー
+    ///
+    /// クォートの構文エラーはそのまま返し、読み取りを終了します。
+    pub fn parse_greedy<T: FromStr>(&mut self) -> Result<Vec<T>, ArgumentError> {
+        self.convert_greedy(|value| value.parse().ok())
+    }
+
+    /// 独自の変換で `Some` が返る間、引数を連続して読み取ります。
+    ///
+    /// 変換が `None` を返した場合、その引数の読み取りを取り消します。
+    /// アンエスケープが不要な引数には、元の入力を借りた値を渡します。
+    ///
+    /// # エラー
+    ///
+    /// クォートの構文エラーはそのまま返し、読み取りを終了します。
+    pub fn convert_greedy<T>(
+        &mut self,
+        mut convert: impl FnMut(Cow<'a, str>) -> Option<T>,
+    ) -> Result<Vec<T>, ArgumentError> {
+        let mut converted = Vec::new();
+        loop {
+            let checkpoint = self.remaining;
+            let Some(value) = self.next().transpose()? else {
+                return Ok(converted);
+            };
+            let Some(value) = convert(value) else {
+                self.remaining = checkpoint;
+                return Ok(converted);
+            };
+            converted.push(value);
+        }
+    }
+
     /// 次の引数に独自の変換を適用します。引数がなければ変換関数は呼びません。
     ///
     /// 文字列はアンエスケープが必要な場合だけ確保し、それ以外は元の入力を借ります。
@@ -202,6 +241,43 @@ mod tests {
         });
         assert_eq!(absent, Ok(None));
         assert!(!called);
+    }
+
+    #[test]
+    fn greedy_parsing_keeps_the_first_nonmatching_argument_and_the_rest() {
+        let mut args = Arguments::new("  1　「2」  説明 を残す");
+        assert_eq!(args.parse_greedy::<u32>(), Ok(vec![1, 2]));
+        assert_eq!(args.remaining(), "説明 を残す");
+        assert_eq!(args.parse_greedy::<u32>(), Ok(vec![]));
+        assert_eq!(args.next(), Some(Ok(Cow::Borrowed("説明"))));
+        assert_eq!(args.remaining(), "を残す");
+    }
+
+    #[test]
+    fn custom_greedy_conversion_preserves_plain_borrows_and_rewinds_raw_quotes() {
+        let mut args = Arguments::new(r#"one "other \"word\"" tail"#);
+        assert_eq!(
+            args.convert_greedy(|value| (value == "one").then_some(value)),
+            Ok(vec![Cow::Borrowed("one")])
+        );
+        assert_eq!(args.remaining(), r#""other \"word\"" tail"#);
+        assert_eq!(args.next(), Some(Ok(Cow::Owned(r#"other "word""#.into()))));
+        assert_eq!(args.remaining(), "tail");
+    }
+
+    #[test]
+    fn greedy_parsing_propagates_a_syntax_error_and_stops() {
+        let mut args = Arguments::new("1 「閉じない");
+        assert_eq!(
+            args.parse_greedy::<u32>(),
+            Err(ArgumentError::UnclosedQuote)
+        );
+        assert_eq!(args.next(), None);
+        assert_eq!(args.parse_greedy::<u32>(), Ok(vec![]));
+
+        let mut args = Arguments::new(" 1 2　 ");
+        assert_eq!(args.parse_greedy::<u32>(), Ok(vec![1, 2]));
+        assert!(args.remaining().is_empty());
     }
 
     #[test]
