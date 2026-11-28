@@ -551,13 +551,16 @@ async fn loopback_member_query_bounds_transport_before_next_inbound_frame() {
         )
         .await;
         for _ in 0..super::MEMBER_QUERY_TRANSPORT_LIMIT {
-            receive_opcode(&mut socket, 8).await;
+            receive_member_query_without_acking(&mut socket).await;
         }
         assert_eq!(registered_rx.recv().await, Some(()));
         assert!(
-            timeout(Duration::from_millis(75), socket.next())
-                .await
-                .is_err()
+            timeout(
+                Duration::from_millis(75),
+                receive_member_query_without_acking(&mut socket)
+            )
+            .await
+            .is_err()
         );
         socket.send(Frame::text(ACK)).await.unwrap();
         let next = receive_opcode(&mut socket, 8).await;
@@ -602,6 +605,18 @@ async fn loopback_member_query_bounds_transport_before_next_inbound_frame() {
     .await
     .unwrap();
     assert!(result.is_ok(), "{result:?}");
+}
+
+async fn receive_member_query_without_acking(socket: &mut WebSocketStream<TcpStream>) -> Value {
+    loop {
+        let frame = socket.next().await.unwrap().unwrap();
+        let payload: Value = serde_json::from_str(frame.as_text().unwrap()).unwrap();
+        // 初回 heartbeat のランダムな時刻にかかわらず、ここでは ACK を返さない。
+        if payload["op"] != 1 {
+            assert_eq!(payload["op"], 8);
+            return payload;
+        }
+    }
 }
 
 fn member_query_chunk(nonce: &str, user: &str, not_found: &[&str]) -> Value {
