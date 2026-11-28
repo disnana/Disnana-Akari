@@ -508,6 +508,9 @@ pub enum ResponseStateError {
     /// この操作では、元のメッセージを更新できません。
     #[error("この操作では元のメッセージを更新できません")]
     CannotUpdate,
+    /// モーダルを開いたメッセージが送信データに含まれていません。
+    #[error("更新できる元のメッセージがありません")]
+    SourceMessageUnavailable,
     /// Components V2 のメッセージの更新には、`update_v2` を使う必要があります。
     #[error("Components V2 のメッセージには update_v2 を使ってください")]
     UseUpdateV2,

@@ -1,6 +1,6 @@
 use super::owner::{message_invoker, message_owner};
 use super::{
-    ButtonContext, ButtonResponse, ComponentType, Id, Interaction, InteractionData,
+    ButtonContext, ComponentResponse, ComponentType, Id, Interaction, InteractionData,
     InteractionHandlers, InteractionResponseType, InteractionType, Message,
     MessageComponentInteractionData, ModalContext, ModalInteractionComponent, ModalInteractionData,
     ResponseState, Result, SelectContext, UiMessage, UpdateAction, modal_fallback, submitted_text,
@@ -187,7 +187,7 @@ async fn initial_response_reports_the_failed_attempt_and_successful_retry() -> R
     .map_err(crate::Error::handler)?;
     server.map_err(crate::Error::handler)?;
     request?;
-    assert_eq!(ctx.response, ButtonResponse::DeferredUpdate);
+    assert_eq!(ctx.response, ComponentResponse::DeferredUpdate);
     assert!(matches!(
         seen.lock().unwrap().as_slice(),
         [crate::InfoEvent::InteractionResponseFailed { .. }, crate::InfoEvent::InteractionResponded {
@@ -270,7 +270,7 @@ async fn dynamic_handlers_dispatch_with_borrowed_values_and_static_priority() ->
     let state = seen.clone();
     events.on_button("ticket:fixed", async move |ctx: &mut ButtonContext<'_>| {
         assert!(ctx.dynamic_id().is_none());
-        ctx.response = ButtonResponse::Sent;
+        ctx.response = ComponentResponse::Sent;
         state.fetch_or(1, Ordering::Relaxed);
         Ok::<_, crate::Error>(())
     })?;
@@ -281,7 +281,7 @@ async fn dynamic_handlers_dispatch_with_borrowed_values_and_static_priority() ->
             ctx.dynamic_id().map(crate::ui::DynamicIdRef::value),
             Some("button")
         );
-        ctx.response = ButtonResponse::Sent;
+        ctx.response = ComponentResponse::Sent;
         state.fetch_or(2, Ordering::Relaxed);
         Ok::<_, crate::Error>(())
     })?;
@@ -292,7 +292,7 @@ async fn dynamic_handlers_dispatch_with_borrowed_values_and_static_priority() ->
             Some("who")
         );
         assert_eq!(ctx.values(), &[Id::new(15)]);
-        ctx.inner.response = ButtonResponse::Sent;
+        ctx.inner.response = ComponentResponse::Sent;
         state.fetch_or(4, Ordering::Relaxed);
         Ok::<_, crate::Error>(())
     })?;
@@ -302,7 +302,7 @@ async fn dynamic_handlers_dispatch_with_borrowed_values_and_static_priority() ->
             ctx.dynamic_id().map(crate::ui::DynamicIdRef::value),
             Some("form")
         );
-        ctx.response = ResponseState::Replied;
+        ctx.response = ComponentResponse::OwnResponse(ResponseState::Replied);
         state.fetch_or(8, Ordering::Relaxed);
         Ok::<_, crate::Error>(())
     })?;
@@ -1210,16 +1210,16 @@ fn rejects_duplicate_and_invalid_button_ids() -> Result<()> {
 #[test]
 fn selects_an_update_path_only_before_reply_or_after_deferring() -> Result<()> {
     assert_eq!(
-        ButtonResponse::Pending.update_action()?,
+        ComponentResponse::Pending.update_action()?,
         UpdateAction::Initial
     );
     assert_eq!(
-        ButtonResponse::DeferredUpdate.update_action()?,
+        ComponentResponse::DeferredUpdate.update_action()?,
         UpdateAction::Edit
     );
-    assert!(ButtonResponse::DeferredUpdate.require_pending().is_err());
-    assert!(ButtonResponse::Sent.require_pending().is_err());
-    assert!(ButtonResponse::Sent.update_action().is_err());
+    assert!(ComponentResponse::DeferredUpdate.require_pending().is_err());
+    assert!(ComponentResponse::Sent.require_pending().is_err());
+    assert!(ComponentResponse::Sent.update_action().is_err());
     Ok(())
 }
 

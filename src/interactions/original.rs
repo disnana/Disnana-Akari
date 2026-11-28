@@ -1,5 +1,5 @@
 use super::{
-    ButtonContext, ButtonResponse, EntitySelectContext, MentionableSelectContext, SelectContext,
+    ButtonContext, ComponentResponse, EntitySelectContext, MentionableSelectContext, SelectContext,
 };
 
 use twilight_model::channel::Message;
@@ -19,7 +19,7 @@ impl ButtonContext<'_> {
         self.response.require_pending()?;
         message.validate()?;
         self.initial.v2_reply(message, true).await?;
-        self.response = ButtonResponse::OwnResponse(ResponseState::RepliedV2);
+        self.response = ComponentResponse::OwnResponse(ResponseState::RepliedV2);
         Ok(())
     }
 
@@ -29,7 +29,7 @@ impl ButtonContext<'_> {
     /// # エラー
     /// 返信がない、削除済み、または Discord が取得を受け付けない場合に失敗します。
     pub async fn original_response(&self) -> Result<Message> {
-        let ButtonResponse::OwnResponse(state) = self.response else {
+        let ComponentResponse::OwnResponse(state) = self.response else {
             return Err(ResponseStateError::OriginalResponseUnavailable.into());
         };
         state.original_response(self.initial).await
@@ -81,8 +81,8 @@ impl ButtonContext<'_> {
     }
 }
 
-impl ButtonResponse {
-    fn own_response_mut(&mut self) -> Result<&mut ResponseState> {
+impl ComponentResponse {
+    pub(super) fn own_response_mut(&mut self) -> Result<&mut ResponseState> {
         match self {
             Self::OwnResponse(state) => Ok(state),
             _ => Err(ResponseStateError::OriginalResponseUnavailable.into()),

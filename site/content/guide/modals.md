@@ -223,7 +223,26 @@ async fn submit(ctx: &mut ModalContext<'_>) -> Result<()> {
 }
 ```
 
-ボタンからフォームを開いた場合も、編集先はフォーム送信への応答です。
+### フォームを開いたメッセージを更新する
+
+ボタンなどのコンポーネントから開いたフォームでは、`source_message()` で元のメッセージを参照できます。すぐ更新するには `update_message`、処理に時間がかかる場合は先に `defer_update` を呼びます。Components V2 の更新には `update_v2` を使います。
+
+```rust
+use disnana_akari::{ModalContext, Result, ui::UiMessage};
+
+async fn submit(ctx: &mut ModalContext<'_>) -> Result<()> {
+    if ctx.source_message().is_none() {
+        return ctx.reply_ephemeral("入力を受け付けました。").await;
+    }
+    ctx.defer_update().await?;
+    // 保存などの処理をしてから、フォームを開いたメッセージを更新する
+    let updated = UiMessage::new().content("保存しました。");
+    ctx.update_message(&updated).await?;
+    ctx.followup_ephemeral("更新しました。").await
+}
+```
+
+元メッセージがないフォームでは、更新操作は `ResponseStateError::SourceMessageUnavailable` を返します。フォーム送信への返信を編集する場合は `edit_original_response` などを使います。元メッセージの更新を遅延させたあとにハンドラーが失敗すると、エラーは本人だけに通知します。 [Discord の応答型](https://docs.discord.com/developers/interactions/receiving-and-responding#interaction-callback-type) · [discord.py の更新応答](https://discordpy.readthedocs.io/en/v2.7.1/interactions/api.html#discord.InteractionResponse.edit_message)
 
 フォームの識別子に `DynamicId` を使い、機能名を `on_dynamic_modal` に登録できます。送信時に `ctx.dynamic_id()` で対象の識別子を受け取ります。[動的 ID の使い方](buttons.md#再起動後も同じボタンを使う)
 

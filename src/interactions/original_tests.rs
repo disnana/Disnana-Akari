@@ -5,8 +5,8 @@ use tokio::{net::TcpListener, time::timeout};
 use twilight_model::channel::message::MessageFlags;
 
 use super::{
-    ButtonContext, Client, ComponentType, Id, InitialResponder, Interaction, InteractionType,
-    SelectContext,
+    ButtonContext, Client, ComponentResponse, ComponentType, Id, InitialResponder, Interaction,
+    InteractionHandlers, InteractionType, ModalContext, SelectContext,
     tests::{component_payload, interaction, message, user},
 };
 use crate::{
@@ -261,7 +261,7 @@ async fn followup_multipart(listener: &TcpListener) -> Result<Value> {
 
 #[tokio::test]
 async fn component_files_follow_source_ack_and_explicit_visibility() -> Result<()> {
-    use super::{ButtonResponse, EntitySelectContext, MentionableSelectContext, ResponseState};
+    use super::{EntitySelectContext, MentionableSelectContext, ResponseState};
     use crate::{model::id::marker::UserMarker, validation::AttachmentLimits};
 
     let (listener, http) = local_http().await?;
@@ -299,14 +299,15 @@ async fn component_files_follow_source_ack_and_explicit_visibility() -> Result<(
                 ))
             ));
         }
-        button.response = ButtonResponse::OwnResponse(ResponseState::Deferred { ephemeral: false });
+        button.response =
+            ComponentResponse::OwnResponse(ResponseState::Deferred { ephemeral: false });
         assert!(matches!(
             button.followup_files_ephemeral("", &files, limits).await,
             Err(Error::ResponseState(
                 ResponseStateError::FollowupBeforeResponse
             ))
         ));
-        button.response = ButtonResponse::Pending;
+        button.response = ComponentResponse::Pending;
 
         button.defer_update().await?;
         button.followup_files_ephemeral("", &files, limits).await?;
@@ -339,7 +340,7 @@ async fn component_files_follow_source_ack_and_explicit_visibility() -> Result<(
 
 #[tokio::test]
 async fn modal_files_wait_for_completed_reply_before_private_followup() -> Result<()> {
-    use super::{InteractionData, ModalContext, ModalInteractionData, ResponseState};
+    use super::{InteractionData, ModalInteractionData};
     use crate::validation::AttachmentLimits;
 
     let (listener, http) = local_http().await?;
@@ -361,7 +362,7 @@ async fn modal_files_wait_for_completed_reply_before_private_followup() -> Resul
         initial: component_initial(&http, &event, &hooks),
         data,
         dynamic_id: None,
-        response: ResponseState::Pending,
+        response: ComponentResponse::Pending,
         radio: &[],
     };
     let files = test_uploads();
@@ -419,6 +420,179 @@ fn modal_interaction() -> Interaction {
     event
 }
 
+fn modal_with_source(v2: bool) -> Interaction {
+    let mut event = modal_interaction();
+    let mut source = message(99, user(4, true));
+    if v2 {
+        source.flags = Some(MessageFlags::IS_COMPONENTS_V2);
+    }
+    event.message = Some(source);
+    event
+}
+
+#[tokio::test]
+async fn modal_initial_update_uses_callback_seven_for_classic_and_v2() -> Result<()> {
+    for v2 in [false, true] {
+        let (listener, http) = local_http().await?;
+        let event = modal_with_source(v2);
+        let hooks = Hooks::default();
+        let mut handlers = InteractionHandlers::default();
+        handlers.register_modal(
+            "test",
+            async move |ctx: &mut ModalContext<'_>| -> Result<()> {
+                assert_eq!(ctx.source_message().map(|msg| msg.id), Some(Id::new(99)));
+                if v2 {
+                    assert!(matches!(
+                        ctx.update_message(&UiMessage::new().content("wrong format"))
+                            .await,
+                        Err(Error::ResponseState(ResponseStateError::UseUpdateV2))
+                    ));
+                    ctx.update_v2(&ComponentsV2::new().text("edited v2"))
+                        .await?;
+                } else {
+                    assert!(matches!(
+                        ctx.update_v2(&ComponentsV2::new().text("wrong format"))
+                            .await,
+                        Err(Error::ResponseState(ResponseStateError::NeedsV2Message))
+                    ));
+                    ctx.update_message(&UiMessage::new().content("<@123>"))
+                        .await?;
+                }
+                unavailable(ctx.original_response().await);
+                unavailable(ctx.delete_original_response().await);
+                assert!(matches!(
+                    ctx.update_message(&UiMessage::new().content("duplicate"))
+                        .await,
+                    Err(Error::ResponseState(ResponseStateError::CannotUpdate))
+                ));
+                Ok(())
+            },
+        )?;
+        let (_, timing) = Pending::new((), None).begin();
+        let ((), callback) = timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                handlers.dispatch(&http, &event, timing, &hooks, &[]),
+                json_request(&listener, "POST", CALLBACK)
+            )
+        })
+        .await
+        .map_err(Error::handler)?;
+        let callback = callback?;
+        assert_eq!(callback["type"], 7);
+        assert_eq!(callback["data"]["allowed_mentions"]["parse"], json!([]));
+        if v2 {
+            assert_eq!(
+                callback["data"]["flags"],
+                MessageFlags::IS_COMPONENTS_V2.bits()
+            );
+            assert_eq!(callback["data"]["components"][0]["content"], "edited v2");
+        } else {
+            assert_eq!(callback["data"]["content"], "<@123>");
+            assert_eq!(callback["data"]["components"], json!([]));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn modal_deferred_source_update_edits_original_and_keeps_failed_notice_private() -> Result<()>
+{
+    for fails in [false, true] {
+        let (listener, http) = local_http().await?;
+        let event = modal_with_source(false);
+        let hooks = Hooks::default();
+        let mut handlers = InteractionHandlers::default();
+        handlers.register_modal(
+            "test",
+            async move |ctx: &mut ModalContext<'_>| -> Result<()> {
+                ctx.defer_update().await?;
+                assert!(matches!(
+                    ctx.reply_ephemeral("duplicate initial reply").await,
+                    Err(Error::ResponseState(ResponseStateError::AlreadyResponded))
+                ));
+                unavailable(ctx.edit_original_response("own reply missing").await);
+                if fails {
+                    return Err(Error::msg("modal fixture failure"));
+                }
+                ctx.followup_ephemeral("private notice").await?;
+                ctx.update_message(&UiMessage::new().content("patch source"))
+                    .await
+            },
+        )?;
+        let (_, timing) = Pending::new((), None).begin();
+        let server = async {
+            assert_eq!(
+                json_request(&listener, "POST", CALLBACK).await?,
+                json!({"type": 6})
+            );
+            let followup = json_request(&listener, "POST", FILE_FOLLOWUP).await?;
+            let wanted = if fails {
+                hooks.messages.modal_failed.as_deref().unwrap()
+            } else {
+                "private notice"
+            };
+            assert_eq!(followup["content"], wanted);
+            assert_eq!(followup["flags"], 64);
+            if !fails {
+                let patch = json_request(&listener, "PATCH", ORIGINAL).await?;
+                assert_eq!(patch["content"], "patch source");
+                assert_eq!(patch["allowed_mentions"]["parse"], json!([]));
+                assert!(patch.get("flags").is_none());
+            }
+            Ok::<_, Error>(())
+        };
+        let ((), server) = timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                handlers.dispatch(&http, &event, timing, &hooks, &[]),
+                server
+            )
+        })
+        .await
+        .map_err(Error::handler)?;
+        server?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn modal_without_source_rejects_source_updates_before_sending() -> Result<()> {
+    let (listener, http) = local_http().await?;
+    let event = modal_interaction();
+    let hooks = Hooks::default();
+    let mut handlers = InteractionHandlers::default();
+    handlers.register_modal("test", async |ctx: &mut ModalContext<'_>| -> Result<()> {
+        assert!(ctx.source_message().is_none());
+        for rejected in [
+            ctx.defer_update().await,
+            ctx.update_message(&UiMessage::new().content("missing"))
+                .await,
+            ctx.update_v2(&ComponentsV2::new().text("missing")).await,
+        ] {
+            assert!(matches!(
+                rejected,
+                Err(Error::ResponseState(
+                    ResponseStateError::SourceMessageUnavailable
+                ))
+            ));
+        }
+        ctx.reply_ephemeral("ordinary reply").await
+    })?;
+    let (_, timing) = Pending::new((), None).begin();
+    let ((), callback) = timeout(Duration::from_secs(3), async {
+        tokio::join!(
+            handlers.dispatch(&http, &event, timing, &hooks, &[]),
+            json_request(&listener, "POST", CALLBACK)
+        )
+    })
+    .await
+    .map_err(Error::handler)?;
+    let callback = callback?;
+    assert_eq!(callback["type"], 4);
+    assert_eq!(callback["data"]["content"], "ordinary reply");
+    assert_eq!(callback["data"]["flags"], 64);
+    Ok(())
+}
+
 #[tokio::test]
 async fn failed_initial_component_callbacks_do_not_send_automatic_replies() -> Result<()> {
     use std::sync::{
@@ -426,7 +600,6 @@ async fn failed_initial_component_callbacks_do_not_send_automatic_replies() -> R
         atomic::{AtomicUsize, Ordering},
     };
 
-    use super::{InteractionHandlers, ModalContext};
     use crate::{ErrorSource, hooks::Reporter, slash::response_diagnostics_tests::reject_callback};
 
     let mut handlers = InteractionHandlers::default();
@@ -493,7 +666,6 @@ async fn unrelated_callback(http: &Client) -> Result<()> {
 
 #[tokio::test]
 async fn deferred_components_still_notify_about_unrelated_callback_errors() -> Result<()> {
-    use super::{InteractionHandlers, ModalContext};
     use crate::slash::response_diagnostics_tests::reject_callback;
 
     let mut handlers = InteractionHandlers::default();

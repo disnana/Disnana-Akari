@@ -258,7 +258,7 @@ impl InteractionHandlers {
                     initial,
                     data,
                     dynamic_id,
-                    response: ResponseState::Pending,
+                    response: ComponentResponse::Pending,
                     radio,
                 };
                 let result = handler.call(&mut ctx).await;
@@ -391,14 +391,29 @@ async fn finish_modal(ctx: &mut ModalContext<'_>, result: Result<()>, hooks: &Ho
     let name = Some(ctx.custom_id());
     if let Err(error) = &result {
         hooks.reporter.report(ErrorSource::Modal, name, error);
-        if ctx.response == ResponseState::Pending && callback_unavailable(error) {
+        if ctx.response == ComponentResponse::Pending && callback_unavailable(error) {
             return;
         }
     }
-    if let Some((content, ephemeral)) =
-        modal_fallback(ctx.response, result.is_ok(), &hooks.messages)
-        && let Err(error) = ctx.response.reply(ctx.initial, content, ephemeral).await
-    {
+    let fallback = if ctx.response == ComponentResponse::DeferredUpdate {
+        if result.is_ok() {
+            return;
+        }
+        let Some(content) = hooks.messages.modal_failed.as_deref() else {
+            return;
+        };
+        ctx.followup_ephemeral(content).await
+    } else {
+        let Ok(state) = ctx.response.channel_response() else {
+            return;
+        };
+        let Some((content, ephemeral)) = modal_fallback(state, result.is_ok(), &hooks.messages)
+        else {
+            return;
+        };
+        ctx.respond(content, ephemeral).await
+    };
+    if let Err(error) = fallback {
         hooks.reporter.report(ErrorSource::Response, name, &error);
     }
 }
@@ -418,22 +433,22 @@ async fn finish_component(
     match result {
         Err(error) => {
             hooks.reporter.report(source, name, &error);
-            if ctx.response == ButtonResponse::Pending && callback_unavailable(&error) {
+            if ctx.response == ComponentResponse::Pending && callback_unavailable(&error) {
                 return;
             }
             let Some(text) = failure else {
                 return;
             };
             let fallback = match ctx.response {
-                ButtonResponse::Pending => ctx.reply_ephemeral(text).await,
-                ButtonResponse::DeferredUpdate => ctx.followup_ephemeral(text).await,
-                ButtonResponse::Sent | ButtonResponse::OwnResponse(_) => Ok(()),
+                ComponentResponse::Pending => ctx.reply_ephemeral(text).await,
+                ComponentResponse::DeferredUpdate => ctx.followup_ephemeral(text).await,
+                ComponentResponse::Sent | ComponentResponse::OwnResponse(_) => Ok(()),
             };
             if let Err(error) = fallback {
                 hooks.reporter.report(ErrorSource::Response, name, &error);
             }
         }
-        Ok(()) if ctx.response == ButtonResponse::Pending => {
+        Ok(()) if ctx.response == ComponentResponse::Pending => {
             if let Err(error) = ctx.acknowledge().await {
                 hooks.reporter.report(ErrorSource::Response, name, &error);
             }
@@ -477,7 +492,7 @@ pub struct ButtonContext<'a> {
     initial: InitialResponder<'a>,
     custom_id: &'a str,
     dynamic_id: Option<DynamicIdRef<'a>>,
-    response: ButtonResponse,
+    response: ComponentResponse,
 }
 
 impl std::fmt::Debug for ButtonContext<'_> {
@@ -501,7 +516,7 @@ impl<'a> ButtonContext<'a> {
             initial,
             custom_id,
             dynamic_id,
-            response: ButtonResponse::Pending,
+            response: ComponentResponse::Pending,
         }
     }
 
@@ -568,7 +583,7 @@ impl<'a> ButtonContext<'a> {
     pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
         self.response.require_pending()?;
         self.initial.message(content, true).await?;
-        self.response = ButtonResponse::OwnResponse(ResponseState::Replied);
+        self.response = ComponentResponse::OwnResponse(ResponseState::Replied);
         Ok(())
     }
 
@@ -587,14 +602,7 @@ impl<'a> ButtonContext<'a> {
     /// # エラー
     /// 初回応答済み、または Discord が受け付けなかった場合に失敗します。
     pub async fn defer_update(&mut self) -> Result<()> {
-        self.response.require_pending()?;
-        let response = InteractionResponse {
-            kind: InteractionResponseType::DeferredUpdateMessage,
-            data: None,
-        };
-        self.initial.send(&response).await?;
-        self.response = ButtonResponse::DeferredUpdate;
-        Ok(())
+        self.response.defer_update(self.initial).await
     }
 
     /// ボタンが付いたメッセージの本文、Embed、コンポーネントを置き換えます。
@@ -603,21 +611,7 @@ impl<'a> ButtonContext<'a> {
     /// # エラー
     /// 更新できない応答状態、無効なメッセージ、または Discord が受け付けない場合に失敗します。
     pub async fn update_message(&mut self, message: &UiMessage) -> Result<()> {
-        let action = self.response.update_action()?;
-        if self.uses_components_v2() {
-            return Err(ResponseStateError::UseUpdateV2.into());
-        }
-        message.validate()?;
-        match action {
-            UpdateAction::Initial => {
-                self.initial.send(&update_response(message)).await?;
-            }
-            UpdateAction::Edit => {
-                edit_ui_response(self.initial.http, self.initial.interaction, message).await?
-            }
-        }
-        self.response = ButtonResponse::Sent;
-        Ok(())
+        self.response.update_message(self.initial, message).await
     }
 
     /// 元の Components V2 メッセージのコンポーネントを置き換え、指定した添付を追加します。
@@ -628,37 +622,7 @@ impl<'a> ButtonContext<'a> {
     /// # エラー
     /// 更新できない応答状態、元メッセージが Components V2 以外、無効なコンポーネント、または通信の失敗でエラーになります。
     pub async fn update_v2(&mut self, message: &ComponentsV2) -> Result<()> {
-        let action = self.response.update_action()?;
-        if !self.uses_components_v2() {
-            return Err(ResponseStateError::NeedsV2Message.into());
-        }
-        message.validate()?;
-        match action {
-            UpdateAction::Initial => {
-                self.initial.v2_update(message).await?;
-            }
-            UpdateAction::Edit => {
-                let current;
-                let retained = if message.needs_existing_attachments() {
-                    message.validate_attachment_sizes(
-                        self.initial.interaction.attachment_size_limit,
-                    )?;
-                    current = self.initial.fetch_original_response().await?;
-                    Some(current.attachments.as_slice())
-                } else {
-                    self.message().map(|source| source.attachments.as_slice())
-                };
-                edit_v2_response(
-                    self.initial.http,
-                    self.initial.interaction,
-                    message,
-                    retained,
-                )
-                .await?
-            }
-        }
-        self.response = ButtonResponse::Sent;
-        Ok(())
+        self.response.update_v2(self.initial, message).await
     }
 
     /// 初回応答としてモーダルを開きます。
@@ -668,14 +632,8 @@ impl<'a> ButtonContext<'a> {
     pub async fn show_modal(&mut self, modal: &Modal) -> Result<()> {
         self.response.require_pending()?;
         self.initial.modal(modal).await?;
-        self.response = ButtonResponse::Sent;
+        self.response = ComponentResponse::Sent;
         Ok(())
-    }
-
-    fn uses_components_v2(&self) -> bool {
-        self.message()
-            .and_then(|message| message.flags)
-            .is_some_and(|flags| flags.contains(MessageFlags::IS_COMPONENTS_V2))
     }
 
     /// 操作を受け付けた後、全員に見える追加メッセージを送ります。
@@ -695,14 +653,9 @@ impl<'a> ButtonContext<'a> {
     }
 
     async fn send_followup(&self, content: &str, ephemeral: bool) -> Result<()> {
-        self.response.require_followup()?;
-        send_followup_message(
-            self.initial.http,
-            self.initial.interaction,
-            content,
-            ephemeral,
-        )
-        .await
+        self.response
+            .send_followup(self.initial, content, ephemeral)
+            .await
     }
 }
 
@@ -965,7 +918,7 @@ pub struct ModalContext<'a> {
     initial: InitialResponder<'a>,
     data: &'a ModalInteractionData,
     dynamic_id: Option<DynamicIdRef<'a>>,
-    response: ResponseState,
+    response: ComponentResponse,
     radio: &'a [RadioSubmission],
 }
 
@@ -1066,7 +1019,7 @@ impl<'a> ModalContext<'a> {
     /// # エラー
     /// 応答済み、または Discord が受け付けなかった場合に失敗します。
     pub async fn reply(&mut self, content: &str) -> Result<()> {
-        self.response.reply(self.initial, content, false).await
+        self.respond(content, false).await
     }
 
     /// モーダルを送信した本人にだけ応答するか、非公開の遅延応答を完成させます。
@@ -1074,7 +1027,7 @@ impl<'a> ModalContext<'a> {
     /// # エラー
     /// 応答済み、公開の遅延応答済み、または Discord が受け付けなかった場合に失敗します。
     pub async fn reply_ephemeral(&mut self, content: &str) -> Result<()> {
-        self.response.reply(self.initial, content, true).await
+        self.respond(content, true).await
     }
 
     /// チャンネルに処理中の表示を出します。作業が終わったら [`Self::reply`] で完成させます。
@@ -1082,7 +1035,7 @@ impl<'a> ModalContext<'a> {
     /// # エラー
     /// 初回応答済み、または Discord が受け付けなかった場合に失敗します。
     pub async fn defer(&mut self) -> Result<()> {
-        self.response.defer(self.initial, false).await
+        self.defer_response(false).await
     }
 
     /// 送信した本人にだけ処理中の表示を出します。
@@ -1090,26 +1043,42 @@ impl<'a> ModalContext<'a> {
     /// # エラー
     /// 初回応答済み、または Discord が受け付けなかった場合に失敗します。
     pub async fn defer_ephemeral(&mut self) -> Result<()> {
-        self.response.defer(self.initial, true).await
+        self.defer_response(true).await
     }
 
-    /// 初回メッセージを完成させた後、チャンネルに追加メッセージを送ります。
+    /// 初回メッセージを完成させるか、元のメッセージの更新を受け付けた後に、チャンネルへ追加メッセージを送ります。
     ///
     /// # エラー
     /// 初回メッセージが未完成、または Discord が受け付けなかった場合に失敗します。
     pub async fn followup(&self, content: &str) -> Result<()> {
-        self.response
-            .followup(self.initial.http, self.initial.interaction, content, false)
-            .await
+        self.send_followup(content, false).await
     }
 
-    /// 初回メッセージを完成させた後、送信した本人にだけ追加メッセージを送ります。
+    /// 初回メッセージを完成させるか、元のメッセージの更新を受け付けた後に、本人にだけ追加メッセージを送ります。
     ///
     /// # エラー
     /// 初回メッセージが未完成、または Discord が受け付けなかった場合に失敗します。
     pub async fn followup_ephemeral(&self, content: &str) -> Result<()> {
+        self.send_followup(content, true).await
+    }
+
+    async fn respond(&mut self, content: &str, ephemeral: bool) -> Result<()> {
+        let mut state = self.response.channel_response()?;
+        state.reply(self.initial, content, ephemeral).await?;
+        self.response = ComponentResponse::OwnResponse(state);
+        Ok(())
+    }
+
+    async fn defer_response(&mut self, ephemeral: bool) -> Result<()> {
+        let mut state = self.response.channel_response()?;
+        state.defer(self.initial, ephemeral).await?;
+        self.response = ComponentResponse::OwnResponse(state);
+        Ok(())
+    }
+
+    async fn send_followup(&self, content: &str, ephemeral: bool) -> Result<()> {
         self.response
-            .followup(self.initial.http, self.initial.interaction, content, true)
+            .send_followup(self.initial, content, ephemeral)
             .await
     }
 }
@@ -1141,20 +1110,38 @@ fn submitted_field<'a, T>(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ButtonResponse {
+enum ComponentResponse {
     Pending,
     DeferredUpdate,
     Sent,
     OwnResponse(ResponseState),
 }
 
-impl ButtonResponse {
+impl ComponentResponse {
+    fn channel_response(self) -> Result<ResponseState> {
+        match self {
+            Self::Pending => Ok(ResponseState::Pending),
+            Self::OwnResponse(state) => Ok(state),
+            Self::DeferredUpdate | Self::Sent => Err(ResponseStateError::AlreadyResponded.into()),
+        }
+    }
+
     fn require_followup(self) -> Result<()> {
         match self {
             Self::Pending => Err(ResponseStateError::FollowupBeforeResponse.into()),
             Self::DeferredUpdate | Self::Sent => Ok(()),
             Self::OwnResponse(state) => state.require_followup(),
         }
+    }
+
+    async fn send_followup(
+        self,
+        initial: InitialResponder<'_>,
+        content: &str,
+        ephemeral: bool,
+    ) -> Result<()> {
+        self.require_followup()?;
+        send_followup_message(initial.http, initial.interaction, content, ephemeral).await
     }
 
     fn require_pending(self) -> Result<()> {
@@ -1172,6 +1159,73 @@ impl ButtonResponse {
             Self::Sent | Self::OwnResponse(_) => Err(ResponseStateError::CannotUpdate.into()),
         }
     }
+
+    async fn defer_update(&mut self, initial: InitialResponder<'_>) -> Result<()> {
+        self.require_pending()?;
+        initial
+            .send(&InteractionResponse {
+                kind: InteractionResponseType::DeferredUpdateMessage,
+                data: None,
+            })
+            .await?;
+        *self = Self::DeferredUpdate;
+        Ok(())
+    }
+
+    async fn update_message(
+        &mut self,
+        initial: InitialResponder<'_>,
+        message: &UiMessage,
+    ) -> Result<()> {
+        let action = self.update_action()?;
+        if uses_components_v2(initial.interaction.message.as_ref()) {
+            return Err(ResponseStateError::UseUpdateV2.into());
+        }
+        message.validate()?;
+        match action {
+            UpdateAction::Initial => initial.send(&update_response(message)).await?,
+            UpdateAction::Edit => {
+                edit_ui_response(initial.http, initial.interaction, message).await?
+            }
+        }
+        *self = Self::Sent;
+        Ok(())
+    }
+
+    async fn update_v2(
+        &mut self,
+        initial: InitialResponder<'_>,
+        message: &ComponentsV2,
+    ) -> Result<()> {
+        let action = self.update_action()?;
+        let source = initial.interaction.message.as_ref();
+        if !uses_components_v2(source) {
+            return Err(ResponseStateError::NeedsV2Message.into());
+        }
+        message.validate()?;
+        match action {
+            UpdateAction::Initial => initial.v2_update(message).await?,
+            UpdateAction::Edit => {
+                let current;
+                let retained = if message.needs_existing_attachments() {
+                    message.validate_attachment_sizes(initial.interaction.attachment_size_limit)?;
+                    current = initial.fetch_original_response().await?;
+                    Some(current.attachments.as_slice())
+                } else {
+                    source.map(|source| source.attachments.as_slice())
+                };
+                edit_v2_response(initial.http, initial.interaction, message, retained).await?
+            }
+        }
+        *self = Self::Sent;
+        Ok(())
+    }
+}
+
+fn uses_components_v2(message: Option<&Message>) -> bool {
+    message
+        .and_then(|message| message.flags)
+        .is_some_and(|flags| flags.contains(MessageFlags::IS_COMPONENTS_V2))
 }
 
 #[derive(Debug, PartialEq, Eq)]

@@ -18,9 +18,12 @@ use twilight_model::{
     },
 };
 
-use super::{Mentionable, ModalContext, collect_selection, resolve_mentionable, submitted_field};
+use super::{
+    ComponentResponse, Mentionable, ModalContext, collect_selection, resolve_mentionable,
+    submitted_field,
+};
 use crate::{
-    Result, SelectionError,
+    ResponseStateError, Result, SelectionError,
     slash::InitialResponder,
     ui::{ComponentsV2, Modal, ModalField, RadioGroupOption, UiMessage},
 };
@@ -150,12 +153,58 @@ macro_rules! submitted_values {
 }
 
 impl<'a> ModalContext<'a> {
-    /// モーダルの送信に対する元の応答を Discord から取得します。非公開の応答も取得できます。
+    /// ボタンや選択メニューから開いたとき、その操作部品が付いた元のメッセージを借ります。
+    /// Discord が元のメッセージを送らなかった場合は `None` です。
+    pub fn source_message(&self) -> Option<&'a Message> {
+        self.initial.interaction.message.as_ref()
+    }
+
+    /// 入力を先に受け付け、元のメッセージを後から更新できるようにします。
+    /// 作業が終わったら [`Self::update_message`] または [`Self::update_v2`] で反映できます。
+    ///
+    /// # エラー
+    /// 元のメッセージがない、初回応答済み、または Discord が受け付けない場合に失敗します。
+    pub async fn defer_update(&mut self) -> Result<()> {
+        self.require_source_message()?;
+        self.response.defer_update(self.initial).await
+    }
+
+    /// モーダルを開いたメッセージの本文、埋め込み、従来のコンポーネントを置き換えます。
+    /// 初回応答として、または [`Self::defer_update`] の後に一度呼べます。
+    ///
+    /// # エラー
+    /// 元のメッセージがない、状態や形式が合わない、入力が無効、または Discord が更新を受け付けない場合に失敗します。
+    pub async fn update_message(&mut self, message: &UiMessage) -> Result<()> {
+        self.require_source_message()?;
+        self.response.update_message(self.initial, message).await
+    }
+
+    /// モーダルを開いた Components V2 メッセージを更新します。既存の添付は保持されます。
+    /// 初回応答として、または [`Self::defer_update`] の後に一度呼べます。
+    ///
+    /// # エラー
+    /// 元のメッセージがない、状態や形式が合わない、入力が無効、または Discord が更新を受け付けない場合に失敗します。
+    pub async fn update_v2(&mut self, message: &ComponentsV2) -> Result<()> {
+        self.require_source_message()?;
+        self.response.update_v2(self.initial, message).await
+    }
+
+    fn require_source_message(&self) -> Result<()> {
+        self.source_message()
+            .ok_or(ResponseStateError::SourceMessageUnavailable)?;
+        Ok(())
+    }
+
+    /// モーダルの送信に対して作った応答を Discord から取得します。非公開の応答も取得できます。
+    /// モーダルを開いたメッセージは [`Self::source_message`] で参照できます。
     ///
     /// # エラー
     /// まだ応答していない、すでに削除した、または Discord が取得を受け付けない場合に失敗します。
     pub async fn original_response(&self) -> Result<Message> {
-        self.response.original_response(self.initial).await
+        let ComponentResponse::OwnResponse(state) = self.response else {
+            return Err(ResponseStateError::OriginalResponseUnavailable.into());
+        };
+        state.original_response(self.initial).await
     }
 
     /// モーダルの送信に対する元の応答の本文を更新します。公開範囲と添付は維持し、メンション通知を抑止します。
@@ -165,6 +214,7 @@ impl<'a> ModalContext<'a> {
     /// 元の応答がない、Components V2 形式で送っている、または Discord が編集を受け付けない場合に失敗します。
     pub async fn edit_original_response(&mut self, content: &str) -> Result<()> {
         self.response
+            .own_response_mut()?
             .edit_original_response(self.initial, content)
             .await
     }
@@ -175,7 +225,10 @@ impl<'a> ModalContext<'a> {
     /// # エラー
     /// 元の応答や形式が対応しない、メッセージが無効、または Discord が編集を受け付けない場合に失敗します。
     pub async fn edit_original_ui(&mut self, message: &UiMessage) -> Result<()> {
-        self.response.edit_original_ui(self.initial, message).await
+        self.response
+            .own_response_mut()?
+            .edit_original_ui(self.initial, message)
+            .await
     }
 
     /// 元の Components V2 応答の部品を置き換えます。公開範囲と添付は維持されます。
@@ -184,7 +237,10 @@ impl<'a> ModalContext<'a> {
     /// # エラー
     /// 元の応答や形式が対応しない、メッセージが無効、または Discord が編集を受け付けない場合に失敗します。
     pub async fn edit_original_v2(&mut self, message: &ComponentsV2) -> Result<()> {
-        self.response.edit_original_v2(self.initial, message).await
+        self.response
+            .own_response_mut()?
+            .edit_original_v2(self.initial, message)
+            .await
     }
 
     /// モーダルの送信に対する元の応答または処理中の表示を削除します。
@@ -193,7 +249,10 @@ impl<'a> ModalContext<'a> {
     /// # エラー
     /// まだ応答していない、すでに削除した、または Discord が削除を受け付けない場合に失敗します。
     pub async fn delete_original_response(&mut self) -> Result<()> {
-        self.response.delete_original_response(self.initial).await
+        self.response
+            .own_response_mut()?
+            .delete_original_response(self.initial)
+            .await
     }
 
     /// 指定したラジオグループの選択値を借ります。
