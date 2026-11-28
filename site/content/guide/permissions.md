@@ -169,29 +169,26 @@ async fn kick(ctx: &mut SlashContext<'_>, target: Id<UserMarker>) -> Result<()> 
 
 チャンネルの権限の上書きを、数値やビットを書かずに、許可、拒否、継承の 3 値で読み書きできます。
 
-```rust
-use disnana_akari::model::{guild::Permissions, id::{Id, marker::{ChannelMarker, RoleMarker}}};
-use disnana_akari::{Overwrite, OverwriteTarget, Result, SlashContext, Tri};
+この例は、コマンドを呼んだチャンネルの発言権限を変更します。別のチャンネルを選べるコマンドにする場合は、変更先で実行者の権限を確認してから書き込みます。
 
-async fn lock(
-    ctx: &mut SlashContext<'_>,
-    channel: Id<ChannelMarker>,
-    members: Id<RoleMarker>,
-) -> Result<()> {
+```rust
+use disnana_akari::model::{guild::Permissions, id::{Id, marker::RoleMarker}};
+use disnana_akari::{CheckFailure, OverwriteTarget, Result, SlashContext, Tri};
+
+async fn lock(ctx: &mut SlashContext<'_>, members: Id<RoleMarker>) -> Result<()> {
+    let channel = ctx.channel_id().ok_or(CheckFailure::PermissionsUnavailable)?;
     let access = ctx.access();
-    // 実行した人が、操作してよいかは、呼ぶ側で確認する（Akari は確認しません）
-    access.require_permissions(Permissions::MANAGE_ROLES).await?;
+    // 実行者の権限を確認したチャンネルに対して操作する
+    access
+        .require_permissions(Permissions::MANAGE_ROLES | Permissions::SEND_MESSAGES)
+        .await?;
 
     let target = OverwriteTarget::Role(members);
-    // いまの設定を読む（キャッシュは使いません）
-    let already = access
-        .overwrite_of(channel, target)
-        .await?
-        .is_some_and(|current| current.state(Permissions::SEND_MESSAGES) == Some(Tri::Deny));
-    if !already {
-        // 1 つの対象だけを更新します。ほかの対象の設定は変えません
+    let current = access.overwrite_of(channel, target).await?.unwrap_or_default();
+    if current.state(Permissions::SEND_MESSAGES) != Some(Tri::Deny) {
+        // このロールのほかの権限を保ったまま、発言だけを拒否する
         access
-            .set_overwrite(channel, target, Overwrite::new().deny(Permissions::SEND_MESSAGES), "メンテナンスのため")
+            .set_overwrite(channel, target, current.deny(Permissions::SEND_MESSAGES), "メンテナンスのため")
             .await?;
     }
     ctx.reply_ephemeral("発言を止めました。").await
@@ -208,7 +205,7 @@ async fn lock(
 
 - `Overwrite` は、`allow`、`deny`、`inherit` で、権限ごとの状態を指定します。同じ権限を指定し直すと、前の指定を置き換えます。`state(権限)` で、`Tri::Allow`、`Tri::Deny`、`Tri::Inherit` を読めます。
 - **書き込みの前に、Bot の権限を確認します。** Bot が `MANAGE_ROLES` を持たない、Bot 自身が持たない権限を付けようとした（管理者は除く）、対象のロールが Bot の最上位ロール以上、のどれかなら、通信せずに失敗します。
-- **実行した人への確認は、しません。** `require_permissions` などで、先に確認してください。
+- **実行者はアプリ側で認可します。** `require_permissions` はコマンドを呼んだ場所の権限を確認します。操作対象が異なる場合は、その対象での権限を確認するか、サーバー所有者などに操作を限定してください。
 - 理由は監査ログに残る文字列で、512 文字以内です。
 - ロールの権限は、Discord が全体を置き換える仕様です。`role_permissions` で現在の値を読み、足したい権限だけを足して渡してください。読んでから書くまでの間に別の変更があると、それを上書きします。
 - チャンネルの上書きは、1 つの対象だけを更新するので、ほかの対象の設定は巻き戻りません。
@@ -256,18 +253,17 @@ async fn mute(ctx: &mut SlashContext<'_>, target: Id<UserMarker>) -> Result<()> 
 
 `ctx.manage()` で、チャンネルとロールも管理できます。**種類ごとに型を分けてあるので、成り立たない組み合わせは書けません**（テキストチャンネルにビットレートを渡すことはできません）。範囲外の値は、通信する前に失敗します。
 
+この例の初期設定はサーバー全体に及ぶため、サーバー所有者だけに許可します。
+
 ```rust
 use std::time::Duration;
 
-use disnana_akari::model::guild::Permissions;
 use disnana_akari::{
     NewRole, NewTextChannel, NewVoiceChannel, Result, RoleEdit, SlashContext, TextChannelEdit,
 };
 
 async fn setup(ctx: &mut SlashContext<'_>) -> Result<()> {
-    let access = ctx.access();
-    // 実行した人が、操作してよいかは、呼ぶ側で確認する（Akari は確認しません）
-    access.require_permissions(Permissions::MANAGE_CHANNELS | Permissions::MANAGE_ROLES).await?;
+    ctx.access().require_guild_owner().await?;
 
     let manage = ctx.manage();
     let channel = manage
