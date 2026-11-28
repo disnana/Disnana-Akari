@@ -82,8 +82,8 @@ async fn bot_check_rejection_stops_both_layers() {
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
-#[test]
-fn entitlements_distinguish_application_data_from_text() {
+#[tokio::test]
+async fn entitlements_distinguish_application_data_from_text() {
     let http = offline_http();
     let permissions = PermissionResolver::new(None);
     let mut interaction = slash_interaction(true, 0, 0);
