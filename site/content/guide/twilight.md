@@ -38,41 +38,58 @@ async fn channel_name(ctx: CommandContext<'_>) -> Result<()> {
 
 ## メッセージ履歴をページ単位で読む
 
-discord.py の `channel.history()` にあたる処理です。1 回の取得は最大 100 件です。古い方向に続けるときは、直前のページの末尾にあるメッセージ ID を `before` に渡します。
+`MessageHistory` は、ページを要求するたびに Discord から取得します。1ページ最大100件です。取得結果を処理したあとページを破棄すれば、読み進めても全件をメモリに保持しません。
 
 ```rust
-use disnana_akari::{
-    Result,
-    http::Client,
-    model::{channel::Message, id::{Id, marker::{ChannelMarker, MessageMarker}}},
-};
+use disnana_akari::{Error, HistoryCursor, MessageHistory, Result};
+use disnana_akari::{http::Client, model::id::{Id, marker::ChannelMarker}};
 
-async fn recent_messages(
-    http: &Client,
-    channel: Id<ChannelMarker>,
-    max_pages: usize,
-) -> Result<Vec<Message>> {
-    let mut messages = Vec::new();
-    let mut before: Option<Id<MessageMarker>> = None;
-    for _ in 0..max_pages {
-        let request = http.channel_messages(channel).limit(100);
-        let page = match before {
-            Some(cursor) => request.before(cursor).await?,
-            None => request.await?,
-        }.models().await?;
-
-        let has_more = page.len() == 100;
-        before = page.last().map(|message| message.id);
-        messages.extend(page);
-        if !has_more {
-            break;
+async fn print_recent(http: &Client, channel: Id<ChannelMarker>) -> Result<()> {
+    let mut history = MessageHistory::new(http, channel, HistoryCursor::Latest, 250)
+        .map_err(Error::handler)?;
+    while let Some(page) = history.next_page().await.map_err(Error::handler)? {
+        for message in page {
+            println!("{}", message.id);
         }
     }
-    Ok(messages)
+    Ok(())
 }
 ```
 
-Discord の返信は新しい順です。Bot に対象チャンネルの閲覧と履歴の取得権限が必要です。利用者向けのコマンドでは、閲覧を許可する人も確認してください。[Discord の Get Channel Messages](https://docs.discord.com/developers/resources/message#get-channel-messages)
+`Latest` と `Before(id)` は新しい順、`After(id)` は古い順です。`Before` と `After` は境界の投稿を含みません。`Around(id)` は指定した投稿付近を一度だけ取得します。再開するには最後に処理した ID を保存し、新しい取得に渡します。Bot に対象チャンネルの閲覧と履歴の取得権限が必要です。 [Discord の履歴仕様](https://docs.discord.com/developers/resources/message#get-channel-messages) · [discord.py の history](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.abc.Messageable.history)
+
+## サーバーのメンバーとリアクションをページ単位で読む
+
+`MemberPages` は List Guild Members、`ReactionPages` は Get Reactions を使います。両方ともユーザー ID の昇順で返します。`after` で取得を再開でき、`limit` で総件数を制限できます。既定の1ページはメンバー最大1,000件、リアクション最大100件です。失敗したページではカーソルが進みません。
+
+```rust
+use disnana_akari::{Error, MemberPages, ReactionPages, Result};
+use disnana_akari::http::{Client, request::channel::reaction::RequestReactionType};
+use disnana_akari::model::id::{Id, marker::{ChannelMarker, GuildMarker, MessageMarker}};
+
+async fn print_members(http: &Client, guild: Id<GuildMarker>) -> Result<()> {
+    let mut pages = MemberPages::new(http, guild).limit(2_500);
+    while let Some(page) = pages.next_page().await.map_err(Error::handler)? {
+        for member in page {
+            println!("{}", member.user.id);
+        }
+    }
+    Ok(())
+}
+
+async fn print_reactions(http: &Client, channel: Id<ChannelMarker>, message: Id<MessageMarker>) -> Result<()> {
+    let emoji = RequestReactionType::Unicode { name: "👍" };
+    let mut pages = ReactionPages::new(http, channel, message, emoji).limit(250);
+    while let Some(page) = pages.next_page().await.map_err(Error::handler)? {
+        for user in page {
+            println!("{}", user.id);
+        }
+    }
+    Ok(())
+}
+```
+
+メンバー一覧には Discord 側の特権 Intent `GUILD_MEMBERS` が必要です。リアクションは `kind(ReactionType::Burst)` でスーパーリアクションを指定できます。どちらの API も結果を自動でキャッシュしません。取得中に参加・退出やリアクションの変更があると、ページ間で一覧が変わることがあります。 [Discord のメンバー一覧](https://docs.discord.com/developers/resources/guild#list-guild-members) · [Discord のリアクション一覧](https://docs.discord.com/developers/resources/message#get-reactions)
 
 ## ファイル付きのメッセージを作る
 

@@ -784,3 +784,8 @@ async fn ready(_event: &Ready) -> Result<()> {
 
 - `UiSessions` は `UiSessionLimits` の範囲で実行者と元メッセージに紐づく操作を管理します。`UiSessionActions` で操作を登録し、`UiSessionDraft` を画面に紐づけて `UiSession` を作ります。準備や登録の失敗は `UiSessionError`、終了は `UiSessionOutcome` で判別できます。
 - `Bot::with_command_check_once` は実際に呼び出されたコマンドの実行前に `CommandCheck` を一度だけ実行します。補完やヘルプの候補を調べる処理には適用しません。
+
+## REST のページ取得
+
+- `MessageHistory` は `HistoryCursor` で取得方向を指定し、メッセージ履歴を一度に最大100件読みます。設定と取得の失敗は `MessageHistoryError` で区別します。
+- `MemberPages` と `ReactionPages` はユーザー ID をカーソルとして次のページを取得します。上限やカーソルに合わない応答は、それぞれ `MemberPagesError` と `ReactionPagesError` で返ります。

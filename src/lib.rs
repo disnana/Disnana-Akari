@@ -3,6 +3,8 @@
 mod access;
 mod argument_resolution;
 mod autocomplete;
+#[cfg(test)]
+mod cache_measurement;
 mod channel_ui;
 mod command_check;
 mod commands;
@@ -18,6 +20,7 @@ mod gateway_runtime;
 mod gateway_status;
 mod gateway_waiters;
 mod guild_lifecycle;
+mod history;
 mod hooks;
 mod hybrid;
 mod interactions;
@@ -25,6 +28,7 @@ mod limits;
 mod manage;
 mod manage_types;
 mod member_cache;
+mod member_pages;
 mod member_query;
 mod message_cache;
 mod message_events;
@@ -35,6 +39,8 @@ mod pagination;
 mod permission_cache_tests;
 mod permissions;
 mod presence;
+mod reaction_pages;
+mod rest_pagination;
 mod shutdown;
 mod slash;
 pub mod soundboard;
@@ -107,6 +113,7 @@ pub use gateway_status::{
     GatewayShardState, GatewayShardStatus, GatewayStatusHandle, GatewayStatusUpdates,
 };
 pub use guild_lifecycle::{GuildLifecycleEvent, GuildLifecycleKind};
+pub use history::{HistoryCursor, MessageHistory, MessageHistoryError};
 pub use hooks::{ErrorReport, ErrorSource, InfoEvent, Messages};
 pub use hybrid::{
     CommandSource, HybridArgumentError, HybridArguments, HybridCommandGroup, HybridContext,
@@ -124,6 +131,7 @@ pub use manage_types::{
     VoiceChannelEdit,
 };
 pub use member_cache::{CachedMemberRemove, CachedMemberUpdate, MemberCacheHandle};
+pub use member_pages::{MemberPages, MemberPagesError};
 pub use member_query::{MemberQuery, MemberQueryError, MemberQueryResult};
 pub use message_cache::CachedMessageEdit;
 pub use message_events::MessageUpdate;
@@ -131,6 +139,7 @@ pub use module::{Module, Registry};
 pub use overwrite::{Overwrite, OverwriteTarget, Tri};
 pub use pagination::{Pager, PagerDraft, PagerError, PagerLimits, PagerPage, Pagers};
 pub use presence::{Presence, PresenceHandle};
+pub use reaction_pages::{ReactionPages, ReactionPagesError};
 pub use shutdown::ShutdownHandle;
 pub use slash::{
     CommandGroup, CommandOptionLocalizations, CommandSettings, FollowupMessage, Followups,
