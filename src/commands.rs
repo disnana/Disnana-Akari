@@ -6,7 +6,9 @@ mod help;
 mod invoke;
 mod prefix;
 mod workers;
-pub use arguments::{ArgumentError, ArgumentValueError, Arguments};
+pub use arguments::{
+    ArgumentError, ArgumentValueError, Arguments, DiscordArgument, InvalidDiscordArgument,
+};
 use groups::CommandTree;
 pub use groups::TextCommandGroup;
 pub use help::{CommandInfo, CommandMetadata};

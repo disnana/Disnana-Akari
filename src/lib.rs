@@ -29,6 +29,7 @@ mod message_cache;
 mod message_events;
 mod module;
 mod overwrite;
+mod pagination;
 #[cfg(test)]
 mod permission_cache_tests;
 mod permissions;
@@ -75,7 +76,7 @@ pub use autocomplete::AutocompleteContext;
 pub use command_check::{CommandCheck, CommandCheckContext, CommandCheckSource};
 pub use commands::{
     ArgumentError, ArgumentValueError, Arguments, CommandContext, CommandInfo, CommandMetadata,
-    CommandPrefixes, Commands, TextCommandGroup,
+    CommandPrefixes, Commands, DiscordArgument, InvalidDiscordArgument, TextCommandGroup,
 };
 pub use concurrency::{ConcurrencyLimit, ConcurrencyPermit};
 pub use confirmation::{
@@ -121,6 +122,7 @@ pub use message_cache::CachedMessageEdit;
 pub use message_events::MessageUpdate;
 pub use module::{Module, Registry};
 pub use overwrite::{Overwrite, OverwriteTarget, Tri};
+pub use pagination::{Pager, PagerDraft, PagerError, PagerLimits, PagerPage, Pagers};
 pub use presence::{Presence, PresenceHandle};
 pub use shutdown::ShutdownHandle;
 pub use slash::{
@@ -342,7 +344,8 @@ impl Bot {
 
     /// Gateway で参加中のサーバーのメンバーを照会するハンドルを取得します。
     ///
-    /// 接続後に、名前の先頭やユーザー ID から照会します。Intent は自動で追加しません。
+    /// 接続後に名前の先頭やユーザー ID から検索し、サーバーの全メンバーも取得できます。
+    /// Intent は自動で追加しません。
     /// 繰り返し呼ぶと同じハンドルを共有します。
     pub fn with_member_query(mut self) -> (Self, MemberQuery) {
         let query = self
@@ -595,7 +598,8 @@ impl Bot {
             #[cfg(test)]
             http_test_port,
         } = self;
-        let member_query = gateway_runtime::MemberQueryRuntime(member_query);
+        let intents = intents.unwrap_or_else(Intents::empty) | additional_intents;
+        let member_query = gateway_runtime::MemberQueryRuntime::new(member_query, intents);
         let confirmations = confirmation_runtime::ConfirmationRuntime(confirmations);
         let mut shutdown = shutdown.as_ref().map(ShutdownHandle::subscribe);
         if shutdown.as_ref().is_some_and(|request| *request.borrow()) {
@@ -612,7 +616,6 @@ impl Bot {
         let observe_messages = on_message.is_some() || events.has_message_handlers();
         let text_commands = text_commands.as_ref();
         let needs_messages = observe_messages || text_commands.is_some();
-        let intents = intents.unwrap_or_else(Intents::empty) | additional_intents;
         let waiters = WaiterRuntime::new(event_waiters, intents);
         check_intents(intents, needs_messages)?;
         let handler_events = handler_event_types(&events, intents)?;

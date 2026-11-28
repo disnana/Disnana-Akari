@@ -16,7 +16,9 @@ use twilight_model::{
     gateway::{
         OpCode,
         event::GatewayEventDeserializer,
-        payload::incoming::{InteractionCreate, MemberUpdate},
+        payload::incoming::{
+            InteractionCreate, MemberUpdate, RateLimited, rate_limited::RateLimitMetadata,
+        },
     },
     guild::Member,
     id::{
@@ -420,11 +422,56 @@ pub(crate) fn decode_text_with_options(
     match parse(json, types) {
         Ok(event) => event.map(|event| Ok(IncomingEvent::Standard(event.into()))),
         Err(error) => Some(
-            decode_redacted_automod(&error, types)
+            decode_member_rate_limit(&error, types)
+                .or_else(|| decode_redacted_automod(&error, types))
                 .map(IncomingEvent::Standard)
                 .ok_or_else(|| Error::from(error)),
         ),
     }
+}
+
+#[derive(Deserialize)]
+struct MemberRateLimit {
+    opcode: OpCode,
+    retry_after: f32,
+    meta: MemberRateLimitMetadata,
+}
+
+#[derive(Deserialize)]
+struct MemberRateLimitMetadata {
+    guild_id: Id<GuildMarker>,
+    nonce: Option<String>,
+}
+
+fn decode_member_rate_limit(error: &ReceiveMessageError, types: EventTypeFlags) -> Option<Event> {
+    if !types.contains(EventTypeFlags::RATE_LIMITED) {
+        return None;
+    }
+    let ReceiveMessageErrorType::Deserializing { event } = error.kind() else {
+        return None;
+    };
+    let header = GatewayEventDeserializer::from_json(event)?;
+    if header.op() != OpCode::Dispatch as u8 || header.event_type() != Some("RATE_LIMITED") {
+        return None;
+    }
+
+    #[derive(Deserialize)]
+    struct Dispatch {
+        d: MemberRateLimit,
+    }
+    // Discord の meta には型のタグがないため、Twilight のイベントへ変換する。
+    let Dispatch { d } = serde_json::from_str(event).ok()?;
+    if d.opcode != OpCode::RequestGuildMembers {
+        return None;
+    }
+    Some(Event::RateLimited(RateLimited {
+        opcode: d.opcode,
+        retry_after: d.retry_after,
+        meta: RateLimitMetadata::RequestGuildMembers {
+            guild_id: d.meta.guild_id,
+            nonce: d.meta.nonce,
+        },
+    }))
 }
 
 fn decode_redacted_automod(error: &ReceiveMessageError, types: EventTypeFlags) -> Option<Event> {

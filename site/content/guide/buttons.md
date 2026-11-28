@@ -326,6 +326,37 @@ async fn confirm(ctx: &mut SlashContext<'_>, confirmations: &Confirmations) -> R
 
 確認ボタンはコマンドと別の処理枠で応答します。セッションを有効にすると `akari-confirm:` から始まる ID は確認用に予約されます。セッションはメモリ内にあり、Bot の停止時に終了します。別の処理から終了する場合は `stop_handle().stop()` を使います。
 
+## 前後のボタンでページを切り替える
+
+`Pagers` を `Events` に登録すると、複数ページを同じメッセージで切り替えられます。`begin` で操作できるユーザーと期限を指定し、初期ページを送ってから `bind` します。ハンドラーが終了しても、操作は期限まで受け付けます。
+
+```rust
+use disnana_akari::{Error, Events, Pager, PagerLimits, PagerPage, Pagers, Result, SlashContext};
+use disnana_akari::ui::UiMessage;
+use std::time::Duration;
+
+fn register_pages(events: &mut Events) -> Result<Pagers> {
+    let pages = Pagers::new(PagerLimits::default()).map_err(Error::handler)?;
+    pages.register(events)?;
+    Ok(pages)
+}
+
+async fn show_pages(ctx: &mut SlashContext<'_>, pages: &Pagers) -> Result<Pager> {
+    let owner = ctx.author_id().ok_or_else(|| Error::msg("実行者が分かりません"))?;
+    let draft = pages.begin(ctx.interaction_id(), owner, Duration::from_secs(60), vec![
+        UiMessage::new().content("概要").into(),
+        UiMessage::new().content("詳細").into(),
+    ]).map_err(Error::handler)?;
+    if let PagerPage::Classic(first) = draft.page() {
+        ctx.reply_ui_ephemeral(first).await?;
+    }
+    let original = ctx.original_response().await?;
+    draft.bind(ctx.guild_id(), &original).map_err(Error::handler)
+}
+```
+
+各ページの形式は Classic または Components V2 のどちらかに揃えます。Akari が移動ボタンの行を末尾に追加するため、その一行分を空けてください。期限より先に操作を終了する場合は `Pager::stop` を使います。ページ切り替えは、Discord がメッセージ編集を受け付けた時点で確定します。
+
 ## 受け取れる情報
 
 | メソッド | 返す値 |

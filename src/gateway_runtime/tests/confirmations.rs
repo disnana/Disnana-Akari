@@ -71,7 +71,7 @@ async fn confirmation_completes_while_the_only_interaction_worker_is_waiting() {
     assert!(result.is_ok(), "{result:?}");
 }
 
-fn button(id: &str, custom_id: &str) -> Value {
+pub(super) fn button(id: &str, custom_id: &str) -> Value {
     let mut original: Value = serde_json::from_str(MESSAGE).unwrap();
     let payload = json!({
         "id":id, "application_id":"2", "type":3, "version":1,
@@ -87,17 +87,27 @@ fn button(id: &str, custom_id: &str) -> Value {
 }
 
 async fn acknowledge(listener: &TcpListener, id: &str) {
-    let (socket, _) = listener.accept().await.unwrap();
-    let mut request = BufReader::new(socket);
-    let mut line = String::new();
-    request.read_line(&mut line).await.unwrap();
+    let (line, payload, mut socket) = interaction_request(listener).await;
     assert!(
         line.starts_with("POST ")
             && line.contains(&format!(
                 "/interactions/{id}/local-confirmation-token/callback"
             ))
     );
+    assert_eq!(payload["type"], 6);
+    socket
+        .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+}
+
+pub(super) async fn interaction_request(listener: &TcpListener) -> (String, Value, TcpStream) {
+    let (socket, _) = listener.accept().await.unwrap();
+    let mut request = BufReader::new(socket);
+    let mut path = String::new();
+    request.read_line(&mut path).await.unwrap();
     let mut length = None;
+    let mut line = String::new();
     loop {
         line.clear();
         assert_ne!(request.read_line(&mut line).await.unwrap(), 0);
@@ -112,11 +122,6 @@ async fn acknowledge(listener: &TcpListener, id: &str) {
     }
     let mut body = vec![0; length.unwrap()];
     request.read_exact(&mut body).await.unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["type"], 6);
-    request
-        .into_inner()
-        .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
-        .await
-        .unwrap();
+    let payload = serde_json::from_slice(&body).unwrap();
+    (path, payload, request.into_inner())
 }

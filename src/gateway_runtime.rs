@@ -5,8 +5,11 @@ use tokio::{
     sync::mpsc,
     time::{sleep_until, timeout},
 };
-use twilight_gateway::{ConfigBuilder, Event, EventTypeFlags, Shard, ShardId, ShardState};
-use twilight_model::id::{Id, marker::UserMarker};
+use twilight_gateway::{ConfigBuilder, Event, EventTypeFlags, Intents, Shard, ShardId, ShardState};
+use twilight_model::{
+    gateway::payload::incoming::rate_limited::RateLimitMetadata,
+    id::{Id, marker::UserMarker},
+};
 
 use crate::{
     DerivedGatewayEvent, Error, Events, GatewayShardState, GatewayStatusHandle, MemberQuery,
@@ -30,6 +33,13 @@ const MEMBER_QUERY_TRANSPORT_LIMIT: u8 = 4;
 pub(crate) struct MemberQueryRuntime(pub(crate) Option<MemberQuery>);
 
 impl MemberQueryRuntime {
+    pub(crate) fn new(handle: Option<MemberQuery>, intents: Intents) -> Self {
+        if let Some(query) = &handle {
+            query.configure_intents(intents);
+        }
+        Self(handle)
+    }
+
     pub(crate) fn close(&self) {
         if let Some(handle) = &self.0 {
             handle.close();
@@ -50,27 +60,46 @@ struct MemberQueryIngress {
 }
 
 impl MemberQueryIngress {
-    fn observe(&mut self, shard: ShardId, event: &Result<IncomingEvent>, transport_progress: bool) {
+    fn observe(
+        &mut self,
+        shard: ShardId,
+        event: Result<IncomingEvent>,
+        transport_progress: bool,
+    ) -> Option<Result<IncomingEvent>> {
         if transport_progress
             && matches!(
                 event,
                 Ok(IncomingEvent::Standard(
-                    Event::GatewayHeartbeatAck | Event::MemberChunk(_)
+                    Event::GatewayHeartbeatAck | Event::MemberChunk(_) | Event::RateLimited(_)
                 ))
             )
         {
             // Twilight は受信フレームを返す前に、送信可能なキューを排出する。
             self.transport_pending = 0;
         }
-        match event {
+        if let Ok(IncomingEvent::Standard(Event::MemberChunk(chunk))) = event {
+            self.handle.observe_chunk(shard, chunk);
+            return None;
+        }
+        match &event {
             Ok(IncomingEvent::Standard(Event::Ready(_) | Event::Resumed)) => {
                 self.handle.ready(shard)
             }
-            Ok(IncomingEvent::Standard(Event::MemberChunk(chunk))) => {
-                self.handle.observe_chunk(shard, chunk)
+            Ok(IncomingEvent::Standard(Event::RateLimited(event))) => {
+                if let RateLimitMetadata::RequestGuildMembers {
+                    guild_id,
+                    nonce: Some(nonce),
+                } = &event.meta
+                    && event.opcode == twilight_model::gateway::OpCode::RequestGuildMembers
+                    && let Ok(retry_after) = Duration::try_from_secs_f32(event.retry_after)
+                {
+                    self.handle
+                        .observe_rate_limit(shard, *guild_id, nonce, retry_after);
+                }
             }
             _ => {}
         }
+        Some(event)
     }
 }
 
@@ -409,7 +438,9 @@ impl GatewaySession {
             event_types |= EventTypeFlags::VOICE_STATE_UPDATE | EventTypeFlags::VOICE_SERVER_UPDATE;
         }
         if self.member_query.is_some() {
-            event_types |= EventTypeFlags::MEMBER_CHUNK | EventTypeFlags::GATEWAY_HEARTBEAT_ACK;
+            event_types |= EventTypeFlags::MEMBER_CHUNK
+                | EventTypeFlags::GATEWAY_HEARTBEAT_ACK
+                | EventTypeFlags::RATE_LIMITED;
         }
         while let Some(event) = self
             .next_event(event_types, decode, invalidate_permissions)
@@ -417,14 +448,19 @@ impl GatewaySession {
         {
             let is_ready = matches!(&event, Ok(IncomingEvent::Standard(Event::Ready(_))));
             let shard = self.id();
-            if let Some(query) = &mut self.member_query {
+            let event = if let Some(query) = &mut self.member_query {
                 let transport_progress = self.shard.state() == ShardState::Active
                     && self
                         .shard
                         .ratelimiter()
                         .is_none_or(|limiter| limiter.available() > 0);
-                query.observe(shard, &event, transport_progress);
-            }
+                let Some(event) = query.observe(shard, event, transport_progress) else {
+                    continue;
+                };
+                event
+            } else {
+                event
+            };
             if let Some(voice) = &self.voice
                 && let Ok(IncomingEvent::Standard(event)) = &event
             {

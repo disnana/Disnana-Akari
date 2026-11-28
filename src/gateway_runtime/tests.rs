@@ -27,6 +27,8 @@ use crate::{
 use super::lost_gateway_session;
 
 mod confirmations;
+mod member_queries;
+mod pagers;
 mod permissions_on_reconnect;
 mod voice_handshake;
 mod voice_transitions;

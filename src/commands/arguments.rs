@@ -1,5 +1,8 @@
 use std::{borrow::Cow, str::FromStr};
 
+mod discord;
+pub use discord::{DiscordArgument, InvalidDiscordArgument};
+
 /// クォート付きのテキスト引数を読み取れなかった理由です。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
@@ -63,6 +66,21 @@ impl<'a> Arguments<'a> {
     /// 引数が存在しない場合や、構文・型の変換に失敗した場合にエラーを返します。
     pub fn parse_required<T: FromStr>(&mut self) -> Result<T, ArgumentValueError<T::Err>> {
         self.parse_next()?.ok_or(ArgumentValueError::Missing)
+    }
+
+    /// 次の引数を、Discord 用の変換規則を使って読み取ります。
+    ///
+    /// たとえば `bool` は `yes/no` などを受け付け、ユーザー・ロール・チャンネルの
+    /// 型付き ID は数値と種類に合うメンションを読み取れます。引数がなければ `None` を返します。
+    ///
+    /// # エラー
+    ///
+    /// クォートの構文エラーか、指定した型に変換できない場合に失敗します。
+    /// 変換できなかった引数は読み取り済みになります。
+    pub fn parse_discord<T: DiscordArgument>(
+        &mut self,
+    ) -> Result<Option<T>, ArgumentValueError<InvalidDiscordArgument>> {
+        self.convert_next(|value| T::parse_discord_argument(&value).ok_or(InvalidDiscordArgument))
     }
 
     /// 指定した型に変換できる引数を連続して読み取ります。

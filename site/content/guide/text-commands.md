@@ -287,6 +287,24 @@ async fn numbers(ctx: CommandContext<'_>) -> Result<()> {
 }
 ```
 
+### Discord の表記で型付き引数を読む
+
+`parse_discord` では、ハイブリッドコマンドのテキスト側と同じ表記を使えます。真偽値は `yes` や `off`、ユーザー・ロール・チャンネルは種類の合うメンションや数値 ID を受け付けます。`Mentionable` にはユーザーとロールを区別できるメンションが必要です。
+
+```rust
+use disnana_akari::{CommandContext, Error, Result};
+use disnana_akari::model::id::{Id, marker::UserMarker};
+
+async fn check(ctx: CommandContext<'_>) -> Result<()> {
+    let mut args = ctx.arguments();
+    let user = args.parse_discord::<Id<UserMarker>>().map_err(Error::handler)?;
+    let enabled = args.parse_discord::<bool>().map_err(Error::handler)?;
+    ctx.reply(&format!("{user:?} / {enabled:?}")).await
+}
+```
+
+引数が無ければ `Ok(None)`、表記が無効なら変換エラーです。自分の型にも `DiscordArgument` を実装できます。
+
 ### 引数変換を実行前フックより先に行う
 
 `register_parsed` に変換関数とハンドラーを渡すと、両方のフックが有効でも、変換を通過した呼び出しだけが実行前フックへ進みます。変換関数は非同期なので、必要ならアプリのデータを照会できます。ハンドラーに渡す変換結果には `String` などの所有型を使います。

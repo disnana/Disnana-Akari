@@ -768,3 +768,9 @@ async fn ready(_event: &Ready) -> Result<()> {
 
 - `Bot::with_confirmations` は `ConfirmationLimits` を受け取り、Bot と `Confirmations` を返します。`Confirmations::begin` で `Confirmation` を作り、元のメッセージに `bind` して `ConfirmationOutcome` を待ちます。登録・関連付けの失敗は `ConfirmationError` で返ります。`ConfirmationStop` は待機中の確認を別の処理から終了するハンドルです。
 - `Events::on_voice_state_transition` は `VoiceStateTransition` を渡します。変更前と変更後の `VoiceStateSnapshot` からチャンネルと状態を参照できます。以前の状態が不明なら `before()` は `None` です。このイベントには `GUILDS` と `GUILD_VOICE_STATES` の両方が必要です。
+
+## ページ切り替えと共通の引数変換
+
+- `Pagers` は `PagerLimits` の範囲で期限付きページ切り替えを管理します。各 `PagerPage` を渡して作成した `PagerDraft` を送信したメッセージに紐づけると `Pager` で現在位置の確認と停止ができます。作成と紐づけのエラーは `PagerError` です。
+- `DiscordArgument` は Discord の表記を型に変換する規則です。`Arguments::parse_discord` は引数の読み取りと変換を続けて行い、変換できないときは `InvalidDiscordArgument` を含むエラーを返します。
+- `MemberQuery::query_all` と `query_all_with_presences` は、上限を指定して全件を取得します。`MemberQueryResult::presences` は Discord が返したプレゼンスを参照します。

@@ -18,7 +18,7 @@ use twilight_model::{
 };
 
 use crate::{
-    ArgumentError, Arguments, Mentionable, RegistrationError, Result,
+    ArgumentError, Arguments, DiscordArgument, Mentionable, RegistrationError, Result,
     interactions::resolve_mentionable,
 };
 
@@ -174,11 +174,19 @@ impl<'a> Value<'a> {
             CommandOptionType::String => Self::String(token),
             CommandOptionType::Integer => Self::Integer(token.parse().ok()?),
             CommandOptionType::Number => Self::Number(token.parse().ok()?),
-            CommandOptionType::Boolean => Self::Boolean(parse_boolean(&token)?),
-            CommandOptionType::User => Self::User(parse_id(&token, &["<@!", "<@"])?),
-            CommandOptionType::Role => Self::Role(parse_id(&token, &["<@&"])?),
-            CommandOptionType::Channel => Self::Channel(parse_id(&token, &["<#"])?),
-            CommandOptionType::Mentionable => Self::Mentionable(parse_mentionable(&token)?),
+            CommandOptionType::Boolean => Self::Boolean(bool::parse_discord_argument(&token)?),
+            CommandOptionType::User => {
+                Self::User(Id::<UserMarker>::parse_discord_argument(&token)?)
+            }
+            CommandOptionType::Role => {
+                Self::Role(Id::<RoleMarker>::parse_discord_argument(&token)?)
+            }
+            CommandOptionType::Channel => {
+                Self::Channel(Id::<ChannelMarker>::parse_discord_argument(&token)?)
+            }
+            CommandOptionType::Mentionable => {
+                Self::Mentionable(Mentionable::parse_discord_argument(&token)?)
+            }
             _ => return None,
         })
     }
@@ -217,43 +225,6 @@ impl<'a> Value<'a> {
             }
             _ => return None,
         })
-    }
-}
-
-fn parse_boolean(token: &str) -> Option<bool> {
-    if ["yes", "y", "true", "t", "1", "enable", "on"]
-        .iter()
-        .any(|value| token.eq_ignore_ascii_case(value))
-    {
-        Some(true)
-    } else if ["no", "n", "false", "f", "0", "disable", "off"]
-        .iter()
-        .any(|value| token.eq_ignore_ascii_case(value))
-    {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-fn parse_id<M>(token: &str, mention_prefixes: &[&str]) -> Option<Id<M>> {
-    let digits = mention_prefixes
-        .iter()
-        .find_map(|prefix| token.strip_prefix(*prefix)?.strip_suffix('>'))
-        .unwrap_or(token);
-    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    Id::new_checked(digits.parse().ok()?)
-}
-
-fn parse_mentionable(token: &str) -> Option<Mentionable> {
-    if token.starts_with("<@&") {
-        parse_id(token, &["<@&"]).map(Mentionable::Role)
-    } else if token.starts_with("<@") {
-        parse_id(token, &["<@!", "<@"]).map(Mentionable::User)
-    } else {
-        None
     }
 }
 
@@ -299,7 +270,7 @@ impl HybridSchema {
                 source,
             })?;
             if option.kind == CommandOptionType::Mentionable
-                && parse_id::<GenericMarker>(&token, &[]).is_some()
+                && Id::<GenericMarker>::parse_discord_argument(&token).is_some()
             {
                 return Err(ambiguous_mentionable(option));
             }

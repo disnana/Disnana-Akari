@@ -379,6 +379,30 @@ async fn names(query: &MemberQuery, guild: Id<GuildMarker>, prefix: &str) -> Res
 
 この API は空の名前での全件取得やプレゼンスの取得を扱いません。名前の先頭と ID の照会に特権 Intent を自動追加する必要はありません。 Bot が対象サーバーに参加し、そのシャードが準備できている必要があります。 [Discord の Request Guild Members](https://docs.discord.com/developers/events/gateway-events#request-guild-members) · [discord.py の query_members](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.Guild.query_members)
 
+### サーバーの全メンバーを取得する
+
+全件取得には `GUILD_MEMBERS`、プレゼンス付きで取得する場合は `GUILD_PRESENCES` も Bot の設定と Developer Portal で有効にします。`query_all_with_presences` はすべてのチャンクを受け取ってから、チャンク番号順にまとめて返します。
+
+```rust
+use disnana_akari::{Bot, Error, MemberQuery, MemberQueryResult, Result};
+use disnana_akari::model::{gateway::Intents, id::{Id, marker::GuildMarker}};
+use std::time::Duration;
+
+fn configure_members(bot: Bot) -> (Bot, MemberQuery) {
+    bot.add_intents(Intents::GUILD_MEMBERS | Intents::GUILD_PRESENCES)
+        .with_member_query()
+}
+
+async fn all_members(query: &MemberQuery, guild: Id<GuildMarker>) -> Result<MemberQueryResult> {
+    query
+        .query_all_with_presences(guild, 10_000, Duration::from_secs(30))
+        .await
+        .map_err(Error::handler)
+}
+```
+
+第2引数にはアプリが受け入れる人数の上限を1〜100,000で指定します。上限超過や時間切れはエラーになり、途中までの結果は返りません。プレゼンスが不要なら `query_all` を使います。`query_prefix_with_presences` と `query_ids_with_presences` なら検索対象を絞れます。全件取得は Discord がサーバー単位で30秒に1回に制限します。制限に達すると `MemberQueryError::RateLimited` で再試行までの時間を取得できます。 [Discord の取得制限](https://docs.discord.com/developers/change-log#introducing-rate-limit-when-requesting-all-guild-members)
+
 ## メンバーの音声状態の変更前後を受け取る
 
 `on_voice_state_transition` は接続、移動、退出、ミュートなどの変化を通知します。`before()` が `None` の場合は以前の状態が不明です。スナップショットの `channel_id()` が `None` の場合は、その状態でチャンネルに接続していません。
