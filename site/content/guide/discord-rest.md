@@ -123,27 +123,36 @@ async fn single_use_invite(http: &Client, channel: Id<ChannelMarker>) -> Result<
 
 ## Webhook を使ってメッセージを送る
 
-Webhook の ID とトークンを別々に渡します。`wait()` で作成されたメッセージが返ります。Webhook トークンはログや返信に含めないでください。
+Webhook の ID と専用トークンを `WebhookPost::send` に渡すと、Discord が投稿を確認し、作成されたメッセージを返します。メンション通知を抑止し、この送信経路の Twilight の通信ログにトークンが入らないようにします。クライアントの既定ヘッダーに `Authorization` を設定しないでください。
 
 ```rust
-use disnana_akari::{Result, http::Client};
+use disnana_akari::{Error, Result, WebhookPost, http::Client};
 use disnana_akari::model::{
-    channel::{Message, message::AllowedMentions},
-    id::{Id, marker::WebhookMarker},
+    channel::Message,
+    id::{Id, marker::{ChannelMarker, TagMarker, WebhookMarker}},
 };
 
 async fn post_update(http: &Client, webhook: Id<WebhookMarker>, token: &str) -> Result<Message> {
-    Ok(http.execute_webhook(webhook, token)
-        .content("レポートを更新しました。")
-        .allowed_mentions(Some(&AllowedMentions::default()))
-        .wait()
-        .await?
-        .model()
-        .await?)
+    WebhookPost::new().content("レポートを更新しました。")
+        .send(http, webhook, token).await.map_err(Error::handler)
+}
+
+async fn post_in_thread(
+    http: &Client, webhook: Id<WebhookMarker>, token: &str, thread: Id<ChannelMarker>,
+) -> Result<Message> {
+    WebhookPost::new().content("続報です。").in_thread(thread)
+        .send(http, webhook, token).await.map_err(Error::handler)
+}
+
+async fn publish_forum_update(
+    http: &Client, webhook: Id<WebhookMarker>, token: &str, tags: &[Id<TagMarker>],
+) -> Result<Message> {
+    WebhookPost::new().content("今週の更新です。").new_thread("週次報告", tags)
+        .send(http, webhook, token).await.map_err(Error::handler)
 }
 ```
 
-同じ送信が既に受理されたか分からない場合は、再送でメッセージが重複する可能性があります。[Discord の Webhook API](https://docs.discord.com/developers/resources/webhook#execute-webhook)
+本文・Embed・添付・投票は組み合わせて使えます。`in_thread` は指定した既存スレッドへ投稿し、必要に応じて Discord がアーカイブを解除します。`new_thread` は Forum または Media にスレッドを作成します。同じ送信が受理されたか分からない場合は、再送でメッセージが重複する可能性があります。 [Discord の Webhook API](https://docs.discord.com/developers/resources/webhook#execute-webhook) · [discord.py の Webhook.send](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.Webhook.send)
 
 ## サーバー外の予定を登録する
 

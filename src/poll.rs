@@ -146,7 +146,15 @@ impl<'a> PollDraft<'a> {
     }
 
     pub(crate) fn message_payload(&self) -> PollMessagePayload<'_> {
-        let poll = PollPayload {
+        PollMessagePayload {
+            poll: self.poll_payload(),
+            allowed_mentions: AllowedMentions::default(),
+            message_reference: None,
+        }
+    }
+
+    pub(crate) fn poll_payload(&self) -> PollPayload<'_> {
+        PollPayload {
             question: Question {
                 text: self.question,
             },
@@ -163,11 +171,6 @@ impl<'a> PollDraft<'a> {
             duration: self.duration,
             allow_multiselect: self.allow_multiselect,
             layout_type: PollLayoutType::Default,
-        };
-        PollMessagePayload {
-            poll,
-            allowed_mentions: AllowedMentions::default(),
-            message_reference: None,
         }
     }
 }
@@ -185,7 +188,7 @@ pub(crate) struct PollMessagePayload<'a> {
 }
 
 #[derive(Serialize)]
-struct PollPayload<'a> {
+pub(crate) struct PollPayload<'a> {
     question: Question<'a>,
     answers: Vec<AnswerPayload<'a>>,
     duration: u16,

@@ -190,19 +190,22 @@ impl<'a> ForumPost<'a> {
         if let Some(seconds) = self.slowmode {
             twilight_validate::channel::rate_limit_per_user(seconds)?;
         }
-        if self.applied_tags.len() > MAX_APPLIED_TAGS {
-            return Err(Error::InvalidUi("投稿に指定できるタグは 5 件までです。"));
-        }
-        if self.applied_tags.iter().enumerate().any(|(index, tag)| {
-            self.applied_tags
-                .iter()
-                .take(index)
-                .any(|previous| previous == tag)
-        }) {
-            return Err(Error::InvalidUi("投稿に同じタグを複数回指定できません。"));
-        }
-        Ok(())
+        validate_forum_tags(self.applied_tags)
     }
+}
+
+pub(crate) fn validate_forum_tags(tags: &[Id<TagMarker>]) -> Result<()> {
+    if tags.len() > MAX_APPLIED_TAGS {
+        return Err(Error::InvalidUi("投稿に指定できるタグは 5 件までです。"));
+    }
+    if tags
+        .iter()
+        .enumerate()
+        .any(|(index, tag)| tags.iter().take(index).any(|previous| previous == tag))
+    {
+        return Err(Error::InvalidUi("投稿に同じタグを複数回指定できません。"));
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]

@@ -811,5 +811,6 @@ async fn ready(_event: &Ready) -> Result<()> {
 - `ForumPost` はフォーラム・メディアチャンネルに投稿し、`ForumThread` で新しいスレッドと最初のメッセージを返します。
 - `forward_message` は指定したメッセージを転送し、新しいメッセージを返します。失敗は `ForwardMessageError` です。
 - `PollDraft` は `PollAnswerInput` の選択肢から投票を作り、投稿時に Discord の回答 ID を含むメッセージを返します。作成または投稿の失敗は `PollError` です。投票者の遅延取得には `PollVoterPages` を使います。
+- `WebhookPost` は Webhook のトークンで、本文・Embed・添付・投票を送って投稿結果を返します。既存スレッドまたは新規 Forum／Media 投稿を指定できます。`WebhookSendError` には Webhook トークンや HTTP の応答本文が含まれません。
 - `delete_messages` は明示した ID だけを削除します。重複・件数・一括削除できる作成日時を事前に確認し、失敗は `MessageDeletionError` です。
 - `parse_reaction_emoji` は Unicode 絵文字やカスタム絵文字のメンションを Twilight のリアクション指定に変換します。不正な表記は `ReactionEmojiError` です。
