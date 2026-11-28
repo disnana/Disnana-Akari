@@ -56,7 +56,7 @@ fn message_cache_fill_and_churn() {
         message.id = Id::new(id);
         let message = Arc::new(message);
         let started = Instant::now();
-        route.store(message);
+        route.store(&message);
         started.elapsed()
     });
 

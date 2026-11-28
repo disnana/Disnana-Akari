@@ -91,6 +91,53 @@ async fn print_reactions(http: &Client, channel: Id<ChannelMarker>, message: Id<
 
 メンバー一覧には Discord 側の特権 Intent `GUILD_MEMBERS` が必要です。リアクションは `kind(ReactionType::Burst)` でスーパーリアクションを指定できます。どちらの API も結果を自動でキャッシュしません。取得中に参加・退出やリアクションの変更があると、ページ間で一覧が変わることがあります。 [Discord のメンバー一覧](https://docs.discord.com/developers/resources/guild#list-guild-members) · [Discord のリアクション一覧](https://docs.discord.com/developers/resources/message#get-reactions)
 
+## BAN・投票者・アーカイブ済みスレッドをページ単位で読む
+
+`BanPages` は BAN 一覧を一度に最大1,000件取得します。ページ内はユーザー ID の昇順です。`before` では、ページを進めるごとに小さい ID の範囲へ移ります。BAN 一覧を読むには Bot に `BAN_MEMBERS` または `VIEW_AUDIT_LOG` が必要です。 [Discord の BAN 一覧](https://docs.discord.com/developers/resources/guild#get-guild-bans)
+
+`PollVoterPages` は一つの選択肢に投票した人を一度に最大100件取得します。`ThreadPages` は `public`、`private`、`joined_private` で対象を選びます。開始位置は公開・非公開一覧ではアーカイブ日時、参加済みの非公開一覧ではスレッド ID で指定します。 [Discord の投票者一覧](https://docs.discord.com/developers/resources/poll#get-answer-voters) · [Discord のアーカイブ済みスレッド一覧](https://docs.discord.com/developers/resources/channel#list-public-archived-threads)
+
+```rust
+use disnana_akari::{BanPages, Error, PollVoterPages, Result, ThreadPages};
+use disnana_akari::http::Client;
+use disnana_akari::model::id::{Id, marker::{ChannelMarker, GuildMarker, MessageMarker}};
+use std::num::NonZeroU8;
+
+async fn list_bans(http: &Client, guild: Id<GuildMarker>) -> Result<()> {
+    let mut pages = BanPages::new(http, guild).limit(1_200);
+    while let Some(page) = pages.next_page().await.map_err(Error::handler)? {
+        for ban in page {
+            println!("{}", ban.user.id);
+        }
+    }
+    Ok(())
+}
+
+async fn list_voters(
+    http: &Client, channel: Id<ChannelMarker>, message: Id<MessageMarker>, answer: NonZeroU8,
+) -> Result<()> {
+    let mut pages = PollVoterPages::new(http, channel, message, answer).limit(200);
+    while let Some(page) = pages.next_page().await.map_err(Error::handler)? {
+        for voter in page {
+            println!("{}", voter.id);
+        }
+    }
+    Ok(())
+}
+
+async fn list_archived(http: &Client, channel: Id<ChannelMarker>) -> Result<()> {
+    let mut pages = ThreadPages::public(http, channel, None).limit(200);
+    while let Some(page) = pages.next_page().await.map_err(Error::handler)? {
+        for thread in page.threads {
+            println!("{}", thread.id);
+        }
+    }
+    Ok(())
+}
+```
+
+それぞれ `next_page` を呼ぶまで通信せず、エラーが出た場合は同じページから再試行できます。Discord 側の一覧は取得の途中でも変わることがあります。
+
 ## ファイル付きのメッセージを作る
 
 チャンネルへ新規に投稿する場合は、`create_message` にファイル名とバイト列を渡します。次の例では、本文に含まれるメンションで通知が出ないようにしています。

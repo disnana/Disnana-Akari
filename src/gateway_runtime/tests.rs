@@ -117,7 +117,7 @@ async fn loopback_gateway_identifies_resumes_and_closes_cleanly() {
         .unwrap()
         .add_intents(intents)
         .with_events(events)
-        .cache_messages(2)
+        .cache_messages_in_channels(2, [Id::new(5)])
         .with_presence(presence)
         .with_shutdown();
     bot.gateway_test_port = Some(address.port());
@@ -433,6 +433,27 @@ async fn mock_gateway(
         .unwrap();
     let presence = receive_opcode(&mut socket, 3).await;
     assert_eq!(presence["d"]["status"], "idle");
+
+    let mut excluded: Value = serde_json::from_str(MESSAGE).unwrap();
+    excluded["s"] = 7.into();
+    excluded["d"]["id"] = "12".into();
+    excluded["d"]["channel_id"] = "15".into();
+    excluded["d"]["author"]["bot"] = true.into();
+    socket
+        .send(Frame::text(excluded.to_string()))
+        .await
+        .unwrap();
+    socket
+        .send(Frame::text(r#"{"op":0,"s":8,"t":"MESSAGE_UPDATE","d":{"id":"12","channel_id":"15","content":"raw only"}}"#))
+        .await
+        .unwrap();
+    assert!(matches!(
+        observations.recv().await,
+        Some(Observation::PartialEdit {
+            id: 12,
+            has_content: true
+        })
+    ));
 
     shutdown.request();
     expect_close(&mut socket, 1000).await;

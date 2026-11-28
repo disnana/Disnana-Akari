@@ -22,6 +22,7 @@
 | `bot.with_member_cache(capacity) -> (Bot, MemberCacheHandle)` | 保存済みメンバーを `handle.get(guild, user)` または `handle.guild_members(guild)` で参照できます。 |
 | `bot.cache_members(capacity)` | キャッシュ付きのメンバー更新・退出通知が使う最大保存件数です。`GUILDS` と `GUILD_MEMBERS` が必要です。 |
 | `bot.cache_messages(capacity)` | キャッシュ付きの編集・削除イベントが使うメッセージの最大保存件数を指定します。既定値と `0` は無効です。 |
+| `bot.cache_messages_in_channels(capacity, channels)` | 指定したチャンネル ID に限ってメッセージを保存します。容量は対象全体の合計です。 |
 | `bot.with_gateway_status() -> (Bot, GatewayStatusHandle)` | `status.shards()` で現在のシャード一覧を読み、`status.subscribe()` で変化を購読します。 |
 | `bot.run_commands(commands).await -> Result<()>` | 上記に加えて、テキストコマンドを実行します。 |
 | `bot.run(on_message).await -> Result<()>` | テキストコマンドの代わりに、受信メッセージを自前の `async fn on_message(ctx: Context<'_>) -> Result<()>` で処理します。 |
@@ -789,3 +790,6 @@ async fn ready(_event: &Ready) -> Result<()> {
 
 - `MessageHistory` は `HistoryCursor` で取得方向を指定し、メッセージ履歴を一度に最大100件読みます。設定と取得の失敗は `MessageHistoryError` で区別します。
 - `MemberPages` と `ReactionPages` はユーザー ID をカーソルとして次のページを取得します。上限やカーソルに合わない応答は、それぞれ `MemberPagesError` と `ReactionPagesError` で返ります。
+- `BanPages` はサーバーの BAN 一覧を最大1,000件ずつ読みます。取得方向を `before` または `after` で指定でき、各ページはユーザー ID の昇順です。失敗時は `BanPagesError` が返ります。
+- `PollVoterPages` は投票の選択肢 ID を指定して投票者を最大100件ずつ読みます。失敗時は `PollVoterPagesError` が返ります。
+- `ThreadPages` は公開・非公開・参加済み非公開のアーカイブ済みスレッドを最大100件ずつ読みます。公開と非公開は日時、参加済み非公開はスレッド ID でページを進めます。失敗時は `ThreadPagesError` が返ります。

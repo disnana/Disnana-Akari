@@ -13,9 +13,7 @@ use twilight_model::{
     user::User,
 };
 
-use crate::rest_pagination::advance_after;
-
-const MAX_PAGE_SIZE: u16 = 100;
+use crate::rest_pagination::UserPageCursor;
 
 /// メッセージの絵文字にリアクションしたユーザーを、ID の小さい順に読み取ります。
 ///
@@ -27,10 +25,7 @@ pub struct ReactionPages<'a> {
     message: Id<MessageMarker>,
     emoji: RequestReactionType<'a>,
     kind: ReactionType,
-    cursor: Option<Id<UserMarker>>,
-    remaining: Option<usize>,
-    page_size: u16,
-    finished: bool,
+    cursor: UserPageCursor,
 }
 
 impl<'a> ReactionPages<'a> {
@@ -47,10 +42,7 @@ impl<'a> ReactionPages<'a> {
             message,
             emoji,
             kind: ReactionType::Normal,
-            cursor: None,
-            remaining: None,
-            page_size: MAX_PAGE_SIZE,
-            finished: false,
+            cursor: UserPageCursor::new(),
         }
     }
 
@@ -62,19 +54,19 @@ impl<'a> ReactionPages<'a> {
 
     /// 指定した ID より後から読み始めます。この ID 自体は含まれません。
     pub const fn after(mut self, id: Id<UserMarker>) -> Self {
-        self.cursor = Some(id);
+        self.cursor.after = Some(id);
         self
     }
 
     /// 最大取得件数を指定します。ゼロの場合は通信しません。
     pub const fn limit(mut self, limit: usize) -> Self {
-        self.remaining = Some(limit);
+        self.cursor.remaining = Some(limit);
         self
     }
 
     /// 1 回の取得件数を指定します。100を超える場合は100に丸めます。
     pub fn page_size(mut self, page_size: NonZeroU16) -> Self {
-        self.page_size = page_size.get().min(MAX_PAGE_SIZE);
+        self.cursor.set_page_size(page_size);
         self
     }
 
@@ -85,33 +77,21 @@ impl<'a> ReactionPages<'a> {
     /// 通信、応答の読み取り、応答の件数または ID の範囲に問題があれば失敗します。
     /// 失敗した場合はカーソルを進めず、同じページから再試行できます。
     pub async fn next_page(&mut self) -> Result<Option<Vec<User>>, ReactionPagesError> {
-        if self.finished || self.remaining == Some(0) {
+        let Some(limit) = self.cursor.request_size() else {
             return Ok(None);
-        }
-        let limit = usize::from(self.page_size);
-        let limit = self
-            .remaining
-            .map_or(limit, |remaining| remaining.min(limit));
+        };
         let mut request = self
             .http
             .reactions(self.channel, self.message, &self.emoji)
             .kind(self.kind)
-            .limit(limit as u16);
-        if let Some(cursor) = self.cursor {
-            request = request.after(cursor);
+            .limit(u16::from(limit));
+        if let Some(after) = self.cursor.after {
+            request = request.after(after);
         }
-        let mut users = request.await?.models().await?;
-        let next = advance_after(&mut users, limit, self.cursor, |user| user.id)
-            .ok_or(ReactionPagesError::InvalidPage)?;
-        let Some(cursor) = next else {
-            self.finished = true;
-            return Ok(None);
-        };
-        self.cursor = Some(cursor);
-        if let Some(remaining) = &mut self.remaining {
-            *remaining -= users.len();
-        }
-        Ok(Some(users))
+        let users = request.await?.models().await?;
+        self.cursor
+            .accept(users, limit)
+            .map_err(|_| ReactionPagesError::InvalidPage)
     }
 }
 

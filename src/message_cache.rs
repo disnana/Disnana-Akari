@@ -1,4 +1,9 @@
-use std::{cell::RefCell, collections::BTreeMap, num::NonZeroUsize, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroUsize,
+    sync::Arc,
+};
 
 use twilight_gateway::{EventTypeFlags, Intents, ShardId};
 use twilight_model::{
@@ -34,6 +39,7 @@ struct MessageCache {
 
 pub(crate) struct MessageCacheRuntime {
     cache: RefCell<MessageCache>,
+    channels: Option<BTreeSet<Id<ChannelMarker>>>,
     cached: EventTypeFlags,
     raw: EventTypeFlags,
     incoming: EventTypeFlags,
@@ -65,10 +71,16 @@ impl MessageCacheRuntime {
         }
         Ok(Some(Self {
             cache: RefCell::new(MessageCache::new(capacity)),
+            channels: None,
             cached,
             raw: events.message_lifecycle_types(),
             incoming,
         }))
+    }
+
+    pub(crate) fn with_channels(mut self, channels: Option<BTreeSet<Id<ChannelMarker>>>) -> Self {
+        self.channels = channels;
+        self
     }
 
     pub(crate) const fn event_types(&self) -> EventTypeFlags {
@@ -84,8 +96,20 @@ impl MessageCacheRuntime {
 }
 
 impl MessageCacheRoute<'_> {
-    pub(crate) fn store(&self, message: Arc<Message>) {
-        self.runtime.cache.borrow_mut().store(self.shard, message);
+    pub(crate) fn includes(&self, channel: Id<ChannelMarker>) -> bool {
+        self.runtime
+            .channels
+            .as_ref()
+            .is_none_or(|channels| channels.contains(&channel))
+    }
+
+    pub(crate) fn store(&self, message: &Arc<Message>) {
+        if self.includes(message.channel_id) {
+            self.runtime
+                .cache
+                .borrow_mut()
+                .store(self.shard, Arc::clone(message));
+        }
     }
 
     pub(crate) fn reset(&self) {
@@ -369,8 +393,8 @@ mod tests {
             .unwrap();
         let first = ShardId::new(0, 2);
         let second = ShardId::new(1, 2);
-        runtime.shard(first).store(message(8));
-        runtime.shard(second).store(message(9));
+        runtime.shard(first).store(&message(8));
+        runtime.shard(second).store(&message(9));
 
         let error =
             Error::MessageUpdateDecode(serde_json::from_str::<MessageUpdate>("{}").unwrap_err());
@@ -432,14 +456,22 @@ mod tests {
         });
         let runtime = MessageCacheRuntime::prepare(4, &events, Intents::GUILD_MESSAGES)
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .with_channels(Some([Id::new(2)].into()));
         let shard = ShardId::ONE;
         let cache = runtime.shard(shard);
         for id in 4..=6 {
-            cache.store(message(id));
+            cache.store(&message(id));
         }
+        let mut excluded_message = message(99);
+        Arc::make_mut(&mut excluded_message).channel_id = Id::new(10);
+        cache.store(&excluded_message);
+        let excluded_edit = serde_json::from_value(json!({
+            "id": "99", "channel_id": "10", "content": "outside scope"
+        }))
+        .unwrap();
         let payloads = [
-            edited(99, "not cached"),
+            IncomingEvent::MessageUpdate(excluded_edit),
             edited(4, "edited"),
             IncomingEvent::Standard(Event::MessageDelete(deletion(4))),
             IncomingEvent::Standard(Event::MessageDelete(deletion(4))),
@@ -486,5 +518,36 @@ mod tests {
                 "bulk"
             ]
         );
+    }
+
+    #[test]
+    fn excluded_channels_never_retain_a_snapshot_or_displace_scoped_messages() {
+        let mut events = Events::new();
+        events.on_message_delete(async |_: &Message| -> Result<()> { Ok(()) });
+        let prepare = |channels| {
+            MessageCacheRuntime::prepare(1, &events, Intents::GUILD_MESSAGES)
+                .unwrap()
+                .unwrap()
+                .with_channels(Some(channels))
+        };
+        let runtime = prepare([Id::new(2)].into());
+        let route = runtime.shard(ShardId::ONE);
+        let included = message(4);
+        let mut excluded = message(5);
+        Arc::make_mut(&mut excluded).channel_id = Id::new(10);
+        assert!(route.includes(included.channel_id));
+        assert!(!route.includes(excluded.channel_id));
+        route.store(&included);
+        route.store(&excluded);
+        assert_eq!(Arc::strong_count(&included), 2);
+        assert_eq!(Arc::strong_count(&excluded), 1);
+        assert_eq!(route.delete(&deletion(4)).unwrap().id, included.id);
+
+        let empty = prepare(BTreeSet::new());
+        let route = empty.shard(ShardId::ONE);
+        route.store(&included);
+        assert!(!route.includes(included.channel_id));
+        assert!(route.delete(&deletion(4)).is_none());
+        assert_eq!(Arc::strong_count(&included), 1);
     }
 }

@@ -3,6 +3,7 @@
 mod access;
 mod argument_resolution;
 mod autocomplete;
+mod ban_pages;
 #[cfg(test)]
 mod cache_measurement;
 mod channel_ui;
@@ -38,6 +39,7 @@ mod pagination;
 #[cfg(test)]
 mod permission_cache_tests;
 mod permissions;
+mod poll_voter_pages;
 mod presence;
 mod reaction_pages;
 mod rest_pagination;
@@ -45,6 +47,7 @@ mod shutdown;
 mod slash;
 pub mod soundboard;
 mod startup_readiness;
+mod thread_pages;
 mod timing;
 pub mod ui;
 mod ui_sessions;
@@ -54,7 +57,7 @@ mod voice_gateway;
 mod voice_state_cache;
 mod work_queue;
 
-use std::{env, fmt, num::NonZeroU16, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, env, fmt, num::NonZeroU16, sync::Arc, time::Duration};
 
 use events::{ActivityEvent, ReactionEvent, VoiceNotification};
 use gateway_runtime::GatewayPlan;
@@ -77,7 +80,7 @@ use twilight_model::{
     guild::Permissions,
     id::{
         Id,
-        marker::{GuildMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, UserMarker},
     },
 };
 
@@ -86,6 +89,7 @@ pub use argument_resolution::{
     ArgumentResolutionError, resolve_channel, resolve_member, resolve_role,
 };
 pub use autocomplete::AutocompleteContext;
+pub use ban_pages::{BanPages, BanPagesError};
 pub use command_check::{CommandCheck, CommandCheckContext, CommandCheckSource};
 pub use commands::{
     ArgumentError, ArgumentValueError, Arguments, CommandContext, CommandInfo, CommandMetadata,
@@ -138,6 +142,7 @@ pub use message_events::MessageUpdate;
 pub use module::{Module, Registry};
 pub use overwrite::{Overwrite, OverwriteTarget, Tri};
 pub use pagination::{Pager, PagerDraft, PagerError, PagerLimits, PagerPage, Pagers};
+pub use poll_voter_pages::{PollVoterPages, PollVoterPagesError};
 pub use presence::{Presence, PresenceHandle};
 pub use reaction_pages::{ReactionPages, ReactionPagesError};
 pub use shutdown::ShutdownHandle;
@@ -146,6 +151,7 @@ pub use slash::{
     SlashCommands, SlashContext, UserMenuTarget,
 };
 pub use startup_readiness::{StartupReadiness, StartupReport, StartupShardReport, StartupWarmup};
+pub use thread_pages::{ThreadPages, ThreadPagesError};
 pub use timing::Timing;
 pub use twilight_http as http;
 pub use twilight_model as model;
@@ -194,6 +200,7 @@ pub struct Bot {
     limits: Limits,
     permission_cache: Option<Duration>,
     message_cache_capacity: usize,
+    message_cache_channels: Option<BTreeSet<Id<ChannelMarker>>>,
     member_cache_capacity: usize,
     member_cache_handle: Option<MemberCacheHandle>,
     member_cache_bootstrap: Option<BootstrapConfig>,
@@ -260,6 +267,7 @@ impl Bot {
             limits: Limits::default(),
             permission_cache: None,
             message_cache_capacity: 0,
+            message_cache_channels: None,
             member_cache_capacity: 0,
             member_cache_handle: None,
             member_cache_bootstrap: None,
@@ -494,6 +502,23 @@ impl Bot {
     /// 新しい Gateway セッションの Ready を受け取ると、そのシャードの保存を破棄します。
     pub fn cache_messages(mut self, capacity: usize) -> Self {
         self.message_cache_capacity = capacity;
+        self.message_cache_channels = None;
+        self
+    }
+
+    /// 指定したチャンネルで受信したメッセージを、編集・削除イベント用に最大 `capacity` 件保存します。
+    ///
+    /// リストの ID と完全に一致するチャンネルが対象です。親チャンネルを指定しても、
+    /// スレッドは ID を個別に指定します。空のリストで保存対象がなくなります。
+    /// キャッシュを使わないイベントへの配信にも影響しません。
+    #[must_use]
+    pub fn cache_messages_in_channels(
+        mut self,
+        capacity: usize,
+        channels: impl IntoIterator<Item = Id<ChannelMarker>>,
+    ) -> Self {
+        self.message_cache_capacity = capacity;
+        self.message_cache_channels = Some(channels.into_iter().collect());
         self
     }
 
@@ -639,6 +664,7 @@ impl Bot {
             limits,
             permission_cache,
             message_cache_capacity,
+            message_cache_channels,
             member_cache_capacity,
             member_cache_handle,
             member_cache_bootstrap,
@@ -680,7 +706,8 @@ impl Bot {
         check_intents(intents, needs_messages)?;
         let handler_events = handler_event_types(&events, intents)?;
         let voice_notifications = events.voice_notification_types(intents)?;
-        let message_cache = MessageCacheRuntime::prepare(message_cache_capacity, &events, intents)?;
+        let message_cache = MessageCacheRuntime::prepare(message_cache_capacity, &events, intents)?
+            .map(|cache| cache.with_channels(message_cache_channels));
         let member_cache = MemberCacheRuntime::prepare(
             member_cache_capacity,
             &events,
@@ -1054,12 +1081,13 @@ impl GatewayMessageIngress<'_> {
             .flatten();
         let observe = accepted && self.observe_messages;
         let cutoff = self.waiters.message_cutoff(&message);
+        let cache = cache.filter(|cache| cache.includes(message.channel_id));
         if !observe && text_route.is_none() && cache.is_none() && cutoff.is_none() {
             return;
         }
         let message = Arc::new(message);
         if let Some(cache) = cache {
-            cache.store(Arc::clone(&message));
+            cache.store(&message);
         }
         if let Some(cutoff) = cutoff {
             self.waiters.deliver_message(Arc::clone(&message), cutoff);
