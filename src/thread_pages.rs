@@ -7,6 +7,8 @@ use twilight_model::{
     util::Timestamp,
 };
 
+use crate::rest_pagination::utc_cursor;
+
 const MIN_PAGE_SIZE: u16 = 2;
 const MAX_PAGE_SIZE: u16 = 100;
 
@@ -222,16 +224,6 @@ fn advance_timestamp(
         last = Some(timestamp);
     }
     Ok(last.or(before))
-}
-
-fn utc_cursor(timestamp: Timestamp) -> String {
-    // Twilight inserts this value directly into the URL. A literal '+' can decode as a space.
-    let mut value = timestamp.iso_8601().to_string();
-    if let Some(utc) = value.strip_suffix("+00:00") {
-        value.truncate(utc.len());
-        value.push('Z');
-    }
-    value
 }
 
 /// REST でアーカイブ済みスレッドのページを取得できなかった理由です。

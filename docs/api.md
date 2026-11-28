@@ -793,3 +793,6 @@ async fn ready(_event: &Ready) -> Result<()> {
 - `BanPages` はサーバーの BAN 一覧を最大1,000件ずつ読みます。取得方向を `before` または `after` で指定でき、各ページはユーザー ID の昇順です。失敗時は `BanPagesError` が返ります。
 - `PollVoterPages` は投票の選択肢 ID を指定して投票者を最大100件ずつ読みます。失敗時は `PollVoterPagesError` が返ります。
 - `ThreadPages` は公開・非公開・参加済み非公開のアーカイブ済みスレッドを最大100件ずつ読みます。公開と非公開は日時、参加済み非公開はスレッド ID でページを進めます。失敗時は `ThreadPagesError` が返ります。
+- `AuditLogPages` は監査ログをページ単位で取得し、エントリーと関連データを返します。実行者と操作種別で絞り込めます。失敗時は `AuditLogPagesError` が返ります。
+- `ScheduledEventUserPages` は予定イベントに登録したユーザーを ID でページ取得し、必要ならメンバー情報も要求できます。失敗時は `ScheduledEventUserPagesError` が返ります。
+- `PinPages` はチャンネル内のピン留めを日時の新しい順に読みます。各項目にメッセージとピン留め日時が含まれ、失敗時は `PinPagesError` が返ります。

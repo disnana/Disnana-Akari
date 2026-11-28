@@ -138,6 +138,45 @@ async fn list_archived(http: &Client, channel: Id<ChannelMarker>) -> Result<()> 
 
 それぞれ `next_page` を呼ぶまで通信せず、エラーが出た場合は同じページから再試行できます。Discord 側の一覧は取得の途中でも変わることがあります。
 
+## 監査ログ・予定イベントの登録ユーザー・ピン留めを読む
+
+`AuditLogPages` は監査ログを最大100件ずつ取得し、エントリーに関連するユーザーやスレッドなどの情報もページごとに返します。既定は新しい順で、`oldest_first()` または `after(entry_id)` を指定すると古い順です。`actor` と `action` で絞り込めます。Bot に `VIEW_AUDIT_LOG` が必要です。 [Discord の監査ログ API](https://docs.discord.com/developers/resources/audit-log#get-guild-audit-log)
+
+`ScheduledEventUserPages` は予定イベントに「興味あり」を登録したユーザーを最大100件ずつ取得します。`with_member(true)` を指定すると、Discord が返せる場合にサーバーメンバー情報も取得できます。`before` を指定してもページ内は ID の昇順で、ページを進めるごとに小さい ID の範囲に移ります。 [Discord の予定イベント登録ユーザー API](https://docs.discord.com/developers/resources/guild-scheduled-event#get-guild-scheduled-event-users)
+
+`PinPages` はピン留めを最大50件ずつ、ピン留めされた日時の新しい順に取得します。同じピン留め日時がページ境界にまたがると、Discord の日時カーソルで区別できません。スレッドの日時カーソルにも同じ制約があります。 [Discord のピン留め一覧 API](https://docs.discord.com/developers/resources/message#get-channel-pins)
+
+```rust
+use disnana_akari::{AuditLogPages, Error, PinPages, Result, ScheduledEventUserPages};
+use disnana_akari::http::Client;
+use disnana_akari::model::id::{Id, marker::{ChannelMarker, GuildMarker, ScheduledEventMarker}};
+
+async fn print_lists(
+    http: &Client, guild: Id<GuildMarker>, event: Id<ScheduledEventMarker>,
+    channel: Id<ChannelMarker>,
+) -> Result<()> {
+    let mut logs = AuditLogPages::new(http, guild).limit(200);
+    while let Some(page) = logs.next_page().await.map_err(Error::handler)? {
+        for entry in page.entries {
+            println!("監査ログ {}", entry.id);
+        }
+    }
+    let mut users = ScheduledEventUserPages::new(http, guild, event).with_member(true);
+    while let Some(page) = users.next_page().await.map_err(Error::handler)? {
+        for subscription in page {
+            println!("登録ユーザー {}", subscription.user.id);
+        }
+    }
+    let mut pins = PinPages::new(http, channel);
+    while let Some(page) = pins.next_page().await.map_err(Error::handler)? {
+        for pin in page {
+            println!("ピン留め {}", pin.message.id);
+        }
+    }
+    Ok(())
+}
+```
+
 ## ファイル付きのメッセージを作る
 
 チャンネルへ新規に投稿する場合は、`create_message` にファイル名とバイト列を渡します。次の例では、本文に含まれるメンションで通知が出ないようにしています。

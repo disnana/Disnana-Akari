@@ -2,6 +2,7 @@
 
 mod access;
 mod argument_resolution;
+mod audit_log_pages;
 mod autocomplete;
 mod ban_pages;
 #[cfg(test)]
@@ -39,10 +40,12 @@ mod pagination;
 #[cfg(test)]
 mod permission_cache_tests;
 mod permissions;
+mod pin_pages;
 mod poll_voter_pages;
 mod presence;
 mod reaction_pages;
 mod rest_pagination;
+mod scheduled_event_user_pages;
 mod shutdown;
 mod slash;
 pub mod soundboard;
@@ -88,6 +91,7 @@ pub use access::{Access, Needs, PermissionSnapshot};
 pub use argument_resolution::{
     ArgumentResolutionError, resolve_channel, resolve_member, resolve_role,
 };
+pub use audit_log_pages::{AuditLogPages, AuditLogPagesError};
 pub use autocomplete::AutocompleteContext;
 pub use ban_pages::{BanPages, BanPagesError};
 pub use command_check::{CommandCheck, CommandCheckContext, CommandCheckSource};
@@ -142,9 +146,11 @@ pub use message_events::MessageUpdate;
 pub use module::{Module, Registry};
 pub use overwrite::{Overwrite, OverwriteTarget, Tri};
 pub use pagination::{Pager, PagerDraft, PagerError, PagerLimits, PagerPage, Pagers};
+pub use pin_pages::{PinPages, PinPagesError};
 pub use poll_voter_pages::{PollVoterPages, PollVoterPagesError};
 pub use presence::{Presence, PresenceHandle};
 pub use reaction_pages::{ReactionPages, ReactionPagesError};
+pub use scheduled_event_user_pages::{ScheduledEventUserPages, ScheduledEventUserPagesError};
 pub use shutdown::ShutdownHandle;
 pub use slash::{
     CommandGroup, CommandOptionLocalizations, CommandSettings, FollowupMessage, Followups,

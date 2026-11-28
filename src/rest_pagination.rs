@@ -83,3 +83,13 @@ impl UserPageCursor {
         Ok(Some(users))
     }
 }
+
+pub(crate) fn utc_cursor(timestamp: twilight_model::util::Timestamp) -> String {
+    // Twilight の一部のルートは値を URL に直接挿入し、リテラルの '+' が空白に変わる場合がある。
+    let mut value = timestamp.iso_8601().to_string();
+    if let Some(utc) = value.strip_suffix("+00:00") {
+        value.truncate(utc.len());
+        value.push('Z');
+    }
+    value
+}
