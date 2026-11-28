@@ -164,6 +164,8 @@ async fn report(ctx: &mut SlashContext<'_>) -> Result<()> {
 
 本文、従来の UI、Components V2、ファイル付き本文は、それぞれ `send`、`send_ui`、`send_v2`、`send_files` で送れます。従来の UI を置き換えるときは `edit_ui`、Components V2 の追加返信を更新するときは `edit_v2` を使います。公開範囲は送信時に指定します。ハンドルは元の Interaction を借りるため、ハンドラー内で使います。 [Discord の追加返信 API](https://docs.discord.com/developers/interactions/receiving-and-responding#create-followup-message)
 
+追加返信のハンドルの `Debug` と Akari が返す通信エラーには、Interaction トークンを含めません。Twilight 0.18 の HTTP トレーシングは、トークンを含むリクエストパスを記録する場合があります。ログ出力は [ログの設定](logging.md) の例のように Akari に絞ってください。
+
 ## 初回応答の失敗を調べる
 
 `Bot::on_info` の `InfoEvent::InteractionResponseFailed` は、初回応答の HTTP リクエストが失敗したときに届きます。JSON と添付付きのどちらでも、Interaction ID、HTTP ステータス、Discord の数値エラーコード、キュー待ち、REST 待ちを確認できます。トークンとレスポンス本文は含みません。

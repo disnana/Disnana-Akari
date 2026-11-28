@@ -23,6 +23,8 @@ mod plan;
 pub(crate) use plan::GatewayPlan;
 
 const WAVE_READY_TIMEOUT: Duration = Duration::from_secs(60);
+// Twilight の送信キューは接続をまたいで残る。排出を確認するまで渡す件数を制限する。
+const MEMBER_QUERY_TRANSPORT_LIMIT: u8 = 4;
 
 pub(crate) struct MemberQueryRuntime(pub(crate) Option<MemberQuery>);
 
@@ -43,10 +45,22 @@ impl Drop for MemberQueryRuntime {
 struct MemberQueryIngress {
     handle: MemberQuery,
     commands: mpsc::Receiver<MemberQueryCommand>,
+    transport_pending: u8,
 }
 
 impl MemberQueryIngress {
-    fn observe(&self, shard: ShardId, event: &Result<IncomingEvent>) {
+    fn observe(&mut self, shard: ShardId, event: &Result<IncomingEvent>, transport_progress: bool) {
+        if transport_progress
+            && matches!(
+                event,
+                Ok(IncomingEvent::Standard(
+                    Event::GatewayHeartbeatAck | Event::MemberChunk(_)
+                ))
+            )
+        {
+            // Twilight は受信フレームを返す前に、送信可能なキューを排出する。
+            self.transport_pending = 0;
+        }
         match event {
             Ok(IncomingEvent::Standard(Event::Ready(_) | Event::Resumed)) => {
                 self.handle.ready(shard)
@@ -97,6 +111,7 @@ impl GatewaySet {
                 session.member_query = Some(MemberQueryIngress {
                     handle: handle.clone(),
                     commands,
+                    transport_pending: 0,
                 });
             }
         }
@@ -225,8 +240,14 @@ impl GatewaySession {
         let (mut query_rx, query) = self
             .member_query
             .as_mut()
-            .map(|ingress| (&mut ingress.commands, &ingress.handle))
+            .map(|ingress| {
+                (
+                    &mut ingress.commands,
+                    (&ingress.handle, &mut ingress.transport_pending),
+                )
+            })
             .unzip();
+        let (query, mut query_pending) = query.unzip();
         let observe_state = |previous, state| {
             if lost_gateway_session(previous, state) {
                 invalidate_permissions(id);
@@ -260,6 +281,9 @@ impl GatewaySession {
             let active = self.shard.state() == ShardState::Active;
             let presence_ready = active && self.presence.is_some();
             let deadline = voice.and_then(|voice| voice.managed.lock().ok()?.next_deadline());
+            let query_capacity = query_pending
+                .as_deref()
+                .is_some_and(|pending| *pending < MEMBER_QUERY_TRANSPORT_LIMIT);
             if !presence_ready && voice_rx.is_none() && query_rx.is_none() {
                 return message_events::next_event(
                     &mut self.shard,
@@ -276,18 +300,22 @@ impl GatewaySession {
                         Some(commands) => commands.recv().await,
                         None => pending().await,
                     }
-                }, if query_rx.is_some() => {
+                }, if query_capacity && query_rx.is_some() => {
                     let Some(command) = command else {
                         query_rx = None;
                         continue;
                     };
-                    if let Some(query) = query
+                    if let (Some(query), Some(pending)) = (query, query_pending.as_deref_mut())
                         && let Some(request) = query.request(id, &command)
-                        && (self.shard.state() != ShardState::Active
-                            || self.shard.ratelimiter().is_some_and(|limiter| limiter.available() == 0)
-                            || self.shard.sender().command(request).is_err())
                     {
-                        query.send_failed(id, &command);
+                        if self.shard.state() != ShardState::Active
+                            || self.shard.ratelimiter().is_some_and(|limiter| limiter.available() == 0)
+                            || self.shard.sender().command(request).is_err()
+                        {
+                            query.send_failed(id, &command);
+                        } else {
+                            *pending += 1;
+                        }
                     }
                 }
                 update = async {
@@ -355,15 +383,21 @@ impl GatewaySession {
             event_types |= EventTypeFlags::VOICE_STATE_UPDATE | EventTypeFlags::VOICE_SERVER_UPDATE;
         }
         if self.member_query.is_some() {
-            event_types |= EventTypeFlags::MEMBER_CHUNK;
+            event_types |= EventTypeFlags::MEMBER_CHUNK | EventTypeFlags::GATEWAY_HEARTBEAT_ACK;
         }
         while let Some(event) = self
             .next_event(event_types, decode, invalidate_permissions)
             .await
         {
             let is_ready = matches!(&event, Ok(IncomingEvent::Standard(Event::Ready(_))));
-            if let Some(query) = &self.member_query {
-                query.observe(self.id(), &event);
+            let shard = self.id();
+            if let Some(query) = &mut self.member_query {
+                let transport_progress = self.shard.state() == ShardState::Active
+                    && self
+                        .shard
+                        .ratelimiter()
+                        .is_none_or(|limiter| limiter.available() > 0);
+                query.observe(shard, &event, transport_progress);
             }
             if let Some(voice) = &self.voice
                 && let Ok(IncomingEvent::Standard(event)) = &event

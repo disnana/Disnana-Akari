@@ -524,6 +524,86 @@ async fn loopback_gateway_routes_member_queries_and_matches_nonce() {
     assert!(result.is_ok(), "{result:?}");
 }
 
+#[tokio::test]
+async fn loopback_member_query_bounds_transport_before_next_inbound_frame() {
+    use crate::MemberQueryError;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready, mut ready_rx) = mpsc::channel(1);
+    let (registered, mut registered_rx) = mpsc::channel(1);
+    let mut events = Events::new();
+    events.on_ready(async move |_: &Ready| ready.send(()).await);
+    let (bot, query) = Bot::new(FIXTURE_TOKEN)
+        .unwrap()
+        .with_events(events)
+        .with_member_query();
+    let (mut bot, shutdown) = bot.with_shutdown();
+    bot.gateway_test_port = Some(address.port());
+    let server = async {
+        let mut socket = accept(&listener).await;
+        receive_opcode(&mut socket, 2).await;
+        send_ready(
+            &mut socket,
+            &format!("ws://{address}"),
+            "member-query-transport",
+            [0, 1],
+        )
+        .await;
+        for _ in 0..super::MEMBER_QUERY_TRANSPORT_LIMIT {
+            receive_opcode(&mut socket, 8).await;
+        }
+        assert_eq!(registered_rx.recv().await, Some(()));
+        assert!(
+            timeout(Duration::from_millis(75), socket.next())
+                .await
+                .is_err()
+        );
+        socket.send(Frame::text(ACK)).await.unwrap();
+        let next = receive_opcode(&mut socket, 8).await;
+        let nonce = next["d"]["nonce"].as_str().unwrap();
+        send_dispatch(
+            &mut socket,
+            2,
+            "GUILD_MEMBERS_CHUNK",
+            member_query_chunk(nonce, "6", &[]),
+        )
+        .await;
+        expect_close(&mut socket, 1000).await;
+    };
+    let request = async {
+        assert_eq!(ready_rx.recv().await, Some(()));
+        let guild = Id::new(4);
+        let short = Duration::from_millis(500);
+        let attempts = futures_util::future::join_all(
+            (0..super::MEMBER_QUERY_TRANSPORT_LIMIT)
+                .map(|_| query.query_prefix(guild, "mem", 1, short)),
+        )
+        .await;
+        assert!(
+            attempts
+                .iter()
+                .all(|result| matches!(result, Err(MemberQueryError::TimedOut)))
+        );
+        let next = query.query_prefix(guild, "mem", 1, Duration::from_secs(3));
+        tokio::pin!(next);
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(next.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        registered.send(()).await.unwrap();
+        assert_eq!(next.await.unwrap().members().len(), 1);
+        shutdown.request();
+    };
+    let (result, (), ()) = timeout(Duration::from_secs(10), async {
+        tokio::join!(bot.start(), server, request)
+    })
+    .await
+    .unwrap();
+    assert!(result.is_ok(), "{result:?}");
+}
+
 fn member_query_chunk(nonce: &str, user: &str, not_found: &[&str]) -> Value {
     json!({
         "guild_id":"4", "chunk_index":0, "chunk_count":1, "nonce":nonce,

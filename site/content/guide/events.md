@@ -375,7 +375,7 @@ async fn names(query: &MemberQuery, guild: Id<GuildMarker>, prefix: &str) -> Res
 }
 ```
 
-`query_ids` で一覧を照会すると、Discord が見つけられなかった ID を `not_found()` で確認できます。どちらも一度に最大100件です。応答を要求ごとに紐付け、複数チャンクをまとめて返します。処理枠の超過、タイムアウト、対象シャードの切断は型付きエラーで返します。結果は呼び出し側で使えます。
+`query_ids` で一覧を照会すると、Discord が見つけられなかった ID を `not_found()` で確認できます。どちらも一度に最大100件です。応答を要求ごとに紐付け、複数チャンクをまとめて返します。シャードの送信が詰まった場合も、Gateway に渡す照会数に上限を設けており、送信待ちも期限に含みます。処理枠の超過、タイムアウト、対象シャードの切断は型付きエラーで返します。
 
 この API は空の名前での全件取得やプレゼンスの取得を扱いません。名前の先頭と ID の照会に特権 Intent を自動追加する必要はありません。 Bot が対象サーバーに参加し、そのシャードが準備できている必要があります。 [Discord の Request Guild Members](https://docs.discord.com/developers/events/gateway-events#request-guild-members) · [discord.py の query_members](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.Guild.query_members)
 
