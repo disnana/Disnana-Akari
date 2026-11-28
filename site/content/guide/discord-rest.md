@@ -21,6 +21,57 @@ async fn discussion(http: &Client, message: &Message) -> Result<Channel> {
 
 作成したスレッドに送るときは、返された `Channel` の `id` を `create_message` に渡します。既存のスレッドを探す場合やフォーラムに投稿する場合は専用のルートを使います。[Discord のスレッド API](https://docs.discord.com/developers/topics/threads)
 
+## フォーラム・メディアに投稿を作る
+
+`ForumPost` はスレッドと最初のメッセージを一度に作り、Discord から返った両方を取得します。対象のフォーラム・メディアチャンネルでは Bot に `SEND_MESSAGES` が必要です。メディア投稿で必要な画像などは最初のメッセージに添付します。 [Discord のフォーラム作成 API](https://docs.discord.com/developers/resources/channel#start-thread-in-forum-or-media-channel) · [discord.py の ForumChannel.create_thread](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.ForumChannel.create_thread)
+
+
+```rust
+use disnana_akari::{ForumPost, Result, http::Client};
+use disnana_akari::model::id::{Id, marker::{ChannelMarker, TagMarker}};
+
+async fn announce(
+    http: &Client, forum: Id<ChannelMarker>, tag: Id<TagMarker>,
+) -> Result<Id<ChannelMarker>> {
+    let tags = [tag];
+    let post = ForumPost::new("週末の予定")
+        .content("参加できる時間を返信してください。")
+        .applied_tags(&tags)
+        .slowmode(5)
+        .send(http, forum)
+        .await?;
+    Ok(post.channel.id)
+}
+```
+
+タイトル、本文、タグや添付の上限を送信前に確認し、最初のメッセージでメンション通知を抑止します。作成の応答で通信に失敗した場合は、再送する前に投稿が作成済みか確認します。
+
+## スレッドに参加したユーザーを調べる
+
+特定ユーザーは `fetch_thread_member` で取得でき、Discord が `404` を返す場合は `None` です。`ThreadMemberPages` はユーザー ID の昇順で一覧を最大100件ずつ取得します。Discord API v10 のページ取得ではメンバー情報も要求し、一覧には特権 Intent の `GUILD_MEMBERS` が必要です。 [Discord のスレッド参加者 API](https://docs.discord.com/developers/resources/channel#list-thread-members)
+
+```rust
+use disnana_akari::{Error, Result, ThreadMemberPages, fetch_thread_member, http::Client};
+use disnana_akari::model::id::{Id, marker::{ChannelMarker, UserMarker}};
+
+async fn show_thread_members(
+    http: &Client, thread: Id<ChannelMarker>, actor: Id<UserMarker>,
+) -> Result<()> {
+    if fetch_thread_member(http, thread, actor).await.map_err(Error::handler)?.is_some() {
+        println!("操作者は参加済みです。");
+    }
+    let mut pages = ThreadMemberPages::new(http, thread).limit(200);
+    while let Some(page) = pages.next_page().await.map_err(Error::handler)? {
+        for member in page {
+            if let Some(user) = member.user_id {
+                println!("参加ユーザー {user}");
+            }
+        }
+    }
+    Ok(())
+}
+```
+
 ## メンバーを取得し、ロールを付ける
 
 1人の情報は `guild_member` で取得します。一覧を続けて読む場合は `guild_members(guild).limit(1000)` の末尾にある `member.user.id` を次の `after` に使います。一覧の取得には特権 Intent の `GUILD_MEMBERS` を Developer Portal で有効にしてください。

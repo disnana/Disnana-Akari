@@ -14,7 +14,7 @@ use twilight_model::{
     },
 };
 
-use crate::rest_pagination::advance_after;
+use crate::rest_pagination::IdPageCursor as Cursor;
 
 const MAX_PAGE_SIZE: u8 = 100;
 
@@ -25,7 +25,7 @@ const MAX_PAGE_SIZE: u8 = 100;
 pub struct EntitlementPages<'http> {
     http: &'http Client,
     application: Id<ApplicationMarker>,
-    cursor: Cursor,
+    cursor: Cursor<EntitlementMarker>,
     user: Option<Id<UserMarker>>,
     guild: Option<Id<GuildMarker>>,
     skus: &'http [Id<SkuMarker>],
@@ -34,12 +34,6 @@ pub struct EntitlementPages<'http> {
     page_size: u8,
     remaining: Option<usize>,
     exhausted: bool,
-}
-
-#[derive(Clone, Copy)]
-enum Cursor {
-    After(Option<Id<EntitlementMarker>>),
-    Before(Id<EntitlementMarker>),
 }
 
 impl<'http> EntitlementPages<'http> {
@@ -170,7 +164,10 @@ impl<'http> EntitlementPages<'http> {
             return Err(EntitlementPagesError::InvalidPage);
         }
         let limit = usize::from(limit);
-        self.cursor = self.cursor.advance(&mut page, limit)?;
+        self.cursor = self
+            .cursor
+            .advance(&mut page, limit, |entitlement| entitlement.id)
+            .ok_or(EntitlementPagesError::InvalidPage)?;
         self.exhausted = page.len() < limit;
         if let Some(remaining) = &mut self.remaining {
             *remaining -= page.len();
@@ -188,30 +185,6 @@ impl<'http> EntitlementPages<'http> {
                 .is_none_or(|guild| entitlement.guild_id == Some(guild))
             && (self.skus.is_empty() || self.skus.contains(&entitlement.sku_id))
             && (!self.exclude_deleted || !entitlement.deleted)
-    }
-}
-
-impl Cursor {
-    fn advance(
-        self,
-        page: &mut [Entitlement],
-        limit: usize,
-    ) -> Result<Self, EntitlementPagesError> {
-        let after = match self {
-            Self::After(after) => after,
-            Self::Before(_) => None,
-        };
-        let newest = advance_after(page, limit, after, |entitlement| entitlement.id)
-            .ok_or(EntitlementPagesError::InvalidPage)?;
-        match self {
-            Self::After(_) => Ok(Self::After(newest)),
-            Self::Before(before) => {
-                if newest.is_some_and(|id| id >= before) {
-                    return Err(EntitlementPagesError::InvalidPage);
-                }
-                Ok(Self::Before(page.first().map_or(before, |entry| entry.id)))
-            }
-        }
     }
 }
 

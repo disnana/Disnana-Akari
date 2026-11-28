@@ -142,18 +142,10 @@ async fn after_retries_a_nonprogressing_page_without_changing_the_request() {
 #[test]
 fn malformed_pages_reject_duplicates_oversize_and_invalid_backward_progress() {
     let ban = |id| serde_json::from_value::<Ban>(raw_ban(id)).unwrap();
+    let id = |ban: &Ban| ban.user.id;
     let after = Cursor::After(None);
-    assert!(matches!(
-        after.advance(&mut [ban(2), ban(2)], 2),
-        Err(BanPagesError::InvalidPage)
-    ));
-    assert!(matches!(
-        after.advance(&mut [ban(2), ban(3)], 1),
-        Err(BanPagesError::InvalidPage)
-    ));
+    assert!(after.advance(&mut [ban(2), ban(2)], 2, id).is_none());
+    assert!(after.advance(&mut [ban(2), ban(3)], 1, id).is_none());
     let before = Cursor::Before(Id::new(10));
-    assert!(matches!(
-        before.advance(&mut [ban(9), ban(10)], 2),
-        Err(BanPagesError::InvalidPage)
-    ));
+    assert!(before.advance(&mut [ban(9), ban(10)], 2, id).is_none());
 }

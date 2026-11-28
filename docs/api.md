@@ -804,3 +804,5 @@ async fn ready(_event: &Ready) -> Result<()> {
 - `SlashContext::entitlements`、`HybridContext::entitlements`、`CommandCheckContext::entitlements` は Discord が今回の Interaction に含めた購入権利を借ります。テキストの呼び出しには Interaction の購入権利がありません。
 - 補完、ボタン、各セレクトメニュー、モーダルの `entitlements` からも、現在の Interaction の購入権利を参照できます。UI セッションの各ハンドラーにも同じコンテキストが渡ります。
 - `monetization::create_test_entitlement` は `CreateTestEntitlementOwner` で指定した相手にテスト権利を作ります。失敗は `CreateTestEntitlementError` で区別できます。
+- `fetch_thread_member` は指定したユーザーのスレッド参加情報を取得します。`ThreadMemberPages` は参加者を最大100件ずつ取得します。失敗はそれぞれ `ThreadMemberLookupError` と `ThreadMemberPagesError` です。
+- `ForumPost` はフォーラム・メディアチャンネルに投稿し、`ForumThread` で新しいスレッドと最初のメッセージを返します。

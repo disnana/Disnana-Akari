@@ -30,6 +30,32 @@ pub(crate) fn advance_after<T, M>(
     Some(last)
 }
 
+// Discord の ID 一覧では、前へ進む場合もページ内を昇順で返す。
+pub(crate) enum IdPageCursor<M> {
+    After(Option<Id<M>>),
+    Before(Id<M>),
+}
+
+impl<M> IdPageCursor<M> {
+    pub(crate) fn advance<T>(
+        &self,
+        page: &mut [T],
+        limit: usize,
+        id: impl Fn(&T) -> Id<M>,
+    ) -> Option<Self> {
+        let after = match *self {
+            Self::After(after) => after,
+            Self::Before(_) => None,
+        };
+        let newest = advance_after(page, limit, after, &id)?;
+        match *self {
+            Self::After(_) => Some(Self::After(newest)),
+            Self::Before(before) if newest.is_some_and(|newest| newest >= before) => None,
+            Self::Before(before) => Some(Self::Before(page.first().map_or(before, id))),
+        }
+    }
+}
+
 pub(crate) struct UserPageCursor {
     pub(crate) after: Option<Id<UserMarker>>,
     pub(crate) remaining: Option<usize>,

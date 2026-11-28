@@ -16,7 +16,7 @@ use twilight_model::{
     util::{ImageHash, Timestamp},
 };
 
-use crate::rest_pagination::advance_after;
+use crate::rest_pagination::IdPageCursor as Cursor;
 
 const MAX_PAGE_SIZE: u16 = 100;
 
@@ -27,17 +27,11 @@ pub struct ScheduledEventUserPages<'http> {
     http: &'http Client,
     guild: Id<GuildMarker>,
     event: Id<ScheduledEventMarker>,
-    cursor: Cursor,
+    cursor: Cursor<UserMarker>,
     with_member: bool,
     page_size: u16,
     remaining: Option<usize>,
     exhausted: bool,
-}
-
-#[derive(Clone, Copy)]
-enum Cursor {
-    After(Option<Id<UserMarker>>),
-    Before(Id<UserMarker>),
 }
 
 impl<'http> ScheduledEventUserPages<'http> {
@@ -149,7 +143,10 @@ impl<'http> ScheduledEventUserPages<'http> {
         {
             return Err(ScheduledEventUserPagesError::InvalidPage);
         }
-        let cursor = self.cursor.advance(&mut users, limit)?;
+        let cursor = self
+            .cursor
+            .advance(&mut users, limit, |entry| entry.user.id)
+            .ok_or(ScheduledEventUserPagesError::InvalidPage)?;
         self.exhausted = users.len() < limit;
         if let Some(remaining) = &mut self.remaining {
             *remaining -= users.len();
@@ -215,32 +212,6 @@ impl MemberWire {
             premium_since: self.premium_since,
             roles: self.roles,
             user: self.user.unwrap_or_else(|| subscriber.clone()),
-        }
-    }
-}
-
-impl Cursor {
-    fn advance(
-        self,
-        users: &mut [GuildScheduledEventUser],
-        limit: usize,
-    ) -> Result<Self, ScheduledEventUserPagesError> {
-        let after = match self {
-            Self::After(after) => after,
-            Self::Before(_) => None,
-        };
-        let newest = advance_after(users, limit, after, |entry| entry.user.id)
-            .ok_or(ScheduledEventUserPagesError::InvalidPage)?;
-        match self {
-            Self::After(_) => Ok(Self::After(newest)),
-            Self::Before(before) => {
-                if newest.is_some_and(|id| id >= before) {
-                    return Err(ScheduledEventUserPagesError::InvalidPage);
-                }
-                Ok(Self::Before(
-                    users.first().map_or(before, |entry| entry.user.id),
-                ))
-            }
         }
     }
 }

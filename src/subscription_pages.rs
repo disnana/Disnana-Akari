@@ -9,7 +9,7 @@ use twilight_model::{
     },
 };
 
-use crate::rest_pagination::advance_after;
+use crate::rest_pagination::IdPageCursor as Cursor;
 
 const MAX_PAGE_SIZE: u8 = 100;
 
@@ -20,16 +20,10 @@ pub struct SubscriptionPages<'http> {
     http: &'http Client,
     sku: Id<SkuMarker>,
     user: Id<UserMarker>,
-    cursor: Cursor,
+    cursor: Cursor<SubscriptionMarker>,
     page_size: u8,
     remaining: Option<usize>,
     exhausted: bool,
-}
-
-#[derive(Clone, Copy)]
-enum Cursor {
-    After(Option<Id<SubscriptionMarker>>),
-    Before(Id<SubscriptionMarker>),
 }
 
 impl<'http> SubscriptionPages<'http> {
@@ -113,41 +107,16 @@ impl<'http> SubscriptionPages<'http> {
         {
             return Err(SubscriptionPagesError::InvalidPage);
         }
-        let cursor = self.cursor.advance(&mut subscriptions, limit)?;
+        let cursor = self
+            .cursor
+            .advance(&mut subscriptions, limit, |subscription| subscription.id)
+            .ok_or(SubscriptionPagesError::InvalidPage)?;
         self.exhausted = subscriptions.len() < limit;
         if let Some(remaining) = &mut self.remaining {
             *remaining -= subscriptions.len();
         }
         self.cursor = cursor;
         Ok((!subscriptions.is_empty()).then_some(subscriptions))
-    }
-}
-
-impl Cursor {
-    fn advance(
-        self,
-        subscriptions: &mut [Subscription],
-        limit: usize,
-    ) -> Result<Self, SubscriptionPagesError> {
-        let after = match self {
-            Self::After(after) => after,
-            Self::Before(_) => None,
-        };
-        let newest = advance_after(subscriptions, limit, after, |subscription| subscription.id)
-            .ok_or(SubscriptionPagesError::InvalidPage)?;
-        match self {
-            Self::After(_) => Ok(Self::After(newest)),
-            Self::Before(before) => {
-                if newest.is_some_and(|id| id >= before) {
-                    return Err(SubscriptionPagesError::InvalidPage);
-                }
-                Ok(Self::Before(
-                    subscriptions
-                        .first()
-                        .map_or(before, |subscription| subscription.id),
-                ))
-            }
-        }
     }
 }
 

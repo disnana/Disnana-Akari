@@ -19,6 +19,7 @@ mod error;
 mod event_waiters;
 mod events;
 mod flags;
+mod forum_post;
 mod gateway_runtime;
 mod gateway_status;
 mod gateway_waiters;
@@ -53,6 +54,8 @@ mod slash;
 pub mod soundboard;
 mod startup_readiness;
 mod subscription_pages;
+mod thread_member_lookup;
+mod thread_member_pages;
 mod thread_pages;
 mod timing;
 mod typing_indicator;
@@ -122,6 +125,7 @@ pub use events::{
     ReactionRemoveEmoji, Ready, SoundboardSound, SoundboardSoundId, SoundboardSoundMarker,
     SoundboardSounds, TypingStart, VoiceChannelEffectSend, VoiceEffectAnimation,
 };
+pub use forum_post::{ForumPost, ForumThread};
 pub use gateway_status::{
     GatewayShardState, GatewayShardStatus, GatewayStatusHandle, GatewayStatusUpdates,
 };
@@ -163,6 +167,8 @@ pub use slash::{
 };
 pub use startup_readiness::{StartupReadiness, StartupReport, StartupShardReport, StartupWarmup};
 pub use subscription_pages::{SubscriptionPages, SubscriptionPagesError};
+pub use thread_member_lookup::{ThreadMemberLookupError, fetch_thread_member};
+pub use thread_member_pages::{ThreadMemberPages, ThreadMemberPagesError};
 pub use thread_pages::{ThreadPages, ThreadPagesError};
 pub use timing::Timing;
 pub use twilight_http as http;

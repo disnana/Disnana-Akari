@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use disnana_akari::{
-    Error, Result,
+    Error, Result, ThreadMemberLookupError, fetch_thread_member,
     http::{Client, api_error::ApiError, error::ErrorType},
     model::{
         channel::Channel,
@@ -184,6 +184,86 @@ async fn consumes_only_through_the_discord_endpoint_and_deletes_a_test_grant() {
     };
     timeout(Duration::from_secs(5), async {
         tokio::join!(operations, server)
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn fetch_thread_member_preserves_membership_and_checks_identity() {
+    const QUERY: &str = "GET /api/v10/channels/2/thread-members/8?with_member=true HTTP/1.1";
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = Client::builder()
+        .token("fixture-rest-token".to_owned())
+        .proxy(listener.local_addr().unwrap().to_string(), true)
+        .build();
+    let requests = async {
+        let (thread, user) = (Id::new(2), Id::new(8));
+        let result = fetch_thread_member(&client, thread, user)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.user_id, Some(user));
+        assert_eq!(result.member.unwrap().nick.as_deref(), Some("fixture"));
+        assert!(matches!(
+            fetch_thread_member(&client, thread, user).await,
+            Err(ThreadMemberLookupError::MismatchedResponse)
+        ));
+        assert!(
+            fetch_thread_member(&client, thread, user)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            fetch_thread_member(&client, thread, user).await,
+            Err(ThreadMemberLookupError::Http(error)) if matches!(
+                error.kind(), ErrorType::Response { status, .. } if status.get() == 403
+            )
+        ));
+    };
+    let server = async {
+        respond(
+            &listener,
+            QUERY,
+            "200 OK",
+            "",
+            r#"{
+            "id":"2","user_id":"8","join_timestamp":"2026-01-01T00:00:00+00:00","flags":0,
+            "member":{"nick":"fixture","mute":false,"deaf":false,"flags":0,"roles":[],
+                      "user":{"id":"8","username":"fixture","discriminator":"0"}}
+        }"#,
+        )
+        .await;
+        respond(
+            &listener,
+            QUERY,
+            "200 OK",
+            "",
+            r#"{
+            "id":"3","user_id":"8","join_timestamp":"2026-01-01T00:00:00+00:00","flags":0
+        }"#,
+        )
+        .await;
+        respond(
+            &listener,
+            QUERY,
+            "404 Not Found",
+            "",
+            r#"{"code":10007,"message":"Unknown Member"}"#,
+        )
+        .await;
+        respond(
+            &listener,
+            QUERY,
+            "403 Forbidden",
+            "",
+            r#"{"code":50001,"message":"Missing Access"}"#,
+        )
+        .await;
+    };
+    timeout(Duration::from_secs(5), async {
+        tokio::join!(requests, server)
     })
     .await
     .unwrap();

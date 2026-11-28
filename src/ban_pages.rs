@@ -9,7 +9,7 @@ use twilight_model::{
     },
 };
 
-use crate::rest_pagination::advance_after;
+use crate::rest_pagination::IdPageCursor as Cursor;
 
 const MAX_PAGE_SIZE: u16 = 1_000;
 
@@ -21,15 +21,9 @@ pub struct BanPages<'http> {
     http: &'http Client,
     guild: Id<GuildMarker>,
     page_size: u16,
-    cursor: Cursor,
+    cursor: Cursor<UserMarker>,
     remaining: Option<usize>,
     exhausted: bool,
-}
-
-#[derive(Clone, Copy)]
-enum Cursor {
-    After(Option<Id<UserMarker>>),
-    Before(Id<UserMarker>),
 }
 
 impl<'http> BanPages<'http> {
@@ -103,33 +97,16 @@ impl<'http> BanPages<'http> {
         };
         let mut bans = request.await?.models().await?;
         let limit = usize::from(limit);
-        let cursor = self.cursor.advance(&mut bans, limit)?;
+        let cursor = self
+            .cursor
+            .advance(&mut bans, limit, |ban| ban.user.id)
+            .ok_or(BanPagesError::InvalidPage)?;
         self.exhausted = bans.len() < limit;
         if let Some(remaining) = &mut self.remaining {
             *remaining -= bans.len();
         }
         self.cursor = cursor;
         Ok((!bans.is_empty()).then_some(bans))
-    }
-}
-
-impl Cursor {
-    fn advance(self, page: &mut [Ban], limit: usize) -> Result<Self, BanPagesError> {
-        let after = match self {
-            Self::After(after) => after,
-            Self::Before(_) => None,
-        };
-        let newest = advance_after(page, limit, after, |ban| ban.user.id)
-            .ok_or(BanPagesError::InvalidPage)?;
-        match self {
-            Self::After(_) => Ok(Self::After(newest)),
-            Self::Before(before) => {
-                if newest.is_some_and(|id| id >= before) {
-                    return Err(BanPagesError::InvalidPage);
-                }
-                Ok(Self::Before(page.first().map_or(before, |ban| ban.user.id)))
-            }
-        }
     }
 }
 
