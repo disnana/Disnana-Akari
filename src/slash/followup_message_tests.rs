@@ -17,7 +17,7 @@ use crate::{
         tests::{command_interaction, exchange_response, test_command_message},
     },
     timing::Pending,
-    ui::FileDisplay,
+    ui::{Button, FileDisplay},
 };
 
 const TOKEN: &str = "private-followup-fixture";
@@ -29,6 +29,7 @@ async fn local_http() -> Result<(TcpListener, Client)> {
         .await
         .map_err(Error::handler)?;
     let http = Client::builder()
+        .token("local-bot-token".into())
         .proxy(
             listener.local_addr().map_err(Error::handler)?.to_string(),
             true,
@@ -170,6 +171,73 @@ async fn tracked_classic_followup_uses_the_returned_id_and_refreshes_its_model()
     server
 }
 
+#[tokio::test]
+async fn tracked_premium_followups_send_legacy_ui_and_v2_with_attachments() -> Result<()> {
+    let (listener, http) = local_http().await?;
+    let interaction = application_interaction();
+    let hooks = Hooks::default();
+    let followups = Followups::new(initial(&http, &interaction, &hooks));
+    let client = async {
+        let legacy = UiMessage::new()
+            .content("<@123>")
+            .buttons(vec![Button::premium(Id::new(95))]);
+        let sent = followups.send_ui(&legacy, true).await?;
+        assert_eq!(sent.id(), Id::new(19));
+        assert_eq!(sent.message().flags, Some(MessageFlags::EPHEMERAL));
+        let v2 = ComponentsV2::new()
+            .section_with_button(["upgrade"], Button::premium(Id::new(95)))
+            .file(FileDisplay::new("upload.txt"))
+            .attachment(Attachment::from_bytes(
+                "upload.txt".into(),
+                b"file".to_vec(),
+                3,
+            ));
+        let sent = followups.send_v2(&v2, true).await?;
+        assert_eq!(sent.id(), Id::new(20));
+        assert_eq!(
+            sent.message().flags,
+            Some(MessageFlags::EPHEMERAL | MessageFlags::IS_COMPONENTS_V2)
+        );
+        Ok::<_, Error>(())
+    };
+    let server = async {
+        let premium = json!({"type":2,"style":6,"sku_id":"95"});
+        let body = json_request(
+            &listener,
+            "POST",
+            FOLLOWUP,
+            &message("<@123>", MessageFlags::EPHEMERAL)?,
+        )
+        .await?;
+        assert_eq!(body["flags"], 64);
+        assert_eq!(body["content"], "<@123>");
+        assert_eq!(body["allowed_mentions"]["parse"], json!([]));
+        assert_eq!(body["components"][0]["components"][0], premium);
+        let mut reply = message("", MessageFlags::EPHEMERAL | MessageFlags::IS_COMPONENTS_V2)?;
+        reply.id = Id::new(20);
+        let body = multipart(&listener, "POST", FOLLOWUP, &reply).await?;
+        assert_eq!(body["flags"], 32832);
+        assert_eq!(body["allowed_mentions"]["parse"], json!([]));
+        assert_eq!(body["components"][0]["accessory"], premium);
+        assert_eq!(
+            body["components"][1]["file"]["url"],
+            "attachment://upload.txt"
+        );
+        assert_eq!(
+            body["attachments"],
+            json!([{"id":3,"filename":"upload.txt"}])
+        );
+        Ok::<_, Error>(())
+    };
+    let (client, server) = timeout(Duration::from_secs(5), async {
+        tokio::join!(client, server)
+    })
+    .await
+    .map_err(Error::handler)?;
+    client?;
+    server
+}
+
 async fn multipart(
     listener: &TcpListener,
     method: &str,
@@ -271,7 +339,10 @@ async fn reject_request(listener: &TcpListener) -> std::io::Result<()> {
     let mut stream = BufReader::new(stream);
     let mut line = String::new();
     stream.read_line(&mut line).await?;
-    assert!(line.starts_with(&format!("POST /api/v10{FOLLOWUP}")));
+    assert_eq!(
+        line.trim_end(),
+        format!("POST /api/v10{FOLLOWUP}?wait=true&with_components=true HTTP/1.1")
+    );
     let mut length = 0;
     loop {
         line.clear();
@@ -281,10 +352,11 @@ async fn reject_request(listener: &TcpListener) -> std::io::Result<()> {
         if line == "\r\n" {
             break;
         }
-        if let Some((name, value)) = line.split_once(':')
-            && name.eq_ignore_ascii_case("content-length")
-        {
-            length = value.trim().parse().map_err(std::io::Error::other)?;
+        if let Some((name, value)) = line.split_once(':') {
+            assert!(!name.eq_ignore_ascii_case("authorization"));
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().map_err(std::io::Error::other)?;
+            }
         }
     }
     stream.read_exact(&mut vec![0; length]).await?;
@@ -304,7 +376,8 @@ async fn tracked_followup_errors_do_not_include_webhook_credentials_or_response_
     let hooks = Hooks::default();
     let followups = Followups::new(initial(&http, &interaction, &hooks));
     let client = async {
-        let error = followups.send("first", false).await.unwrap_err();
+        let ui = UiMessage::new().buttons(vec![Button::premium(Id::new(95))]);
+        let error = followups.send_ui(&ui, false).await.unwrap_err();
         assert!(error.to_string().contains("404"));
         assert!(error.to_string().contains("10015"));
         assert!(!format!("{error} {error:?}").contains(TOKEN));

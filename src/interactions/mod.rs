@@ -2,10 +2,13 @@ use std::{future::Future, pin::Pin};
 
 use twilight_http::Client;
 use twilight_model::{
-    application::interaction::{
-        Interaction, InteractionData, InteractionDataResolved, InteractionType,
-        message_component::MessageComponentInteractionData,
-        modal::{ModalInteractionComponent, ModalInteractionData},
+    application::{
+        interaction::{
+            Interaction, InteractionData, InteractionDataResolved, InteractionType,
+            message_component::MessageComponentInteractionData,
+            modal::{ModalInteractionComponent, ModalInteractionData},
+        },
+        monetization::Entitlement,
     },
     channel::{
         Attachment, Message,
@@ -545,6 +548,12 @@ impl<'a> ButtonContext<'a> {
         self.initial.interaction.author_id()
     }
 
+    /// Discord が今回のボタン操作の Interaction に付けた購入権利を借ります。
+    /// 対象 SKU、利用者またはサーバー、消費や有効期間の扱いはアプリ側で確認します。
+    pub fn entitlements(&self) -> &'a [Entitlement] {
+        &self.initial.interaction.entitlements
+    }
+
     /// 元メッセージを作るきっかけになったユーザーの ID を返します。
     /// Interaction の情報、または Bot が返信した実際の人間のメッセージが必要です。
     /// ボタンを押したユーザーは [`Self::author_id`] で取得できます。
@@ -692,6 +701,12 @@ impl<'a> SelectContext<'a> {
         self.inner.author_id()
     }
 
+    /// Discord が今回のセレクト操作の Interaction に付けた購入権利を借ります。
+    /// 確認方法は [`ButtonContext::entitlements`] を参照してください。
+    pub fn entitlements(&self) -> &'a [Entitlement] {
+        self.inner.entitlements()
+    }
+
     /// 元メッセージを作るきっかけになったユーザーの ID を返します。
     /// 判定方法は [`ButtonContext::invoker_id`] と同じです。
     pub fn invoker_id(&self) -> Option<Id<UserMarker>> {
@@ -822,6 +837,12 @@ macro_rules! typed_select_methods {
         /// セレクトを操作したユーザーの ID を返します。
         pub fn author_id(&self) -> Option<Id<UserMarker>> {
             self.inner.author_id()
+        }
+
+        /// Discord が今回のセレクト操作の Interaction に付けた購入権利を借ります。
+        /// 確認方法は [`ButtonContext::entitlements`] を参照してください。
+        pub fn entitlements(&self) -> &$lifetime [Entitlement] {
+            self.inner.entitlements()
         }
 
         /// 元メッセージを作るきっかけになったユーザーの ID を返します。
@@ -1002,6 +1023,12 @@ impl<'a> ModalContext<'a> {
     /// モーダルを送信したユーザーの ID を返します。
     pub fn author_id(&self) -> Option<Id<UserMarker>> {
         self.initial.interaction.author_id()
+    }
+
+    /// Discord が今回のモーダル送信の Interaction に付けた購入権利を借ります。
+    /// 対象 SKU、利用者またはサーバー、消費や有効期間の扱いはアプリ側で確認します。
+    pub fn entitlements(&self) -> &'a [Entitlement] {
+        &self.initial.interaction.entitlements
     }
 
     /// モーダルが送信されたサーバーの ID を返します。DM では `None` です。

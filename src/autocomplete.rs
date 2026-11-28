@@ -6,6 +6,7 @@ use twilight_model::{
     application::{
         command::{CommandOptionChoice, CommandOptionChoiceValue},
         interaction::application_command::{CommandData, CommandDataOption, CommandOptionValue},
+        monetization::Entitlement,
     },
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
@@ -55,6 +56,12 @@ impl<'a> AutocompleteContext<'a> {
     /// 入力している人の ID を返します。
     pub fn author_id(&self) -> Option<Id<UserMarker>> {
         self.initial.interaction.author_id()
+    }
+
+    /// Discord が今回の候補取得の Interaction に付けた購入権利を借ります。
+    /// 対象 SKU、利用者またはサーバー、消費や有効期間の扱いはアプリ側で確認します。
+    pub fn entitlements(&self) -> &'a [Entitlement] {
+        &self.initial.interaction.entitlements
     }
 
     /// 入力しているサーバーの ID を返します。DM では `None` です。

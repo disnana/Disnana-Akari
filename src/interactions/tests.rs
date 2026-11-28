@@ -69,6 +69,90 @@ pub(super) fn interaction(kind: InteractionType, data: InteractionData) -> Inter
 }
 
 #[tokio::test]
+async fn interaction_contexts_borrow_entitlements_from_the_received_payload() {
+    use twilight_model::application::{
+        command::CommandType,
+        interaction::application_command::CommandData,
+        monetization::{Entitlement, EntitlementType},
+    };
+
+    let mut event = interaction(
+        InteractionType::MessageComponent,
+        component_payload(ComponentType::Button, "akari:test"),
+    );
+    event.entitlements.push(Entitlement {
+        application_id: event.application_id,
+        consumed: None,
+        deleted: false,
+        ends_at: None,
+        guild_id: None,
+        id: Id::new(123),
+        kind: EntitlementType::ApplicationSubscription,
+        sku_id: Id::new(456),
+        starts_at: None,
+        user_id: Some(Id::new(789)),
+    });
+    let client = twilight_http::Client::new("dummy".to_owned());
+    let (_, timing) = crate::timing::Pending::new((), None).begin();
+    let initial = super::InitialResponder {
+        http: &client,
+        interaction: &event,
+        timing,
+        info: &crate::hooks::InfoReporter::default(),
+        permissions: &crate::permissions::PermissionResolver::default(),
+    };
+    let button = || ButtonContext::new(initial, "akari:test", None);
+    let select = SelectContext {
+        inner: button(),
+        values: &[],
+    };
+    let typed = UserSelectContext {
+        inner: button(),
+        values: vec![],
+        resolved: None,
+    };
+    let mentionable = MentionableSelectContext {
+        inner: button(),
+        values: vec![],
+        resolved: None,
+    };
+    let modal = ModalContext {
+        initial,
+        data: &ModalInteractionData {
+            components: vec![],
+            custom_id: "akari:modal".into(),
+            resolved: None,
+        },
+        dynamic_id: None,
+        response: ComponentResponse::Pending,
+        radio: &[],
+    };
+    let autocomplete = crate::AutocompleteContext {
+        initial,
+        data: &CommandData {
+            guild_id: None,
+            id: Id::new(1),
+            kind: CommandType::ChatInput,
+            name: "akari".into(),
+            options: vec![],
+            resolved: None,
+            target_id: None,
+        },
+        response_finished: false,
+    };
+    for received in [
+        button().entitlements(),
+        select.entitlements(),
+        typed.entitlements(),
+        mentionable.entitlements(),
+        modal.entitlements(),
+        autocomplete.entitlements(),
+    ] {
+        assert!(std::ptr::eq(received, event.entitlements.as_slice()));
+    }
+}
+
+#[tokio::test]
 async fn button_context_debug_omits_credentials() {
     let bot_token = "dummy-bot-credential";
     let interaction_token = "dummy-interaction-credential";

@@ -7,6 +7,13 @@ use crate::{
     UiSessions,
 };
 
+fn purchase(user: &str) -> Value {
+    json!([{
+        "id": "25", "sku_id": "26", "application_id": "2",
+        "user_id": user, "type": 4, "deleted": false, "consumed": false
+    }])
+}
+
 #[tokio::test]
 async fn ui_session_routes_select_and_finish_and_closes_remaining_actions_on_shutdown() {
     let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -22,6 +29,12 @@ async fn ui_session_routes_select_and_finish_and_closes_remaining_actions_on_shu
             "color",
             async move |ctx: &mut SelectContext<'_>, _: UiSession| {
                 assert_eq!(ctx.values(), &["blue"]);
+                let [grant] = ctx.entitlements() else {
+                    panic!("selected interaction must carry one entitlement");
+                };
+                assert_eq!(grant.id, Id::new(25));
+                assert_eq!(grant.user_id, ctx.author_id());
+
                 ctx.reply_ephemeral("selected blue").await?;
                 selected.try_send(()).map_err(Error::handler)
             },
@@ -31,6 +44,7 @@ async fn ui_session_routes_select_and_finish_and_closes_remaining_actions_on_shu
         .on_button(
             "finish",
             async |ctx: &mut ButtonContext<'_>, session: UiSession| {
+                assert!(ctx.entitlements().is_empty());
                 ctx.reply_ephemeral("closed by owner").await?;
                 assert!(session.finish());
                 Ok(())
@@ -87,11 +101,13 @@ async fn ui_session_routes_select_and_finish_and_closes_remaining_actions_on_shu
         .await;
         let mut wrong_owner = button("22", finish.as_str());
         wrong_owner["member"]["user"]["id"] = json!("7");
+        wrong_owner["entitlements"] = purchase("7");
         send_dispatch(&mut socket, 2, "INTERACTION_CREATE", wrong_owner).await;
         assert_eq!(replies.recv().await, Some(()));
         let mut select = button("23", color.as_str());
         select["data"]["component_type"] = json!(3);
         select["data"]["values"] = json!(["blue"]);
+        select["entitlements"] = purchase("6");
         send_dispatch(&mut socket, 3, "INTERACTION_CREATE", select).await;
         assert_eq!(selection.recv().await, Some(()));
         send_dispatch(

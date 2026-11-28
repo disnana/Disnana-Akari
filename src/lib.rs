@@ -36,6 +36,7 @@ mod member_query;
 mod message_cache;
 mod message_events;
 mod module;
+pub mod monetization;
 mod overwrite;
 mod pagination;
 #[cfg(test)]

@@ -176,6 +176,47 @@ async fn print_subscriptions(
 
 スラッシュコマンドでは `ctx.entitlements()` で今回の Interaction に Discord が付けた購入権利を参照できます。ハイブリッドや共通チェックからも参照でき、テキスト呼び出しでは `None` です。利用可否を判定するときは対象 SKU、利用者またはサーバー、有効期間、消費や削除の状態をアプリ側で確認します。特典の利用可否には購入権利を使い、購読状態は契約の表示や運用に使います。 [Discord の購入権利](https://docs.discord.com/developers/resources/entitlement)
 
+補完、ボタン、すべてのセレクトメニュー、モーダルでも `ctx.entitlements()` を使えます。UI セッションのハンドラーでは、画面を開いた時点の情報ではなく、ボタンの押下やフォーム送信と一緒に届いた購入権利を受け取ります。操作者はその時点の `author_id()`、サーバーは `guild_id()` で照合します。 [Discord の Interaction 構造](https://docs.discord.com/developers/interactions/receiving-and-responding#interaction-object)
+
+### テスト用の購入権利と消費型 SKU を扱う
+
+`monetization::create_test_entitlement` は、型付き ID でテスト用の購入権利を作ります。ユーザーとサーバーのどちらへ付与するかは `CreateTestEntitlementOwner` で指定します。片付けには Twilight の `delete_test_entitlement` を使います。作成の応答を読み取れなかった場合は、再作成の前に一覧で結果を確かめます。 [Discord のテスト用購入権利 API](https://docs.discord.com/developers/resources/entitlement#create-test-entitlement)
+
+```rust
+use disnana_akari::{
+    Error, Result, http::Client,
+    monetization::{CreateTestEntitlementOwner, create_test_entitlement},
+};
+use disnana_akari::model::id::{Id, marker::{
+    ApplicationMarker, EntitlementMarker, SkuMarker, UserMarker,
+}};
+
+async fn grant_test_access(
+    http: &Client, app: Id<ApplicationMarker>, sku: Id<SkuMarker>, user: Id<UserMarker>,
+) -> Result<Id<EntitlementMarker>> {
+    let entitlement = create_test_entitlement(http, app, sku, CreateTestEntitlementOwner::User(user))
+        .await
+        .map_err(Error::handler)?;
+    Ok(entitlement.id)
+}
+
+async fn revoke_test_access(
+    http: &Client, app: Id<ApplicationMarker>, entitlement: Id<EntitlementMarker>,
+) -> Result<()> {
+    http.delete_test_entitlement(app, entitlement).await?;
+    Ok(())
+}
+
+async fn consume_confirmed_purchase(
+    http: &Client, app: Id<ApplicationMarker>, entitlement: Id<EntitlementMarker>,
+) -> Result<()> {
+    http.consume_entitlement(app, entitlement).await?;
+    Ok(())
+}
+```
+
+消費は、対象 SKU が買い切りの消費型で、今回の利用に対応する権利だとアプリが確認した後に呼びます。Discord が成功を返すと、以降の一覧で `consumed` が `true` になります。 [Discord の購入権利消費 API](https://docs.discord.com/developers/resources/entitlement#consume-an-entitlement)
+
 ## エラーを処理する
 
 読み取りの結果が `404` なら、対象が見つからないという結果にできます。認証、権限、レート制限、レスポンスのデコードに失敗した場合は、エラーを呼び出し元に渡します。

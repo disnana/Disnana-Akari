@@ -1,16 +1,20 @@
 use std::fmt;
 
+use serde::Serialize;
 use twilight_http::{
     Client, Response,
     api_error::ApiError,
     client::InteractionClient,
     error::{Error as HttpError, ErrorType},
+    request::Request,
+    request::attachment::{AttachmentManager, PartialAttachment},
+    routing::Route,
 };
 use twilight_model::{
     application::interaction::Interaction,
     channel::{
         Message,
-        message::{AllowedMentions, MessageFlags},
+        message::{AllowedMentions, Component, Embed, MessageFlags},
     },
     http::attachment::Attachment,
     id::{Id, marker::MessageMarker},
@@ -88,6 +92,17 @@ impl<'a> Followups<'a> {
         ephemeral: bool,
     ) -> Result<FollowupMessage<'a>> {
         message.validate()?;
+        if message.has_premium_button() {
+            return self
+                .send_premium(
+                    message.content.as_deref(),
+                    &message.embeds,
+                    &message.components,
+                    visibility(ephemeral),
+                    &[],
+                )
+                .await;
+        }
         let client = self.client();
         let mentions = AllowedMentions::default();
         let mut request = client
@@ -119,17 +134,59 @@ impl<'a> Followups<'a> {
         message.validate()?;
         message.validate_attachment_sizes(self.interaction.attachment_size_limit)?;
         message.validate_attachment_references(&[])?;
+        let flags = MessageFlags::IS_COMPONENTS_V2 | visibility(ephemeral);
+        if message.has_premium_button() {
+            return self
+                .send_premium(None, &[], &message.components, flags, &message.attachments)
+                .await;
+        }
         let client = self.client();
         let mentions = AllowedMentions::default();
         let mut request = client
             .create_followup(&self.interaction.token)
             .allowed_mentions(Some(&mentions))
-            .flags(MessageFlags::IS_COMPONENTS_V2 | visibility(ephemeral))
+            .flags(flags)
             .components(&message.components);
         if !message.attachments.is_empty() {
             request = request.attachments(&message.attachments);
         }
         self.track(request.await).await
+    }
+
+    async fn send_premium(
+        &self,
+        content: Option<&str>,
+        embeds: &[Embed],
+        components: &[Component],
+        flags: MessageFlags,
+        uploads: &[Attachment],
+    ) -> Result<FollowupMessage<'a>> {
+        let files = AttachmentManager::new().set_files(uploads.iter().collect());
+        let payload = PremiumFollowup {
+            content,
+            embeds,
+            components,
+            flags,
+            allowed_mentions: AllowedMentions::default(),
+            attachments: files.get_partial_attachments(),
+        };
+        // Twilight 0.18 は購入ボタンにも custom_id を要求するため、Akari で検証済みの部品を送る。
+        let route = Route::ExecuteWebhook {
+            thread_id: None,
+            token: &self.interaction.token,
+            wait: Some(true),
+            with_components: Some(true),
+            webhook_id: self.interaction.application_id.get(),
+        };
+        let request = Request::builder(&route).use_authorization_token(false);
+        let request = if uploads.is_empty() {
+            request.json(&payload)
+        } else {
+            let body = serde_json::to_vec(&payload).map_err(Error::handler)?;
+            request.form(files.build_form(&body))
+        };
+        let request = request.build().map_err(safe_http_error)?;
+        self.track(self.http.request(request).await).await
     }
 
     /// 本文とファイルを追加で送ります。添付だけを送る場合、本文を空にできます。
@@ -177,6 +234,19 @@ impl<'a> Followups<'a> {
             message: decode_message(response).await?,
         })
     }
+}
+
+#[derive(Serialize)]
+struct PremiumFollowup<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    embeds: &'a [Embed],
+    components: &'a [Component],
+    flags: MessageFlags,
+    allowed_mentions: AllowedMentions,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<PartialAttachment<'a>>,
 }
 
 /// Discord が作成した追加応答と、その応答だけを編集・削除できるハンドルです。
