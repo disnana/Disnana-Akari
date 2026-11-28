@@ -226,8 +226,8 @@ pub(crate) struct BootstrapWorker {
 }
 
 impl BootstrapWorker {
-    pub(crate) async fn changed(&self) {
-        self.progress.notified().await;
+    pub(crate) fn progress(&self) -> &Notify {
+        &self.progress
     }
 
     pub(crate) fn has_pending(&self) -> bool {

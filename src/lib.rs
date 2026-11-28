@@ -947,10 +947,7 @@ async fn drive_bootstrap<F: Future>(
     };
     let startup_progress = startup.run(
         || bootstrap.as_ref().is_some_and(BootstrapWorker::has_pending),
-        async || match bootstrap.as_ref() {
-            Some(worker) => worker.changed().await,
-            None => std::future::pending().await,
-        },
+        bootstrap.as_ref().map(BootstrapWorker::progress),
     );
     tokio::pin!(worker);
     tokio::select! {

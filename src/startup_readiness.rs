@@ -296,7 +296,7 @@ impl StartupTracker {
     pub(crate) async fn run(
         &self,
         bootstrap_pending: impl Fn() -> bool,
-        bootstrap_changed: impl AsyncFn(),
+        bootstrap_progress: Option<&Notify>,
     ) {
         let deadline = Instant::now().checked_add(self.timeout);
         while !self.is_finished() {
@@ -316,7 +316,7 @@ impl StartupTracker {
             tokio::select! {
                 () = self.changed.notified() => {}
                 () = wait_deadline(deadline) => {}
-                () = bootstrap_changed(), if wait_bootstrap => {}
+                () = wait_bootstrap_progress(bootstrap_progress), if wait_bootstrap => {}
             }
         }
     }
@@ -346,6 +346,13 @@ impl StartupTracker {
             timed_out,
             warmup,
         })
+    }
+}
+
+async fn wait_bootstrap_progress(progress: Option<&Notify>) {
+    match progress {
+        Some(progress) => progress.notified().await,
+        None => pending().await,
     }
 }
 
@@ -491,7 +498,7 @@ mod tests {
         let tracker = Arc::new(tracker);
         let driver = tokio::spawn({
             let tracker = Arc::clone(&tracker);
-            async move { tracker.run(|| false, async || pending().await).await }
+            async move { tracker.run(|| false, None).await }
         });
         tracker.observe(FIRST, &ready(FIRST, &[4, 3, 1, 1]));
         tracker.observe(FIRST, &available(99));
@@ -530,7 +537,7 @@ mod tests {
         let tracker = Arc::new(tracker);
         let driver = tokio::spawn({
             let tracker = Arc::clone(&tracker);
-            async move { tracker.run(|| false, async || pending().await).await }
+            async move { tracker.run(|| false, None).await }
         });
         tracker.observe(FIRST, &ready(FIRST, &[1, 2, 3]));
         tracker.observe(FIRST, &delete(3, Some(true)));
@@ -554,7 +561,7 @@ mod tests {
         let tracker = Arc::new(tracker);
         let driver = tokio::spawn({
             let tracker = Arc::clone(&tracker);
-            async move { tracker.run(|| false, async || pending().await).await }
+            async move { tracker.run(|| false, None).await }
         });
         tracker.observe(ShardId::ONE, &ready(ShardId::ONE, &[1]));
         tracker.invalidate(ShardId::ONE);
@@ -583,10 +590,7 @@ mod tests {
                 let changed = Arc::clone(&changed);
                 async move {
                     tracker
-                        .run(
-                            || pending.load(Ordering::Relaxed),
-                            async || changed.notified().await,
-                        )
+                        .run(|| pending.load(Ordering::Relaxed), Some(changed.as_ref()))
                         .await;
                 }
             });
@@ -622,7 +626,7 @@ mod tests {
         let tracker = Arc::new(tracker);
         let driver = tokio::spawn({
             let tracker = Arc::clone(&tracker);
-            async move { tracker.run(|| false, async || pending().await).await }
+            async move { tracker.run(|| false, None).await }
         });
         tokio::task::yield_now().await;
         tracker.close();
