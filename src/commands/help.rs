@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use super::{CommandContext, groups::CommandTree};
-use crate::Result;
+use crate::{Result, validation::MESSAGE_CONTENT_MAX};
 
 /// ヘルプに表示するテキストコマンドの説明、引数の書式、表示設定です。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -137,7 +137,10 @@ impl<'a> CommandInfo<'a> {
 
 pub(super) async fn reply_help(ctx: CommandContext<'_>) -> Result<()> {
     let content = format_help(ctx.commands, ctx.prefix(), ctx.args());
-    ctx.reply(&content).await
+    for page in pages(&content).filter(|page| !page.trim().is_empty()) {
+        ctx.reply(page).await?;
+    }
+    Ok(())
 }
 
 fn format_help(commands: &super::Commands, prefix: &str, query: &str) -> String {
@@ -174,7 +177,7 @@ fn format_help(commands: &super::Commands, prefix: &str, query: &str) -> String 
         }
         message.push('\n');
     }
-    limit_message(message)
+    message
 }
 
 fn write_usage(message: &mut String, prefix: &str, info: &CommandInfo<'_>) {
@@ -187,27 +190,39 @@ fn write_usage(message: &mut String, prefix: &str, info: &CommandInfo<'_>) {
     }
 }
 
-fn limit_message(mut message: String) -> String {
-    const LIMIT: usize = 2000;
-    const SUFFIX: &str = "\n…";
-    if message.encode_utf16().take(LIMIT + 1).count() > LIMIT {
-        let max_content = LIMIT - SUFFIX.encode_utf16().count();
-        let mut length = 0;
-        if let Some((index, _)) = message.char_indices().find(|(_, ch)| {
-            length += ch.len_utf16();
-            length > max_content
-        }) {
-            message.truncate(index);
-            message.push_str(SUFFIX);
+fn pages(mut remaining: &str) -> impl Iterator<Item = &str> {
+    std::iter::from_fn(move || {
+        if remaining.is_empty() {
+            return None;
+        }
+        let (page, rest) = remaining.split_at(page_end(remaining));
+        remaining = rest;
+        Some(page)
+    })
+}
+
+fn page_end(content: &str) -> usize {
+    let mut length = 0;
+    let mut line_end = None;
+    for (index, ch) in content.char_indices() {
+        length += ch.len_utf16();
+        if length > MESSAGE_CONTENT_MAX {
+            return line_end.unwrap_or(index);
+        }
+        if ch == '\n' {
+            line_end = Some(index + 1);
         }
     }
-    message
+    content.len()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Commands, Error, RegistrationError};
+    use crate::{
+        Commands, Context, Error, RegistrationError, access::tests::Mock,
+        commands::tests::command_message, permissions::PermissionResolver, timing::Pending,
+    };
 
     async fn command(_: CommandContext<'_>) -> Result<()> {
         Ok(())
@@ -286,17 +301,74 @@ mod tests {
     }
 
     #[test]
-    fn default_format_fits_a_discord_message_without_splitting_unicode() -> Result<()> {
+    fn help_pages_preserve_an_oversized_unicode_line() -> Result<()> {
         let mut commands = Commands::new("!")?;
         commands.register("about", command)?;
-        commands.set_metadata(
-            "about",
-            CommandMetadata::new().description("🦀".repeat(2000)),
-        )?;
+        let description = format!("{}🦀\n次の行", "a".repeat(MESSAGE_CONTENT_MAX - 1));
+        commands.set_metadata("about", CommandMetadata::new().description(&description))?;
         let message = format_help(&commands, "!", "about");
-        assert!(message.starts_with("!about\n🦀"));
-        assert!(message.ends_with("\n…"));
-        assert!(message.encode_utf16().count() <= 2000);
+        let pages: Vec<_> = pages(&message).collect();
+        assert_eq!(message, format!("!about\n{description}"));
+        assert_eq!(pages.concat(), message);
+        assert_eq!(pages.first(), Some(&"!about\n"));
+        assert_eq!(pages.last(), Some(&"🦀\n次の行"));
+        assert!(
+            pages
+                .iter()
+                .all(|page| page.encode_utf16().count() <= MESSAGE_CONTENT_MAX)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn help_dispatch_sends_all_pages_without_losing_visible_commands() -> Result<()> {
+        let mut commands = Commands::new("!")?;
+        commands.register_help("help")?;
+        let summary = "🦀".repeat(20);
+        for index in 0..80 {
+            let name = format!("cmd{index:02}");
+            commands.register(&name, command)?;
+            commands.set_metadata(&name, CommandMetadata::new().description(&summary))?;
+        }
+        commands.register("secret", command)?;
+        commands.set_metadata("secret", CommandMetadata::new().hidden(true))?;
+
+        let content = format_help(&commands, "!", "");
+        let pages: Vec<_> = pages(&content).collect();
+        assert!(pages.len() > 1);
+        assert_eq!(
+            pages
+                .iter()
+                .flat_map(|page| page.lines())
+                .filter_map(|line| line.split_once(" — "))
+                .filter(|(command, _)| command.starts_with("!cmd"))
+                .map(|(command, _)| command)
+                .collect::<Vec<_>>(),
+            (0..80)
+                .map(|index| format!("!cmd{index:02}"))
+                .collect::<Vec<_>>()
+        );
+        assert!(pages.iter().all(|page| {
+            page.encode_utf16().count() <= MESSAGE_CONTENT_MAX && !page.contains("!secret")
+        }));
+
+        let server = Mock::start(vec![("/channels/2/messages".into(), "{}".into())]).await;
+        let http = server.client();
+        let permissions = PermissionResolver::new(None);
+        let message = command_message("!help")?;
+        let (_, timing) = Pending::new((), None).begin();
+        commands
+            .dispatch(Context {
+                http: &http,
+                message: &message,
+                timing,
+                permissions: &permissions,
+            })
+            .await?;
+        assert_eq!(server.count("POST /channels/2/messages"), pages.len());
+        let first = server.body_of("POST /channels/2/messages").unwrap();
+        assert_eq!(first["content"].as_str(), pages.first().copied());
+        assert_eq!(first["allowed_mentions"]["parse"], serde_json::json!([]));
         Ok(())
     }
 }

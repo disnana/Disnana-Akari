@@ -98,6 +98,8 @@ async fn show(ctx: CommandContext<'_>) -> Result<()> {
 
 `register_help("help")` でヘルプコマンドを追加できます。次の例では、`!help` に一覧、`!help echo` に使い方を表示します。
 
+一覧や詳細が長いときは、Discord の本文上限に収まるように分け、複数のメッセージを順番に送ります。
+
 ```rust
 use disnana_akari::{CommandContext, CommandMetadata, Commands, Result};
 
