@@ -9,7 +9,7 @@ use twilight_gateway::{ConfigBuilder, Event, EventTypeFlags, Shard, ShardId, Sha
 use twilight_model::id::{Id, marker::UserMarker};
 
 use crate::{
-    Error, GatewayShardState, GatewayStatusHandle, GuildLifecycleEvent, MemberQuery,
+    DerivedGatewayEvent, Error, Events, GatewayShardState, GatewayStatusHandle, MemberQuery,
     PresenceHandle, Result,
     guild_lifecycle::{GuildLifecycleTracker, LIFECYCLE_EVENTS},
     member_query::MemberQueryCommand,
@@ -17,6 +17,7 @@ use crate::{
     presence::PresenceUpdates,
     shutdown,
     voice_gateway::{VoiceGateway, VoiceGatewayError, VoiceIngress},
+    voice_state_cache::{VOICE_STATE_CACHE_EVENTS, VoiceStateCache},
 };
 
 mod plan;
@@ -79,11 +80,14 @@ pub(crate) struct GatewaySet {
 }
 
 impl GatewaySet {
-    pub(crate) fn configure_guild_lifecycle(&mut self, enabled: bool) {
-        if enabled {
-            for session in &mut self.sessions {
-                session.guild_lifecycle = Some(GuildLifecycleTracker::new(session.id()));
-            }
+    pub(crate) fn configure_event_trackers(&mut self, events: &Events) {
+        let lifecycle = events.has_guild_lifecycle_handlers();
+        let voice_states = events.voice_state_capacity();
+        for session in &mut self.sessions {
+            let shard = session.id();
+            session.guild_lifecycle = lifecycle.then(|| GuildLifecycleTracker::new(shard));
+            session.voice_state_cache =
+                voice_states.map(|capacity| VoiceStateCache::new(shard, capacity));
         }
     }
 
@@ -190,6 +194,7 @@ pub(crate) struct GatewaySession {
     voice: Option<VoiceIngress>,
     member_query: Option<MemberQueryIngress>,
     guild_lifecycle: Option<GuildLifecycleTracker>,
+    voice_state_cache: Option<VoiceStateCache>,
 }
 
 impl GatewaySession {
@@ -210,18 +215,39 @@ impl GatewaySession {
             voice: None,
             member_query: None,
             guild_lifecycle: None,
+            voice_state_cache: None,
         }
     }
 
-    pub(crate) fn observe_guild_lifecycle(
+    pub(crate) fn observe_derived_gateway_event(
         &mut self,
         incoming: &Result<IncomingEvent>,
-    ) -> Option<GuildLifecycleEvent> {
-        let tracker = self.guild_lifecycle.as_mut()?;
+    ) -> Option<DerivedGatewayEvent> {
         match incoming {
-            Ok(IncomingEvent::Standard(event)) => tracker.observe(event),
-            Err(error) if message_events::lost_gateway_event(error, LIFECYCLE_EVENTS) => {
-                tracker.reset();
+            Ok(IncomingEvent::Standard(event)) => {
+                let lifecycle = self
+                    .guild_lifecycle
+                    .as_mut()
+                    .and_then(|tracker| tracker.observe(event));
+                let voice_state = self
+                    .voice_state_cache
+                    .as_mut()
+                    .and_then(|cache| cache.observe(event));
+                lifecycle
+                    .map(DerivedGatewayEvent::GuildLifecycle)
+                    .or_else(|| voice_state.map(DerivedGatewayEvent::VoiceState))
+            }
+            Err(error) => {
+                if let Some(tracker) = &mut self.guild_lifecycle
+                    && message_events::lost_gateway_event(error, LIFECYCLE_EVENTS)
+                {
+                    tracker.reset();
+                }
+                if let Some(cache) = &mut self.voice_state_cache
+                    && message_events::lost_gateway_event(error, VOICE_STATE_CACHE_EVENTS)
+                {
+                    cache.reset();
+                }
                 None
             }
             _ => None,

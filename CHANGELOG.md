@@ -12,6 +12,10 @@
 - `ctx.followups()` から本文・UI・Components V2・添付付きの追加返信を送り、返されたハンドルで ID を確認したり、編集・削除したりできます。
 - `Commands::register_help_with_checks` で、実行者がコマンドのチェックを通過した場合だけ、標準ヘルプに表示できます。
 
+- `Arguments::parse_greedy` と `convert_greedy` で、同じ型に変換できる引数を連続して読み、残りを後続の処理に渡せます。
+- `Bot::with_confirmations` で、本人の確定・取消ボタンを期限付きで待てます。確認ボタンにはコマンドと別の処理枠を使います。
+- `Events::on_voice_state_transition` で、上限付きキャッシュからメンバーの音声状態の変更前後を受け取れます。
+
 ### 改善
 
 - 長い標準ヘルプは、Discord の本文上限に収まるページに分けて送ります。

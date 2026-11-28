@@ -6,6 +6,8 @@ mod channel_ui;
 mod command_check;
 mod commands;
 mod concurrency;
+mod confirmation;
+mod confirmation_runtime;
 mod cooldown;
 mod error;
 mod event_waiters;
@@ -39,6 +41,7 @@ pub mod ui;
 pub mod validation;
 pub mod voice_channel;
 mod voice_gateway;
+mod voice_state_cache;
 mod work_queue;
 
 use std::{env, fmt, num::NonZeroU16, sync::Arc, time::Duration};
@@ -75,6 +78,10 @@ pub use commands::{
     CommandPrefixes, Commands, TextCommandGroup,
 };
 pub use concurrency::{ConcurrencyLimit, ConcurrencyPermit};
+pub use confirmation::{
+    Confirmation, ConfirmationError, ConfirmationLimits, ConfirmationOutcome, ConfirmationStop,
+    Confirmations,
+};
 pub use cooldown::Cooldown;
 pub use error::{
     CheckFailure, CommandSyncError, Error, HandlerError, HandlerKind, HierarchyDenied,
@@ -127,6 +134,7 @@ pub use voice_gateway::{
     VoiceConnection, VoiceConnectionInfo, VoiceConnectionStatus, VoiceGateway, VoiceGatewayError,
     VoiceStateChange,
 };
+pub use voice_state_cache::{VoiceStateSnapshot, VoiceStateTransition};
 
 /// 権限やフラグを名前で調べる拡張トレイトと、設定の日本語名をまとめて取り込みます。
 ///
@@ -173,6 +181,7 @@ pub struct Bot {
     gateway_status: Option<GatewayStatusHandle>,
     voice_gateway: Option<VoiceGateway>,
     event_waiters: Option<EventWaiters>,
+    confirmations: Option<Confirmations>,
     #[cfg(test)]
     gateway_test_port: Option<u16>,
     #[cfg(test)]
@@ -236,6 +245,7 @@ impl Bot {
             gateway_status: None,
             voice_gateway: None,
             event_waiters: None,
+            confirmations: None,
             #[cfg(test)]
             gateway_test_port: None,
             #[cfg(test)]
@@ -315,6 +325,19 @@ impl Bot {
         let waiters = EventWaiters::new(limits)?;
         self.event_waiters = Some(waiters.clone());
         Ok((self, waiters))
+    }
+
+    /// 操作した本人に限定した、期限付きの二択ボタンを使えるようにします。
+    ///
+    /// # エラー
+    /// 待機数の上限が無効なときは失敗します。
+    pub fn with_confirmations(
+        mut self,
+        limits: ConfirmationLimits,
+    ) -> Result<(Self, Confirmations), ConfirmationError> {
+        let confirmations = Confirmations::new(limits)?;
+        self.confirmations = Some(confirmations.clone());
+        Ok((self, confirmations))
     }
 
     /// Gateway で参加中のサーバーのメンバーを照会するハンドルを取得します。
@@ -566,12 +589,14 @@ impl Bot {
             gateway_status,
             voice_gateway,
             event_waiters,
+            confirmations,
             #[cfg(test)]
             gateway_test_port,
             #[cfg(test)]
             http_test_port,
         } = self;
         let member_query = gateway_runtime::MemberQueryRuntime(member_query);
+        let confirmations = confirmation_runtime::ConfirmationRuntime(confirmations);
         let mut shutdown = shutdown.as_ref().map(ShutdownHandle::subscribe);
         if shutdown.as_ref().is_some_and(|request| *request.borrow()) {
             return Ok(());
@@ -615,7 +640,9 @@ impl Bot {
         let permissions = Arc::clone(&hooks.permissions);
         let event_types = gateway_event_types(
             needs_messages,
-            slash.is_some() || events.interaction_handlers.has_handlers(),
+            slash.is_some()
+                || events.interaction_handlers.has_handlers()
+                || confirmations.0.is_some(),
             permission_cache_events(needs_messages && permissions.cache_enabled(), intents),
         ) | handler_events
             | waiters.event_types()
@@ -652,7 +679,7 @@ impl Bot {
             voice_gateway.as_ref(),
             member_query.0.as_ref(),
         );
-        gateways.configure_guild_lifecycle(events.has_guild_lifecycle_handlers());
+        gateways.configure_event_trackers(&events);
         let (event_tx, event_queue) = mpsc::channel(limits.queue_capacity);
         let (text_ingress, handle_text) =
             commands::text_workers(text_commands, limits, &http, &permissions, &hooks);
@@ -689,8 +716,18 @@ impl Bot {
         let handle_busy = work_queue::respond(busy_queue, limits.notice_workers, |pending| {
             respond_interaction_busy(pending, &http, &hooks)
         });
+        let (confirmation_tx, handle_confirmation) = confirmations.worker(&http, &hooks, limits);
+        let interaction_ingress = GatewayInteractionIngress {
+            events: &events,
+            slash,
+            interactions: &interactions,
+            confirmations: confirmation_tx.as_ref(),
+            busy: &busy,
+            hooks: &hooks,
+        };
 
         waiters.activate();
+        confirmations.activate();
         let receive = gateways.drive(
             event_types,
             GatewayDecodeOptions {
@@ -702,7 +739,7 @@ impl Bot {
             |gateway, event| {
                 waiters.observe_reaction(&event);
                 let shard = gateway.id();
-                let lifecycle = gateway.observe_guild_lifecycle(&event);
+                let derived = gateway.observe_derived_gateway_event(&event);
                 let cache = message_cache.as_ref().map(|cache| cache.shard(shard));
                 let Some((event, radio)) = route_gateway_event(
                     event,
@@ -714,7 +751,7 @@ impl Bot {
                     (
                         cache,
                         member_cache.as_ref().map(|cache| cache.shard(shard)),
-                        lifecycle,
+                        derived,
                     ),
                 ) else {
                     return;
@@ -738,19 +775,8 @@ impl Bot {
                     Event::MessageCreate(message) => {
                         message_ingress.route(message.message, gateway.own_id(), gateway_rtt, cache)
                     }
-                    Event::InteractionCreate(interaction)
-                        if events.interaction_handlers.accepts(&interaction.0)
-                            || slash.is_some_and(|commands| commands.accepts(&interaction.0)) =>
-                    {
-                        let payload = InteractionEvent {
-                            interaction: interaction.0,
-                            radio,
-                        };
-                        if let Err(error) =
-                            interactions.try_send(Pending::new(payload, gateway_rtt))
-                        {
-                            queue_busy_response(&busy, error.into_inner(), &hooks);
-                        }
+                    Event::InteractionCreate(interaction) => {
+                        interaction_ingress.route(interaction.0, radio, gateway_rtt)
                     }
                     Event::GatewayClose(Some(frame)) => {
                         hooks.reporter.report(
@@ -765,7 +791,13 @@ impl Bot {
         );
 
         let workers = async {
-            tokio::join!(handle_events, handle_text, handle_interactions, handle_busy);
+            tokio::join!(
+                handle_events,
+                handle_text,
+                handle_interactions,
+                handle_busy,
+                handle_confirmation
+            );
         };
         tokio::pin!(workers);
         let stopped = BootstrapWorker::drive(
@@ -778,6 +810,7 @@ impl Bot {
         )
         .await;
         member_query.close();
+        confirmations.close();
         waiters.close();
         suspend_member_reads(member_cache.as_ref());
         if let Err(error) = stopped {
@@ -787,9 +820,47 @@ impl Bot {
             return Err(error);
         }
 
-        drop((event_tx, text_ingress, interactions, busy));
+        drop((event_tx, text_ingress, interactions, busy, confirmation_tx));
         shutdown::finish(gateways.close(), workers).await;
         Ok(())
+    }
+}
+
+struct GatewayInteractionIngress<'a> {
+    events: &'a Events,
+    slash: Option<&'a slash::ActiveSlashCommands>,
+    interactions: &'a mpsc::Sender<Pending<InteractionEvent>>,
+    confirmations: Option<&'a mpsc::Sender<Pending<InteractionEvent>>>,
+    busy: &'a mpsc::Sender<Pending<InteractionEvent>>,
+    hooks: &'a Hooks,
+}
+
+impl GatewayInteractionIngress<'_> {
+    fn route(
+        &self,
+        interaction: Interaction,
+        radio: Vec<RadioSubmission>,
+        gateway_rtt: Option<Duration>,
+    ) {
+        let queue = if let Some(queue) = self.confirmations
+            && Confirmations::accepts(&interaction)
+        {
+            queue
+        } else if self.events.interaction_handlers.accepts(&interaction)
+            || self
+                .slash
+                .is_some_and(|commands| commands.accepts(&interaction))
+        {
+            self.interactions
+        } else {
+            return;
+        };
+        if let Err(error) = queue.try_send(Pending::new(
+            InteractionEvent { interaction, radio },
+            gateway_rtt,
+        )) {
+            queue_busy_response(self.busy, error.into_inner(), self.hooks);
+        }
     }
 }
 
@@ -974,7 +1045,7 @@ fn update_permission_cache(permissions: &PermissionResolver, event: &Event, shar
 
 enum MessageEvent {
     Ready(Box<Ready>),
-    GuildLifecycle(GuildLifecycleEvent, Option<Box<Event>>),
+    DerivedGateway(DerivedGatewayEvent, Option<Box<Event>>),
     Message(Pending<Arc<Message>>),
     Update(Box<MessageUpdate>, Option<CachedMessageEdit>),
     Delete(MessageDelete, Option<Arc<Message>>),
@@ -984,6 +1055,11 @@ enum MessageEvent {
     Gateway(Box<Event>),
     VoiceNotification(VoiceNotification),
     CachedMember(Box<CachedMemberEvent>, Option<Box<Event>>),
+}
+
+enum DerivedGatewayEvent {
+    GuildLifecycle(GuildLifecycleEvent),
+    VoiceState(VoiceStateTransition),
 }
 
 struct InteractionEvent {
@@ -1037,10 +1113,10 @@ fn route_gateway_event(
     queue: &mpsc::Sender<MessageEvent>,
     reporter: &Reporter,
     shard: ShardId,
-    (cache, members, lifecycle): (
+    (cache, members, derived): (
         Option<MessageCacheRoute<'_>>,
         Option<MemberCacheRoute<'_>>,
-        Option<GuildLifecycleEvent>,
+        Option<DerivedGatewayEvent>,
     ),
 ) -> Option<(Event, Vec<RadioSubmission>)> {
     let event = match members {
@@ -1072,12 +1148,12 @@ fn route_gateway_event(
         update_permission_cache(permissions, &event, shard);
     }
     let name = events.gateway_event_name(&event);
-    if let Some(lifecycle) = lifecycle {
+    if let Some(derived) = derived {
         let raw = name.map(|_| Box::new(event));
         queue_event(
             queue,
-            MessageEvent::GuildLifecycle(lifecycle, raw),
-            "GUILD_LIFECYCLE",
+            MessageEvent::DerivedGateway(derived, raw),
+            "GATEWAY_DERIVED",
             reporter,
         );
         return None;
@@ -1208,11 +1284,18 @@ async fn dispatch_events(
     while let Some(event) = queue.recv().await {
         match event {
             MessageEvent::Ready(ready) => events.ready(&ready, &hooks.reporter).await,
-            MessageEvent::GuildLifecycle(event, raw) => {
+            MessageEvent::DerivedGateway(event, raw) => {
                 if let Some(raw) = raw {
                     events.gateway(&raw, &hooks.reporter).await;
                 }
-                events.guild_lifecycle(&event, &hooks.reporter).await;
+                match event {
+                    DerivedGatewayEvent::GuildLifecycle(event) => {
+                        events.guild_lifecycle(&event, &hooks.reporter).await
+                    }
+                    DerivedGatewayEvent::VoiceState(event) => {
+                        events.voice_state_transition(&event, &hooks.reporter).await
+                    }
+                }
             }
             MessageEvent::Update(update, cached) => {
                 events.message_update(&update, &hooks.reporter).await;
@@ -1344,7 +1427,14 @@ fn handler_event_types(events: &Events, intents: Intents) -> Result<EventTypeFla
         EventTypeFlags::empty()
     };
     check_event_intents(intents, guild_lifecycle, Intents::GUILDS)?;
-    Ok(message_lifecycle | reactions | activity | gateway | guild_lifecycle)
+    let voice_states = if events.voice_state_capacity().is_some() {
+        voice_state_cache::VOICE_STATE_CACHE_EVENTS
+    } else {
+        EventTypeFlags::empty()
+    };
+    check_event_intents(intents, voice_states, Intents::GUILDS)?;
+    check_event_intents(intents, voice_states, Intents::GUILD_VOICE_STATES)?;
+    Ok(message_lifecycle | reactions | activity | gateway | guild_lifecycle | voice_states)
 }
 
 fn check_reaction_intents(intents: Intents, events: EventTypeFlags) -> Result<()> {

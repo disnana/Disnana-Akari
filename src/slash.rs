@@ -1561,6 +1561,11 @@ impl std::fmt::Debug for SlashContext<'_> {
 }
 
 impl<'a> SlashContext<'a> {
+    /// このコマンドを呼び出した Interaction の ID です。
+    pub fn interaction_id(&self) -> Id<twilight_model::id::marker::InteractionMarker> {
+        self.initial.interaction.id
+    }
+
     async fn reply_fallback(&mut self, text: &str, check_failed: bool) -> Result<()> {
         match *self.response_state {
             ResponseState::Pending => self.reply_ephemeral(text).await,

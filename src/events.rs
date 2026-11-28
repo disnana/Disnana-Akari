@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Arc};
 
 use twilight_gateway::{Event, EventTypeFlags, Intents};
 use twilight_model::channel::Message;
@@ -33,7 +33,7 @@ pub(crate) use voice_notifications::{VoiceNotification, VoiceNotificationTypes};
 use crate::{
     ButtonContext, CachedMessageEdit, ChannelSelectContext, ErrorSource, GuildLifecycleEvent,
     MentionableSelectContext, MessageUpdate, ModalContext, Result, RoleSelectContext,
-    SelectContext, UserSelectContext, error::adapt_handler, hooks::Reporter,
+    SelectContext, UserSelectContext, VoiceStateTransition, error::adapt_handler, hooks::Reporter,
     interactions::InteractionHandlers,
 };
 
@@ -42,6 +42,8 @@ use crate::{
 pub struct Events {
     ready: Vec<Box<dyn Handler<Ready>>>,
     guild_lifecycle: Vec<Box<dyn Handler<GuildLifecycleEvent>>>,
+    voice_state_transitions: Vec<Box<dyn Handler<VoiceStateTransition>>>,
+    voice_state_capacity: Option<NonZeroUsize>,
     message: Vec<Box<dyn Handler<Message>>>,
     message_update: Vec<Box<dyn Handler<MessageUpdate>>>,
     message_delete: Vec<Box<dyn Handler<MessageDelete>>>,
@@ -60,6 +62,7 @@ impl std::fmt::Debug for Events {
         f.debug_struct("Events")
             .field("ready_handlers", &self.ready.len())
             .field("guild_lifecycle_handlers", &self.guild_lifecycle.len())
+            .field("voice_state_handlers", &self.voice_state_transitions.len())
             .field("message_handlers", &self.message.len())
             .field("message_update_handlers", &self.message_update.len())
             .field("message_delete_handlers", &self.message_delete.len())
@@ -114,6 +117,37 @@ impl Events {
 
     pub(crate) fn has_guild_lifecycle_handlers(&self) -> bool {
         !self.guild_lifecycle.is_empty()
+    }
+
+    /// メンバーの音声状態の変更を、直前の状態とあわせて受け取ります。
+    ///
+    /// `GUILDS` と `GUILD_VOICE_STATES` Intent が必要です。直前の記録がない場合は
+    /// [`VoiceStateTransition::before`] が `None` になります。
+    pub fn on_voice_state_transition<E>(
+        &mut self,
+        handler: impl AsyncFn(&VoiceStateTransition) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.voice_state_transitions.push(Box::new(
+            adapt_handler!(handler, event: &VoiceStateTransition),
+        ));
+    }
+
+    /// 直前の音声状態を保持する件数を、シャード単位で指定します。既定は 1,024 件です。
+    pub fn set_voice_state_cache_capacity(&mut self, capacity: NonZeroUsize) {
+        self.voice_state_capacity = Some(capacity);
+    }
+
+    pub(crate) fn voice_state_capacity(&self) -> Option<NonZeroUsize> {
+        if self.voice_state_transitions.is_empty() {
+            None
+        } else {
+            self.voice_state_capacity.or(NonZeroUsize::new(1_024))
+        }
     }
 
     /// サーバーで人が送信した新着メッセージを受け取る関数を追加します。
@@ -414,6 +448,20 @@ impl Events {
 
     pub(crate) async fn guild_lifecycle(&self, event: &GuildLifecycleEvent, reporter: &Reporter) {
         dispatch(&self.guild_lifecycle, event, "GUILD_LIFECYCLE", reporter).await;
+    }
+
+    pub(crate) async fn voice_state_transition(
+        &self,
+        event: &VoiceStateTransition,
+        reporter: &Reporter,
+    ) {
+        dispatch(
+            &self.voice_state_transitions,
+            event,
+            "VOICE_STATE_UPDATE",
+            reporter,
+        )
+        .await;
     }
 
     pub(crate) async fn message(&self, event: &Message, reporter: &Reporter) {

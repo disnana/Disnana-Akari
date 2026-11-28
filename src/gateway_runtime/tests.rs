@@ -26,8 +26,10 @@ use crate::{
 
 use super::lost_gateway_session;
 
+mod confirmations;
 mod permissions_on_reconnect;
 mod voice_handshake;
+mod voice_transitions;
 
 const FIXTURE_TOKEN: &str = "local-gateway-fixture";
 const HELLO: &str = r#"{"op":10,"d":{"heartbeat_interval":60000}}"#;

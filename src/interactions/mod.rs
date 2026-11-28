@@ -530,6 +530,11 @@ impl<'a> ButtonContext<'a> {
         self.custom_id
     }
 
+    /// このボタンを押した Interaction の ID です。
+    pub fn interaction_id(&self) -> Id<twilight_model::id::marker::InteractionMarker> {
+        self.initial.interaction.id
+    }
+
     /// 動的な名前空間で登録したハンドラーに、ID の名前空間と値を返します。
     pub fn dynamic_id(&self) -> Option<DynamicIdRef<'a>> {
         self.dynamic_id

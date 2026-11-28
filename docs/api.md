@@ -763,3 +763,8 @@ async fn ready(_event: &Ready) -> Result<()> {
     Ok(())
 }
 ```
+
+## 確認セッションと音声状態
+
+- `Bot::with_confirmations` は `ConfirmationLimits` を受け取り、Bot と `Confirmations` を返します。`Confirmations::begin` で `Confirmation` を作り、元のメッセージに `bind` して `ConfirmationOutcome` を待ちます。登録・関連付けの失敗は `ConfirmationError` で返ります。`ConfirmationStop` は待機中の確認を別の処理から終了するハンドルです。
+- `Events::on_voice_state_transition` は `VoiceStateTransition` を渡します。変更前と変更後の `VoiceStateSnapshot` からチャンネルと状態を参照できます。以前の状態が不明なら `before()` は `None` です。このイベントには `GUILDS` と `GUILD_VOICE_STATES` の両方が必要です。

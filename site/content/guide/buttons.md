@@ -290,6 +290,42 @@ fn register_project_buttons(events: &mut Events) -> Result<()> {
 
 再起動時にも同じ機能名で登録すると、Discord に残っているボタンを処理できます。Akari は個々のメッセージを保存しません。対象や権限は操作のたびにアプリ側で確認し、識別子に機密情報を入れないでください。選択メニューとモーダルも同じ方法で登録できます。
 
+## 確定か取消を期限付きで待つ
+
+`Bot::with_confirmations` で確認セッションを有効にします。返信を送ってから `bind` でそのメッセージを登録すると、待っている間に実行者本人が押したボタンだけを受け付けます。`wait` は確定、取消、期限切れなどを返します。
+
+```rust
+use disnana_akari::{Bot, ConfirmationLimits, ConfirmationOutcome, Confirmations, Error, Result, SlashContext};
+use disnana_akari::ui::{Button, UiMessage};
+use std::time::Duration;
+
+fn configure(bot: Bot) -> Result<(Bot, Confirmations)> {
+    bot.with_confirmations(ConfirmationLimits::default()).map_err(Error::handler)
+}
+
+async fn confirm(ctx: &mut SlashContext<'_>, confirmations: &Confirmations) -> Result<()> {
+    let owner = ctx.author_id().ok_or_else(|| Error::msg("実行者が分かりません"))?;
+    let confirmation = confirmations
+        .begin(ctx.interaction_id(), owner, Duration::from_secs(30))
+        .map_err(Error::handler)?;
+    let prompt = UiMessage::new().content("保存しますか？").buttons(vec![
+        Button::success(confirmation.confirm_id(), "確定"),
+        Button::danger(confirmation.cancel_id(), "取消"),
+    ]);
+    ctx.reply_ui_ephemeral(&prompt).await?;
+    let source = ctx.original_response().await?;
+    confirmation.bind(ctx.guild_id(), &source).map_err(Error::handler)?;
+    let text = if confirmation.wait().await == ConfirmationOutcome::Confirmed {
+        "確定を受け付けました。"
+    } else {
+        "確認を終了しました。"
+    };
+    ctx.edit_original_ui(&UiMessage::new().content(text)).await
+}
+```
+
+確認ボタンはコマンドと別の処理枠で応答します。セッションを有効にすると `akari-confirm:` から始まる ID は確認用に予約されます。セッションはメモリ内にあり、Bot の停止時に終了します。別の処理から終了する場合は `stop_handle().stop()` を使います。
+
 ## 受け取れる情報
 
 | メソッド | 返す値 |

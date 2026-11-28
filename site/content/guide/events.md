@@ -379,6 +379,27 @@ async fn names(query: &MemberQuery, guild: Id<GuildMarker>, prefix: &str) -> Res
 
 この API は空の名前での全件取得やプレゼンスの取得を扱いません。名前の先頭と ID の照会に特権 Intent を自動追加する必要はありません。 Bot が対象サーバーに参加し、そのシャードが準備できている必要があります。 [Discord の Request Guild Members](https://docs.discord.com/developers/events/gateway-events#request-guild-members) · [discord.py の query_members](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.Guild.query_members)
 
+## メンバーの音声状態の変更前後を受け取る
+
+`on_voice_state_transition` は接続、移動、退出、ミュートなどの変化を通知します。`before()` が `None` の場合は以前の状態が不明です。スナップショットの `channel_id()` が `None` の場合は、その状態でチャンネルに接続していません。
+
+```rust
+use disnana_akari::{Bot, Events};
+use disnana_akari::model::gateway::Intents;
+
+fn configure(bot: Bot, events: &mut Events) -> Bot {
+    events.on_voice_state_transition(async |change| -> disnana_akari::Result<()> {
+        let old = change.before().and_then(|state| state.channel_id());
+        let new = change.after().channel_id();
+        println!("{old:?} -> {new:?}");
+        Ok(())
+    });
+    bot.add_intents(Intents::GUILDS | Intents::GUILD_VOICE_STATES)
+}
+```
+
+キャッシュは登録した場合に作成し、シャードごとに既定で最大1,024件を保持します。`Events::set_voice_state_cache_capacity` で上限を指定できます。元の Gateway 通知も登録している場合は、同じイベントについて元の通知を先に処理します。
+
 ## ボイスチャンネルの効果音とサウンドボード
 
 `Events::on_voice_channel_effect_send` は、VC の絵文字アニメーションやサウンドボードで音が鳴った通知を受け取ります。`GUILD_VOICE_STATES` Intent を指定します。
