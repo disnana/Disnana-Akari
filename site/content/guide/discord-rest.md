@@ -125,10 +125,10 @@ async fn schedule(
 ## 絵文字・投票・有料機能を扱う
 
 ```rust
-use disnana_akari::{Result, http::Client};
+use disnana_akari::{EntitlementPages, Error, Result, SubscriptionPages, http::Client};
 use disnana_akari::model::{
     channel::Message,
-    id::{Id, marker::{ApplicationMarker, GuildMarker, UserMarker}},
+    id::{Id, marker::{ApplicationMarker, GuildMarker, SkuMarker, UserMarker}},
 };
 
 async fn guild_catalog(http: &Client, guild: Id<GuildMarker>) -> Result<(usize, usize)> {
@@ -146,17 +146,35 @@ async fn entitlement_count(
     app: Id<ApplicationMarker>,
     user: Id<UserMarker>,
 ) -> Result<usize> {
-    let page = http.entitlements(app)
+    let mut pages = EntitlementPages::new(http, app)
         .user_id(user)
         .exclude_ended(true)
-        .await?
-        .models()
-        .await?;
-    Ok(page.len())
+        .exclude_deleted(true);
+    let mut count = 0;
+    while let Some(page) = pages.next_page().await.map_err(Error::handler)? {
+        count += page.len();
+    }
+    Ok(count)
+}
+
+async fn print_subscriptions(
+    http: &Client,
+    sku: Id<SkuMarker>,
+    user: Id<UserMarker>,
+) -> Result<()> {
+    let mut pages = SubscriptionPages::new(http, sku, user);
+    while let Some(page) = pages.next_page().await.map_err(Error::handler)? {
+        for subscription in page {
+            println!("購読 ID {}", subscription.id);
+        }
+    }
+    Ok(())
 }
 ```
 
-投票の終了はその投票を投稿した Bot が行います。有料機能の例で取得するのは、指定ユーザーの有効期限が切れていない権利の先頭ページです。利用可否を判定する処理では対象 SKU、ユーザーまたはサーバー、消費済みかどうかを確認し、必要に応じて末尾の ID を `after` に渡して続きも読みます。[絵文字 API](https://docs.discord.com/developers/resources/emoji) · [投票 API](https://docs.discord.com/developers/resources/poll) · [Entitlement API](https://docs.discord.com/developers/resources/entitlement)
+投票の終了はその投票を投稿した Bot が行います。有料機能の一覧は最大100件ずつ取得します。`EntitlementPages` では対象ユーザー、サーバー、SKU を絞り込み、期限切れと削除済みを個別に除外できます。`SubscriptionPages` を Bot トークンで使うには SKU とユーザーの ID が必要です。取得失敗時は同じ位置から再試行できます。 [絵文字 API](https://docs.discord.com/developers/resources/emoji) · [投票 API](https://docs.discord.com/developers/resources/poll) · [Entitlement API](https://docs.discord.com/developers/resources/entitlement#list-entitlements) · [Subscription API](https://docs.discord.com/developers/resources/subscription#list-sku-subscriptions)
+
+スラッシュコマンドでは `ctx.entitlements()` で今回の Interaction に Discord が付けた購入権利を参照できます。ハイブリッドや共通チェックからも参照でき、テキスト呼び出しでは `None` です。利用可否を判定するときは対象 SKU、利用者またはサーバー、有効期間、消費や削除の状態をアプリ側で確認します。特典の利用可否には購入権利を使い、購読状態は契約の表示や運用に使います。 [Discord の購入権利](https://docs.discord.com/developers/resources/entitlement)
 
 ## エラーを処理する
 

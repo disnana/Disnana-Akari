@@ -1,7 +1,9 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use twilight_model::{
-    application::{command::CommandType, interaction::Interaction},
+    application::{
+        command::CommandType, interaction::Interaction, monetization::entitlement::Entitlement,
+    },
     guild::Permissions,
     id::{
         Id,
@@ -146,6 +148,16 @@ impl<'a> CommandCheckContext<'a> {
         match self.origin {
             Origin::Text { .. } => CommandCheckSource::Text,
             Origin::Application { kind, .. } => kind,
+        }
+    }
+
+    /// Discord がアプリコマンドの Interaction に付けた購入権利を借ります。
+    ///
+    /// テキストの呼び出しでは `None` です。対象 SKU や利用条件はアプリが確認します。
+    pub fn entitlements(&self) -> Option<&'a [Entitlement]> {
+        match self.origin {
+            Origin::Text { .. } => None,
+            Origin::Application { interaction, .. } => Some(&interaction.entitlements),
         }
     }
 

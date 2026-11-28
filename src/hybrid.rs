@@ -4,6 +4,7 @@ use twilight_model::{
     application::{
         command::{CommandOption, CommandOptionType},
         interaction::application_command::CommandOptionValue,
+        monetization::entitlement::Entitlement,
     },
     guild::Permissions,
     id::{
@@ -260,6 +261,17 @@ impl<'a> HybridContext<'a> {
         match &self.inner {
             SourceContext::Text { ctx, .. } => Some(ctx.context().message().author.id),
             SourceContext::Slash(ctx) => ctx.author_id(),
+        }
+    }
+
+    /// Discord がスラッシュの呼び出しに付けた購入権利を借ります。
+    ///
+    /// テキストでの呼び出しは `None`、スラッシュで通知された購入権利がない場合は
+    /// `Some(&[])` です。
+    pub fn entitlements(&self) -> Option<&'a [Entitlement]> {
+        match &self.inner {
+            SourceContext::Text { .. } => None,
+            SourceContext::Slash(ctx) => Some(ctx.entitlements()),
         }
     }
 

@@ -14,6 +14,7 @@ mod concurrency;
 mod confirmation;
 mod confirmation_runtime;
 mod cooldown;
+mod entitlement_pages;
 mod error;
 mod event_waiters;
 mod events;
@@ -50,6 +51,7 @@ mod shutdown;
 mod slash;
 pub mod soundboard;
 mod startup_readiness;
+mod subscription_pages;
 mod thread_pages;
 mod timing;
 mod typing_indicator;
@@ -106,6 +108,7 @@ pub use confirmation::{
     Confirmations,
 };
 pub use cooldown::Cooldown;
+pub use entitlement_pages::{EntitlementPages, EntitlementPagesError};
 pub use error::{
     CheckFailure, CommandSyncError, Error, HandlerError, HandlerKind, HierarchyDenied,
     InvalidArgument, QueueKind, RegistrationError, ResponseStateError, SelectionError,
@@ -158,6 +161,7 @@ pub use slash::{
     SlashCommands, SlashContext, UserMenuTarget,
 };
 pub use startup_readiness::{StartupReadiness, StartupReport, StartupShardReport, StartupWarmup};
+pub use subscription_pages::{SubscriptionPages, SubscriptionPagesError};
 pub use thread_pages::{ThreadPages, ThreadPagesError};
 pub use timing::Timing;
 pub use twilight_http as http;

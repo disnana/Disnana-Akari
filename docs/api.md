@@ -800,3 +800,5 @@ async fn ready(_event: &Ready) -> Result<()> {
 - `AuditLogPages` は監査ログをページ単位で取得し、エントリーと関連データを返します。実行者と操作種別で絞り込めます。失敗時は `AuditLogPagesError` が返ります。
 - `ScheduledEventUserPages` は予定イベントに登録したユーザーを ID でページ取得し、必要ならメンバー情報も要求できます。失敗時は `ScheduledEventUserPagesError` が返ります。
 - `PinPages` はチャンネル内のピン留めを日時の新しい順に読みます。各項目にメッセージとピン留め日時が含まれ、失敗時は `PinPagesError` が返ります。
+- `EntitlementPages` と `SubscriptionPages` は購入権利とサブスクリプションを最大100件ずつ取得します。エラーは `EntitlementPagesError` と `SubscriptionPagesError` で区別できます。
+- `SlashContext::entitlements`、`HybridContext::entitlements`、`CommandCheckContext::entitlements` は Discord が今回の Interaction に含めた購入権利を借ります。テキストの呼び出しには Interaction の購入権利がありません。

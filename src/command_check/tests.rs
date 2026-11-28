@@ -81,3 +81,49 @@ async fn bot_check_rejection_stops_both_layers() {
     ));
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+fn entitlements_distinguish_application_data_from_text() {
+    let http = offline_http();
+    let permissions = PermissionResolver::new(None);
+    let mut interaction = slash_interaction(true, 0, 0);
+    interaction.entitlements.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "24", "sku_id": "25", "application_id": interaction.application_id.to_string(),
+            "type": 8, "deleted": false, "user_id": "26"
+        }))
+        .unwrap(),
+    );
+    let access = Access::for_interaction(&http, &permissions, &interaction);
+    let ctx = CommandCheckContext::application(
+        &interaction,
+        access,
+        CommandCheckSource::Application(CommandType::ChatInput),
+        "premium",
+        &[],
+    );
+    assert!(std::ptr::eq(
+        ctx.entitlements().unwrap(),
+        interaction.entitlements.as_slice()
+    ));
+
+    let message = serde_json::from_value(serde_json::json!({
+        "id": "10", "channel_id": "3", "type": 0,
+        "author": {"id": "26", "username": "fixture", "discriminator": "0"},
+        "content": "!premium", "timestamp": "2026-01-01T00:00:00+00:00",
+        "attachments": [], "embeds": [], "mention_everyone": false,
+        "mention_roles": [], "mentions": [], "pinned": false, "tts": false
+    }))
+    .unwrap();
+    let message_context = Context {
+        http: &http,
+        message: &message,
+        timing: crate::timing::Pending::new((), None).begin().1,
+        permissions: &permissions,
+    };
+    assert!(
+        CommandCheckContext::text(&message_context, "premium")
+            .entitlements()
+            .is_none()
+    );
+}

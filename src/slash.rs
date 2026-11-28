@@ -16,6 +16,7 @@ use twilight_model::{
             Interaction, InteractionData, InteractionDataResolved, InteractionType,
             application_command::{CommandData, CommandDataOption, CommandOptionValue},
         },
+        monetization::entitlement::Entitlement,
     },
     channel::message::{AllowedMentions, MessageFlags},
     guild::Permissions,
@@ -1597,6 +1598,13 @@ impl<'a> SlashContext<'a> {
     /// コマンドが呼ばれたサーバーの ID を返します。DM では `None` です。
     pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
         self.initial.interaction.guild_id
+    }
+
+    /// Discord が今回の Interaction に付けた購入権利を借ります。
+    ///
+    /// 対象 SKU、利用者またはサーバー、消費や有効期間の扱いはアプリ側で確認します。
+    pub fn entitlements(&self) -> &'a [Entitlement] {
+        &self.initial.interaction.entitlements
     }
 
     /// Discord で呼び出したユーザーが選んでいるロケールを返します。
