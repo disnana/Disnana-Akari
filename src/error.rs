@@ -505,9 +505,6 @@ pub enum ResponseStateError {
     /// 公開の遅延応答の後に、本人にだけ見える応答へは変えられません。
     #[error("遅延応答の公開範囲は変更できません")]
     VisibilityLocked,
-    /// 投票は公開の応答でのみ送信できます。
-    #[error("投票を返すには公開の初回応答か公開の defer を使ってください")]
-    PollRequiresPublicResponse,
     /// 追加メッセージは、最初の応答を送ってからでないと送れません。
     #[error("追加メッセージを送る前に、最初の応答（reply など）を送ってください")]
     FollowupBeforeResponse,
@@ -532,6 +529,9 @@ pub enum ResponseStateError {
     /// モーダルを開いたメッセージが送信データに含まれていません。
     #[error("更新できる元のメッセージがありません")]
     SourceMessageUnavailable,
+    /// 投票は公開の応答でのみ送信できます。
+    #[error("投票を返すには公開の初回応答か公開の defer を使ってください")]
+    PollRequiresPublicResponse,
 }
 
 /// Discord が送った選択内容を、読み取れなかった理由です。
