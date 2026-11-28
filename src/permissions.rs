@@ -5,10 +5,33 @@
 //! 計算そのものは、Twilight 公式の `twilight-util` の権限計算を使う。
 
 use std::{
+    cmp::Reverse,
     collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+/// Discord のロール階層。@everyone は常に最下位。同じ位置では小さい ID が上位。
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct RoleRank(Option<(i64, Reverse<Id<RoleMarker>>)>);
+
+impl RoleRank {
+    pub(crate) fn new(guild_id: Id<GuildMarker>, id: Id<RoleMarker>, position: i64) -> Self {
+        Self((id.get() != guild_id.get()).then_some((position, Reverse(id))))
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn role_rank_orders_equal_positions_by_id_and_places_everyone_last() {
+    let guild = Id::new(20);
+    let higher = RoleRank::new(guild, Id::new(100), 5);
+    let lower = RoleRank::new(guild, Id::new(101), 5);
+    let different_position = RoleRank::new(guild, Id::new(102), 6);
+    let everyone = RoleRank::new(guild, Id::new(20), 99);
+    assert!(different_position > higher && higher > lower && lower > everyone);
+    assert_eq!(everyone, RoleRank::default());
+}
 
 use tokio::sync::OnceCell;
 use twilight_http::Client;
@@ -59,18 +82,30 @@ pub(crate) struct GuildInfo {
 }
 
 impl GuildInfo {
-    /// メンバーの最上位ロールの位置を返す。ロールが無ければ @everyone と同じ 0。
-    pub(crate) fn top_position(&self, member_roles: &[Id<RoleMarker>]) -> i64 {
-        member_roles
-            .iter()
-            .filter_map(|id| self.positions.get(id).copied())
-            .max()
-            .unwrap_or(0)
-            .max(0)
+    /// メンバーの最上位ロールを返す。所属ロールに不明なものがあれば階層を確定できない。
+    pub(crate) fn top_role(
+        &self,
+        guild_id: Id<GuildMarker>,
+        member_roles: &[Id<RoleMarker>],
+    ) -> std::result::Result<RoleRank, CheckFailure> {
+        let mut top = RoleRank::default();
+        for &id in member_roles {
+            let rank = self
+                .role_rank(guild_id, id)
+                .ok_or(CheckFailure::PermissionsUnavailable)?;
+            top = top.max(rank);
+        }
+        Ok(top)
     }
 
-    pub(crate) fn role_position(&self, id: Id<RoleMarker>) -> Option<i64> {
-        self.positions.get(&id).copied()
+    pub(crate) fn role_rank(
+        &self,
+        guild_id: Id<GuildMarker>,
+        id: Id<RoleMarker>,
+    ) -> Option<RoleRank> {
+        self.positions
+            .get(&id)
+            .map(|&position| RoleRank::new(guild_id, id, position))
     }
 
     /// メンバーの、サーバー全体の権限（チャンネルの上書きを含まない）。
@@ -308,6 +343,9 @@ impl PermissionResolver {
                 &channel,
                 parent.as_ref(),
             )? {
+                if roles.iter().any(|id| !guild.value.roles.contains_key(id)) {
+                    return Err(CheckFailure::PermissionsUnavailable.into());
+                }
                 return Ok(compute(
                     guild_id,
                     user_id,
@@ -375,6 +413,9 @@ impl PermissionResolver {
         let slot = self.slot(id, guild_id, |cache| &mut cache.channels)?;
         Snapshot::load(slot, async || {
             let channel = http.channel(id).await?.model().await?;
+            if channel.guild_id != Some(guild_id) {
+                return Err(CheckFailure::PermissionsUnavailable.into());
+            }
             Ok(ChannelInfo {
                 kind: channel.kind,
                 parent_id: channel.parent_id,
@@ -382,6 +423,15 @@ impl PermissionResolver {
             })
         })
         .await
+    }
+
+    pub(crate) async fn channel_kind(
+        &self,
+        http: &Client,
+        guild_id: Id<GuildMarker>,
+        id: Id<ChannelMarker>,
+    ) -> Result<ChannelType> {
+        Ok(self.channel(http, guild_id, id).await?.value.kind)
     }
 
     fn slot<K: Copy + std::hash::Hash + Eq, T>(
@@ -408,10 +458,14 @@ fn reserve_slot<K: Copy + std::hash::Hash + Eq, T>(
     ttl: Duration,
 ) -> std::result::Result<Arc<CacheSlot<T>>, CheckFailure> {
     if let Some(old) = map.get(&key) {
-        if old
-            .data
-            .get()
-            .is_none_or(|data| data.fetched.elapsed() < ttl)
+        if old.guild_id != guild_id && old.data.get().is_some() {
+            return Err(CheckFailure::PermissionsUnavailable);
+        }
+        if old.guild_id == guild_id
+            && old
+                .data
+                .get()
+                .is_none_or(|data| data.fetched.elapsed() < ttl)
         {
             return Ok(Arc::clone(old));
         }

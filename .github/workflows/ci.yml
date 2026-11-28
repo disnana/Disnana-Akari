@@ -117,7 +117,7 @@ jobs:
         with:
           cache-bin: 'false'
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Check public API against v0.2.1
+      - name: Check public API against v0.3.0
         shell: bash
         run: |
           archive="$RUNNER_TEMP/cargo-semver-checks.tar.gz"

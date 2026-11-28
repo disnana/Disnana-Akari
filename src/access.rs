@@ -19,7 +19,7 @@ use twilight_model::{
 use crate::{
     CheckFailure, CommandCheck, CommandCheckContext, HierarchyDenied, Result,
     overwrite::{Overwrite, OverwriteTarget},
-    permissions::{PermissionResolver, check_permissions},
+    permissions::{PermissionResolver, RoleRank, check_permissions},
     slash::interaction_channel_id,
 };
 
@@ -449,6 +449,15 @@ impl<'a> Access<'a> {
         self.member_permissions(guild_id, channel_id, bot_id).await
     }
 
+    pub(crate) async fn managed_channel_kind(
+        &self,
+        channel: Id<ChannelMarker>,
+    ) -> Result<twilight_model::channel::ChannelType> {
+        self.resolver
+            .channel_kind(self.http, self.require_guild()?, channel)
+            .await
+    }
+
     /// チャンネルにある、1 つの対象の権限の上書きを読みます。上書きがなければ `None` です。
     ///
     /// キャッシュは使わず、そのときの設定を取得します。
@@ -461,7 +470,11 @@ impl<'a> Access<'a> {
         channel_id: Id<ChannelMarker>,
         target: OverwriteTarget,
     ) -> Result<Option<Overwrite>> {
+        let guild_id = self.require_guild()?;
         let channel = self.http.channel(channel_id).await?.model().await?;
+        if channel.guild_id != Some(guild_id) {
+            return Err(CheckFailure::PermissionsUnavailable.into());
+        }
         Ok(channel
             .permission_overwrites
             .unwrap_or_default()
@@ -474,8 +487,8 @@ impl<'a> Access<'a> {
 
     /// チャンネルで、1 つの対象の権限の上書きを設定します。ほかの対象の設定は変えません。
     ///
-    /// 送る前に、Bot が `MANAGE_ROLES` を持つこと、許可または拒否する権限を Bot 自身が持つこと
-    /// （管理者は除く）を確認します。足りなければ、通信せずに失敗します。
+    /// 書き込む前に、変更先の Bot の `MANAGE_ROLES` を確認します。
+    /// 許可・拒否を設定できる権限は、サーバーや親チャンネルの権限も関わるため、Discord が判定します。
     /// **実行した人に操作してよいかは、確認しません。** 呼ぶ前に、
     /// [`require_permissions`](Self::require_permissions) などで確認してください。
     /// `reason` は監査ログに残る理由で、512 文字以内です。
@@ -493,8 +506,7 @@ impl<'a> Access<'a> {
     ) -> Result<()> {
         let guild_id = self.require_guild()?;
         let held = self.bot_permissions_in(guild_id, channel_id).await?;
-        let required = Permissions::MANAGE_ROLES | overwrite.touched();
-        check_bot_can_grant(held, required)?;
+        check_bot_can_grant(held, Permissions::MANAGE_ROLES)?;
         self.http
             .update_channel_permission(channel_id, &overwrite.into_request(target))
             .reason(reason)
@@ -565,7 +577,9 @@ impl<'a> Access<'a> {
         )?;
         let root = info.root_permissions(guild_id, bot_id, &bot_member.roles);
         check_bot_can_grant(root, Permissions::MANAGE_ROLES | permissions)?;
-        if info.top_position(&bot_member.roles) <= role.position {
+        if info.top_role(guild_id, &bot_member.roles)?
+            <= RoleRank::new(guild_id, role_id, role.position)
+        {
             return Err(CheckFailure::Hierarchy(HierarchyDenied::BotTooLow).into());
         }
         self.http
@@ -602,9 +616,10 @@ impl<'a> Access<'a> {
             self.resolver.guild_info(self.http, guild_id),
             fetch_member(self.http, guild_id, bot_id),
         )?;
+        let bot_top = info.top_role(guild_id, &bot_member.roles)?;
         let outranks = info
-            .role_position(role)
-            .is_some_and(|position| info.top_position(&bot_member.roles) > position);
+            .role_rank(guild_id, role)
+            .is_some_and(|rank| bot_top > rank);
         Ok((
             info.root_permissions(guild_id, bot_id, &bot_member.roles),
             outranks,
@@ -614,7 +629,7 @@ impl<'a> Access<'a> {
     /// Bot が、ロールの階層から見て、対象のメンバーを操作できることを確認する。
     /// 実行した人の階層は確認しない（[`require_can_moderate`](Self::require_can_moderate) で確認する）。
     ///
-    /// `allow_absent` が真のとき、**対象のメンバーの取得だけ** が「存在しない（404）」で失敗した場合は、
+    /// `allow_absent` が真のとき、**対象のメンバーの取得だけ** が Discord の Unknown Member で失敗した場合は、
     /// 階層の確認を省く（サーバーにいないユーザーの BAN 用）。サーバーや Bot 自身の取得の失敗は、
     /// 省かずに、エラーのまま返す。
     pub(crate) async fn require_bot_can_moderate(
@@ -631,7 +646,7 @@ impl<'a> Access<'a> {
             self.resolver.guild_info(self.http, guild_id),
             async {
                 match fetch_member(self.http, guild_id, target).await {
-                    Err(crate::Error::Http(error)) if allow_absent && is_not_found(&error) => {
+                    Err(crate::Error::Http(error)) if allow_absent && is_unknown_member(&error) => {
                         Ok(None)
                     }
                     other => other.map(Some),
@@ -639,39 +654,29 @@ impl<'a> Access<'a> {
             },
             fetch_member(self.http, guild_id, bot_id),
         )?;
+        if target == info.owner_id {
+            return Err(CheckFailure::Hierarchy(HierarchyDenied::TargetIsOwner).into());
+        }
         let Some(target_member) = target_member else {
             return Ok(());
         };
         check_bot_hierarchy(
-            info.owner_id,
-            target,
-            info.top_position(&bot_member.roles),
-            info.top_position(&target_member.roles),
+            info.top_role(guild_id, &bot_member.roles)?,
+            info.top_role(guild_id, &target_member.roles)?,
         )
         .map_err(|denied| CheckFailure::Hierarchy(denied).into())
     }
 
-    /// Bot の最上位ロールが、指定したロールより高いか。ロールが存在しないときは `false`。
-    pub(crate) async fn bot_outranks_role(&self, role: Id<RoleMarker>) -> Result<bool> {
-        let guild_id = self.require_guild()?;
-        let bot_id = self.resolver.bot_id(self.http).await?;
-        let (info, bot_member) = tokio::try_join!(
-            self.resolver.guild_info(self.http, guild_id),
-            fetch_member(self.http, guild_id, bot_id),
-        )?;
-        Ok(info
-            .role_position(role)
-            .is_some_and(|position| info.top_position(&bot_member.roles) > position))
-    }
-
     /// ロールの階層から見て、実行した人と Bot が、対象のメンバーを操作できることを確認します。
     ///
-    /// サーバーの所有者は操作できません。最上位ロールが対象以上のときも拒否します（同じ位置も拒否）。
+    /// サーバーの所有者は操作できません。対象の最上位ロールと同順位以下なら拒否します。
+    /// 位置が同じ別のロールは、Discord に従って ID で順序を決めます。
     /// 対象のメンバーと Bot のメンバーを、それぞれ 1 回取得します。
     ///
     /// # エラー
     ///
-    /// 操作できないときは [`CheckFailure::Hierarchy`] を返します。
+    /// 操作できないときは [`CheckFailure::Hierarchy`]、所属ロールが不明なら
+    /// [`CheckFailure::PermissionsUnavailable`] を返します。
     /// 対象がサーバーにいないときなど、取得に失敗したときは HTTP のエラーを返します。
     pub async fn require_can_moderate(&self, target: Id<UserMarker>) -> Result<()> {
         let guild_id = self.require_guild()?;
@@ -689,14 +694,17 @@ impl<'a> Access<'a> {
             fetch_member(self.http, guild_id, target),
             fetch_member(self.http, guild_id, bot_id),
         )?;
+        if target == info.owner_id {
+            return Err(CheckFailure::Hierarchy(HierarchyDenied::TargetIsOwner).into());
+        }
         check_hierarchy(&HierarchyInput {
             owner_id: info.owner_id,
             author_id: actor.id,
             bot_id,
             target_id: target,
-            author_top: info.top_position(actor.roles),
-            bot_top: info.top_position(&bot_member.roles),
-            target_top: info.top_position(&target_member.roles),
+            author_top: info.top_role(guild_id, actor.roles)?,
+            bot_top: info.top_role(guild_id, &bot_member.roles)?,
+            target_top: info.top_role(guild_id, &target_member.roles)?,
         })
         .map_err(|denied| CheckFailure::Hierarchy(denied).into())
     }
@@ -718,11 +726,15 @@ pub(crate) fn check_bot_can_grant(
     }
 }
 
-/// Discord が「存在しない」（404）と答えたか。
-fn is_not_found(error: &twilight_http::Error) -> bool {
+/// Discord が対象メンバーの不在を明示したか。
+fn is_unknown_member(error: &twilight_http::Error) -> bool {
     matches!(
         error.kind(),
-        twilight_http::error::ErrorType::Response { status, .. } if status.get() == 404
+        twilight_http::error::ErrorType::Response {
+            status,
+            error: twilight_http::api_error::ApiError::General(error),
+            ..
+        } if status.get() == 404 && error.code == 10_007
     )
 }
 
@@ -741,21 +753,16 @@ pub(crate) struct HierarchyInput {
     pub(crate) author_id: Id<UserMarker>,
     pub(crate) bot_id: Id<UserMarker>,
     pub(crate) target_id: Id<UserMarker>,
-    pub(crate) author_top: i64,
-    pub(crate) bot_top: i64,
-    pub(crate) target_top: i64,
+    pub(crate) author_top: RoleRank,
+    pub(crate) bot_top: RoleRank,
+    pub(crate) target_top: RoleRank,
 }
 
-/// Bot だけについて、ロール階層の規則を判定する。所有者は操作できず、最上位ロールが同位以下も拒否する。
+/// 対象が所有者でないと確認した後で、Bot の最上位ロールが対象より上か判定する。
 pub(crate) fn check_bot_hierarchy(
-    owner_id: Id<UserMarker>,
-    target_id: Id<UserMarker>,
-    bot_top: i64,
-    target_top: i64,
+    bot_top: RoleRank,
+    target_top: RoleRank,
 ) -> std::result::Result<(), HierarchyDenied> {
-    if target_id == owner_id {
-        return Err(HierarchyDenied::TargetIsOwner);
-    }
     if bot_top <= target_top {
         return Err(HierarchyDenied::BotTooLow);
     }
@@ -764,7 +771,7 @@ pub(crate) fn check_bot_hierarchy(
 
 /// Discord のロール階層の規則を、純粋に判定する。
 ///
-/// 所有者は誰からも操作されない。最上位ロールが同じ位置のときは「高くない」として拒否する。
+/// 所有者は誰からも操作されない。最上位ロールが対象と同順位以下なら拒否する。
 /// 管理者権限は、階層を免除しない。
 pub(crate) fn check_hierarchy(input: &HierarchyInput) -> std::result::Result<(), HierarchyDenied> {
     if input.target_id == input.bot_id {
@@ -779,10 +786,7 @@ pub(crate) fn check_hierarchy(input: &HierarchyInput) -> std::result::Result<(),
     if input.author_id != input.owner_id && input.author_top <= input.target_top {
         return Err(HierarchyDenied::AuthorTooLow);
     }
-    if input.bot_top <= input.target_top {
-        return Err(HierarchyDenied::BotTooLow);
-    }
-    Ok(())
+    check_bot_hierarchy(input.bot_top, input.target_top)
 }
 
 #[cfg(test)]
@@ -799,10 +803,14 @@ pub(crate) mod tests {
             author_id: user(2),
             bot_id: user(3),
             target_id: user(4),
-            author_top,
-            bot_top,
-            target_top,
+            author_top: rank(author_top),
+            bot_top: rank(bot_top),
+            target_top: rank(target_top),
         }
+    }
+
+    fn rank(position: i64) -> RoleRank {
+        RoleRank::new(Id::new(20), Id::new(100), position)
     }
 
     #[test]
@@ -850,7 +858,7 @@ pub(crate) mod tests {
         owner.author_id = owner.owner_id;
         assert_eq!(check_hierarchy(&owner), Ok(()));
         // 所有者でも、Bot の階層は越えられない。
-        owner.bot_top = 3;
+        owner.bot_top = rank(3);
         assert_eq!(check_hierarchy(&owner), Err(HierarchyDenied::BotTooLow));
     }
 
@@ -1008,6 +1016,13 @@ pub(crate) mod tests {
 
     impl Mock {
         pub(crate) async fn start(routes: Vec<(String, String)>) -> Self {
+            Self::start_with_errors(routes, vec![]).await
+        }
+
+        pub(crate) async fn start_with_errors(
+            routes: Vec<(String, String)>,
+            errors: Vec<(&'static str, &'static str, &'static str)>,
+        ) -> Self {
             use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
@@ -1026,6 +1041,7 @@ pub(crate) mod tests {
                         return;
                     };
                     let routes = routes.clone();
+                    let errors = errors.clone();
                     let record = std::sync::Arc::clone(&record);
                     let record_bodies = std::sync::Arc::clone(&record_bodies);
                     tokio::spawn(async move {
@@ -1074,10 +1090,16 @@ pub(crate) mod tests {
                                 String::from_utf8_lossy(&body).into_owned(),
                             ));
                         }
-                        let (status, body) = routes
-                            .iter()
-                            .find(|(suffix, _)| path.ends_with(suffix.as_str()))
-                            .map_or(("404 Not Found", "{}"), |(_, body)| ("200 OK", body));
+                        let (status, body) = if let Some((_, status, body)) =
+                            errors.iter().find(|(suffix, _, _)| path.ends_with(suffix))
+                        {
+                            (*status, *body)
+                        } else {
+                            routes
+                                .iter()
+                                .find(|(suffix, _)| path.ends_with(suffix.as_str()))
+                                .map_or(("404 Not Found", "{}"), |(_, body)| ("200 OK", body))
+                        };
                         let response = format!(
                             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
@@ -1148,6 +1170,7 @@ pub(crate) mod tests {
             role_json(100, 5),
             role_json(101, 3),
             role_json_with(102, 9, bot_role),
+            role_json(103, 5),
         ];
         format!(
             r#"{{"id": "20", "owner_id": "1", "name": "g", "afk_timeout": 60,
@@ -1182,6 +1205,8 @@ pub(crate) mod tests {
             ("/guilds/20/members/4".into(), member_json(4, &[101])),
             ("/guilds/20/members/5".into(), member_json(5, &[100])),
             ("/guilds/20/members/6".into(), member_json(6, &[102])),
+            ("/guilds/20/members/7".into(), member_json(7, &[103])),
+            ("/guilds/20/members/8".into(), member_json(8, &[999])),
             ("/guilds/20/members/1".into(), member_json(1, &[])),
         ])
         .await
@@ -1213,8 +1238,14 @@ pub(crate) mod tests {
                 "ユーザー {target} は {expected:?} で拒否されるはずです"
             );
         };
-        // 実行者と同じ位置のロール 100 は、操作できない。
+        // 実行者と同じロール 100 は操作できない。同じ位置でも ID が大きいロール 103 は下位。
         denied(5, HierarchyDenied::AuthorTooLow).await;
+        let lower_at_same_position = access.require_can_moderate(Id::new(7)).await;
+        assert!(lower_at_same_position.is_ok(), "{lower_at_same_position:?}");
+        assert!(matches!(
+            access.require_can_moderate(Id::new(8)).await,
+            Err(crate::Error::Check(CheckFailure::PermissionsUnavailable))
+        ));
         // 実行者より上のロール 102 も操作できない。
         denied(6, HierarchyDenied::AuthorTooLow).await;
         // サーバーの所有者、自分自身、Bot 自身は操作できない。
@@ -1441,6 +1472,57 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn channel_management_rejects_another_guild_even_with_a_warm_cache() {
+        let guild = guild_json_with(Permissions::ADMINISTRATOR);
+        let mock = Mock::start(vec![
+            (
+                "/users/@me".into(),
+                r#"{"id":"3","username":"bot","discriminator":"0","avatar":null,"bot":true,"mfa_enabled":true}"#
+                    .into(),
+            ),
+            ("/guilds/20".into(), guild.clone()),
+            ("/guilds/21".into(), guild.replace("\"20\"", "\"21\"")),
+            ("/guilds/20/members/3".into(), member_json(3, &[102])),
+            ("/guilds/21/members/3".into(), member_json(3, &[102])),
+            ("/channels/31".into(), channel_json(31, "")),
+            ("/channels/31/permissions/101".into(), "{}".into()),
+        ])
+        .await;
+        let http = mock.client();
+        let resolver = PermissionResolver::new(Some(std::time::Duration::from_secs(60)));
+        let channel = Id::new(31);
+        let target = OverwriteTarget::Role(Id::new(101));
+        let mut interaction = manager_interaction(Permissions::empty());
+        let access = Access::for_interaction(&http, &resolver, &interaction);
+        let warm = access.bot_permissions_in(Id::new(20), channel).await;
+        assert!(warm.is_ok(), "{warm:?}");
+
+        interaction.guild_id = Some(Id::new(21));
+        let access = Access::for_interaction(&http, &resolver, &interaction);
+        let read = access.overwrite_of(channel, target).await;
+        assert!(matches!(
+            read,
+            Err(crate::Error::Check(CheckFailure::PermissionsUnavailable))
+        ));
+        let update = access
+            .set_overwrite(channel, target, Overwrite::new(), "理由")
+            .await;
+        assert!(matches!(
+            update,
+            Err(crate::Error::Check(CheckFailure::PermissionsUnavailable))
+        ));
+        let delete = crate::Manage::new(access)
+            .delete_channel(channel, "理由")
+            .await;
+        assert!(matches!(
+            delete,
+            Err(crate::Error::Check(CheckFailure::PermissionsUnavailable))
+        ));
+        assert_eq!(mock.count("PUT /channels/31/permissions/101"), 0);
+        assert_eq!(mock.count("DELETE /channels/31"), 0);
+    }
+
+    #[tokio::test]
     async fn set_overwrite_updates_one_target_after_checking_the_bots_permissions() {
         let mock = overwrite_mock(Permissions::empty()).await;
         let http = mock.client();
@@ -1470,8 +1552,8 @@ pub(crate) mod tests {
         assert_eq!(body["deny"], "0");
         assert_eq!(body["type"], 0);
 
-        // Bot が持たない権限は、送る前に断る。
-        let denied = access
+        // 変更先で持たないビットも、サーバーや親チャンネルの権限によって Discord が許可できる。
+        let permitted = access
             .set_overwrite(
                 Id::new(30),
                 target,
@@ -1479,12 +1561,8 @@ pub(crate) mod tests {
                 "理由",
             )
             .await;
-        assert!(matches!(
-            denied,
-            Err(crate::Error::Check(CheckFailure::BotMissingPermissions(missing)))
-                if missing == Permissions::SEND_MESSAGES
-        ));
-        assert_eq!(mock.count("PUT /channels/30/permissions/101"), 1);
+        assert!(permitted.is_ok(), "{permitted:?}");
+        assert_eq!(mock.count("PUT /channels/30/permissions/101"), 2);
     }
 
     #[tokio::test]
@@ -1546,7 +1624,7 @@ pub(crate) mod tests {
         assert!(ok.is_ok(), "{ok:?}");
         assert_eq!(mock.count("PUT /channels/31/permissions/101"), 1);
 
-        let missing = access
+        let permitted = access
             .set_overwrite(
                 Id::new(31),
                 target,
@@ -1554,10 +1632,7 @@ pub(crate) mod tests {
                 "理由",
             )
             .await;
-        assert!(matches!(
-            missing,
-            Err(crate::Error::Check(CheckFailure::BotMissingPermissions(_)))
-        ));
+        assert!(permitted.is_ok(), "{permitted:?}");
 
         let admin = overwrite_mock(Permissions::ADMINISTRATOR).await;
         let http = admin.client();

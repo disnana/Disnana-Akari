@@ -1,6 +1,6 @@
 //! メンバー、ロール、VC の管理操作。
 //!
-//! どの操作も、Discord に送る前に、Bot の権限とロールの階層を確認し、足りなければ通信せずに失敗する。
+//! 操作ごとに、事前に判定できる Bot の権限やロールの階層を確認する。VC 操作は Discord で権限を判定する。
 //! **実行した人への確認は、しない。** 呼ぶ前に、`Access::require_permissions` や
 //! `Access::require_can_moderate` で確認する。1 つの操作は、Discord への 1 回のリクエスト。
 
@@ -31,8 +31,9 @@ pub const MAX_BAN_MESSAGE_DELETE: Duration = Duration::from_secs(7 * 24 * 60 * 6
 
 /// メンバー、ロール、VC を管理する操作です。
 ///
-/// `ctx.manage()` で取得します。どの操作も、Discord に送る前に、Bot の権限とロールの階層を確認し、
-/// 足りなければ通信せずに失敗します。**実行した人が操作してよいかは、確認しません。**
+/// `ctx.manage()` で取得します。操作ごとに、Discord へ変更を送る前に確認できる権限や階層をチェックします。
+/// VC の移動・ミュートなどは、Discord が対象の VC に対する権限を判定します。
+/// **実行した人が操作してよいかは、確認しません。**
 /// 呼ぶ前に [`Access::require_permissions`] と [`Access::require_can_moderate`] で確認してください。
 /// `reason` は監査ログに残る理由で、512 文字以内です。
 #[derive(Clone, Copy, Debug)]
@@ -71,7 +72,7 @@ impl<'a> Manage<'a> {
         overwrites
             .iter()
             .fold(Permissions::empty(), |required, (_, overwrite)| {
-                required | Permissions::MANAGE_ROLES | overwrite.allowed() | overwrite.denied()
+                required | overwrite.allowed() | overwrite.denied()
             })
     }
 
@@ -81,13 +82,17 @@ impl<'a> Manage<'a> {
     ) -> Result<Id<GuildMarker>> {
         let guild_id = self.access.require_guild()?;
         let held = self.access.bot_guild_permissions().await?;
-        let required = Permissions::MANAGE_CHANNELS | Self::overwrite_requirements(overwrites);
+        let overwrites = Self::overwrite_requirements(overwrites);
+        let mut required = Permissions::MANAGE_CHANNELS | overwrites;
+        if overwrites.contains(Permissions::MANAGE_ROLES) {
+            required |= Permissions::ADMINISTRATOR;
+        }
         check_bot_can_grant(held, required)?;
         Ok(guild_id)
     }
 
     /// テキストチャンネルを作成します。必要な Bot の権限: `MANAGE_CHANNELS`
-    /// （権限の上書きを付けるときは `MANAGE_ROLES` と、上書きする権限も）。
+    /// （上書きする権限も必要。`MANAGE_ROLES` 自体を上書きする場合は `ADMINISTRATOR` が必要）。
     ///
     /// # エラー
     ///
@@ -178,10 +183,14 @@ impl<'a> Manage<'a> {
         Ok(request.reason(reason).await?.model().await?)
     }
 
-    async fn check_managing_channel(&self, channel_id: Id<ChannelMarker>) -> Result<()> {
+    async fn check_managing_channel(
+        &self,
+        channel_id: Id<ChannelMarker>,
+        required: Permissions,
+    ) -> Result<()> {
         let guild_id = self.access.require_guild()?;
         let held = self.access.bot_permissions_in(guild_id, channel_id).await?;
-        check_bot_can_grant(held, Permissions::MANAGE_CHANNELS)?;
+        check_bot_can_grant(held, required)?;
         Ok(())
     }
 
@@ -191,8 +200,8 @@ impl<'a> Manage<'a> {
     /// # エラー
     ///
     /// 何も指定していないときは [`InvalidArgument::NothingToChange`]、範囲外の値は検証のエラー、
-    /// Bot の権限が足りないときは [`CheckFailure::BotMissingPermissions`] を返します。
-    /// いずれも通信する前に返ります。送信に失敗したときは HTTP のエラーです。
+    /// 種類が合わないときは [`InvalidArgument::WrongChannelKind`]、Bot の権限が足りないときは
+    /// [`CheckFailure::BotMissingPermissions`] を返します。送信に失敗したときは HTTP のエラーです。
     pub async fn edit_text_channel(
         &self,
         channel_id: Id<ChannelMarker>,
@@ -203,7 +212,14 @@ impl<'a> Manage<'a> {
             return Err(InvalidArgument::NothingToChange.into());
         }
         edit.validate()?;
-        self.check_managing_channel(channel_id).await?;
+        if !matches!(
+            self.access.managed_channel_kind(channel_id).await?,
+            ChannelType::GuildText | ChannelType::GuildAnnouncement
+        ) {
+            return Err(InvalidArgument::WrongChannelKind.into());
+        }
+        self.check_managing_channel(channel_id, Permissions::MANAGE_CHANNELS)
+            .await?;
         let mut request = self.access.http().update_channel(channel_id);
         if let Some(name) = edit.name_value() {
             request = request.name(name);
@@ -239,7 +255,11 @@ impl<'a> Manage<'a> {
             return Err(InvalidArgument::NothingToChange.into());
         }
         edit.validate()?;
-        self.check_managing_channel(channel_id).await?;
+        if self.access.managed_channel_kind(channel_id).await? != ChannelType::GuildVoice {
+            return Err(InvalidArgument::WrongChannelKind.into());
+        }
+        self.check_managing_channel(channel_id, Permissions::MANAGE_CHANNELS)
+            .await?;
         let mut request = self.access.http().update_channel(channel_id);
         if let Some(name) = edit.name_value() {
             request = request.name(name);
@@ -256,13 +276,20 @@ impl<'a> Manage<'a> {
         Ok(request.reason(reason).await?.model().await?)
     }
 
-    /// チャンネルを削除します。元に戻せません。必要な Bot の権限: そのチャンネルでの `MANAGE_CHANNELS`。
+    /// チャンネルを削除します。元に戻せません。Bot には通常 `MANAGE_CHANNELS`、
+    /// スレッドでは `MANAGE_THREADS` が必要です。
     ///
     /// # エラー
     ///
     /// Bot の権限が足りないときは [`CheckFailure::BotMissingPermissions`]、そのほかは HTTP のエラーを返します。
     pub async fn delete_channel(&self, channel_id: Id<ChannelMarker>, reason: &str) -> Result<()> {
-        self.check_managing_channel(channel_id).await?;
+        let kind = self.access.managed_channel_kind(channel_id).await?;
+        let required = if kind.is_thread() {
+            Permissions::MANAGE_THREADS
+        } else {
+            Permissions::MANAGE_CHANNELS
+        };
+        self.check_managing_channel(channel_id, required).await?;
         self.access
             .http()
             .delete_channel(channel_id)
@@ -496,7 +523,7 @@ impl<'a> Manage<'a> {
         role_id: Id<RoleMarker>,
         reason: &str,
     ) -> Result<()> {
-        let guild_id = self.prepare_role_change(user_id, role_id).await?;
+        let guild_id = self.prepare_role_change(role_id).await?;
         self.access
             .http()
             .add_guild_member_role(guild_id, user_id, role_id)
@@ -516,7 +543,7 @@ impl<'a> Manage<'a> {
         role_id: Id<RoleMarker>,
         reason: &str,
     ) -> Result<()> {
-        let guild_id = self.prepare_role_change(user_id, role_id).await?;
+        let guild_id = self.prepare_role_change(role_id).await?;
         self.access
             .http()
             .remove_guild_member_role(guild_id, user_id, role_id)
@@ -525,26 +552,23 @@ impl<'a> Manage<'a> {
         Ok(())
     }
 
-    async fn prepare_role_change(
-        &self,
-        user_id: Id<UserMarker>,
-        role_id: Id<RoleMarker>,
-    ) -> Result<Id<GuildMarker>> {
-        let guild_id = self
-            .prepare_member(user_id, Permissions::MANAGE_ROLES, false)
-            .await?;
-        if !self.access.bot_outranks_role(role_id).await? {
+    async fn prepare_role_change(&self, role_id: Id<RoleMarker>) -> Result<Id<GuildMarker>> {
+        let guild_id = self.access.require_guild()?;
+        let (held, outranks) = self.access.bot_role_standing(role_id).await?;
+        check_bot_can_grant(held, Permissions::MANAGE_ROLES)?;
+        if !outranks {
             return Err(CheckFailure::Hierarchy(HierarchyDenied::BotTooLow).into());
         }
         Ok(guild_id)
     }
 
-    /// メンバーを、別のボイスチャンネルに移動します（`None` で切断）。必要な Bot の権限: `MOVE_MEMBERS`
-    /// （切断も同じ）。メンバーは、ボイスチャンネルにいる必要があります。
+    /// メンバーを、別のボイスチャンネルに移動します（`None` で切断）。
+    /// Discord が Bot の `MOVE_MEMBERS` と移動先への `CONNECT` を判定します。
+    /// メンバーは、ボイスチャンネルにいる必要があります。
     ///
     /// # エラー
     ///
-    /// Bot の権限が足りないときは [`CheckFailure::BotMissingPermissions`]、そのほかは HTTP のエラーを返します。
+    /// サーバー外では [`CheckFailure::GuildOnly`]、Discord の権限拒否などは HTTP のエラーを返します。
     pub async fn move_member(
         &self,
         user_id: Id<UserMarker>,
@@ -552,9 +576,6 @@ impl<'a> Manage<'a> {
         reason: &str,
     ) -> Result<()> {
         let guild_id = self.access.require_guild()?;
-        self.access
-            .require_bot_permissions(Permissions::MOVE_MEMBERS)
-            .await?;
         self.access
             .http()
             .update_guild_member(guild_id, user_id)
@@ -577,9 +598,6 @@ impl<'a> Manage<'a> {
     ) -> Result<()> {
         let guild_id = self.access.require_guild()?;
         self.access
-            .require_bot_permissions(Permissions::MUTE_MEMBERS)
-            .await?;
-        self.access
             .http()
             .update_guild_member(guild_id, user_id)
             .mute(mute)
@@ -601,9 +619,6 @@ impl<'a> Manage<'a> {
         reason: &str,
     ) -> Result<()> {
         let guild_id = self.access.require_guild()?;
-        self.access
-            .require_bot_permissions(Permissions::DEAFEN_MEMBERS)
-            .await?;
         self.access
             .http()
             .update_guild_member(guild_id, user_id)
@@ -644,40 +659,58 @@ mod tests {
     /// 実行者は 2（最上位ロール 100）、Bot は 3（ロール 102、位置 9）、所有者は 1。
     /// 相手のメンバー: 4（ロール 101、位置 3）、5（ロール 102、Bot と同位）、1（所有者）。
     async fn mock(bot_role: Permissions) -> Mock {
-        Mock::start(vec![
-            ("/users/@me".into(), user_json(3)),
-            ("/guilds/20".into(), guild_json_with(bot_role)),
-            ("/guilds/20/members/3".into(), member_json(3, &[102])),
-            ("/guilds/20/members/4".into(), member_json(4, &[101])),
-            ("/guilds/20/members/5".into(), member_json(5, &[102])),
-            ("/guilds/20/members/1".into(), member_json(1, &[])),
-            // 書き込み系は、空の応答を返す。
-            ("/guilds/20/bans/4".into(), "{}".into()),
-            ("/guilds/20/bans/99".into(), "{}".into()),
-            ("/guilds/20/bans/1".into(), "{}".into()),
-            ("/guilds/20/members/4/roles/101".into(), "{}".into()),
-            // チャンネルとロール。
-            (
-                "/guilds/20/channels".into(),
-                r#"{"id": "77", "type": 0, "guild_id": "20", "name": "new"}"#.into(),
-            ),
-            (
-                "/channels/30".into(),
-                r#"{"id": "30", "type": 0, "guild_id": "20", "name": "edited"}"#.into(),
-            ),
-            (
-                "/guilds/20/roles".into(),
-                role_json_with(200, 1, Permissions::SEND_MESSAGES),
-            ),
-            (
-                "/guilds/20/roles/101".into(),
-                role_json_with(101, 3, Permissions::SEND_MESSAGES),
-            ),
-            (
-                "/guilds/20/roles/102".into(),
-                role_json_with(102, 9, Permissions::empty()),
-            ),
-        ])
+        Mock::start_with_errors(
+            vec![
+                ("/users/@me".into(), user_json(3)),
+                ("/guilds/20".into(), guild_json_with(bot_role)),
+                ("/guilds/20/members/3".into(), member_json(3, &[102])),
+                ("/guilds/20/members/4".into(), member_json(4, &[101])),
+                ("/guilds/20/members/5".into(), member_json(5, &[102])),
+                ("/guilds/20/members/1".into(), member_json(1, &[])),
+                // 書き込み系は、空の応答を返す。
+                ("/guilds/20/bans/4".into(), "{}".into()),
+                ("/guilds/20/bans/99".into(), "{}".into()),
+                ("/guilds/20/bans/1".into(), "{}".into()),
+                ("/guilds/20/members/4/roles/101".into(), "{}".into()),
+                // チャンネルとロール。
+                (
+                    "/guilds/20/channels".into(),
+                    r#"{"id": "77", "type": 0, "guild_id": "20", "name": "new"}"#.into(),
+                ),
+                (
+                    "/channels/30".into(),
+                    r#"{"id": "30", "type": 0, "guild_id": "20", "name": "edited"}"#.into(),
+                ),
+                (
+                    "/channels/32".into(),
+                    r#"{"id": "32", "type": 2, "guild_id": "20", "name": "edited"}"#.into(),
+                ),
+                (
+                    "/guilds/20/roles".into(),
+                    role_json_with(200, 1, Permissions::SEND_MESSAGES),
+                ),
+                (
+                    "/guilds/20/roles/101".into(),
+                    role_json_with(101, 3, Permissions::SEND_MESSAGES),
+                ),
+                (
+                    "/guilds/20/roles/102".into(),
+                    role_json_with(102, 9, Permissions::empty()),
+                ),
+            ],
+            vec![
+                (
+                    "/guilds/20/members/99",
+                    "404 Not Found",
+                    r#"{"code":10007,"message":"Unknown Member"}"#,
+                ),
+                (
+                    "/guilds/20/members/98",
+                    "404 Not Found",
+                    r#"{"code":10004,"message":"Unknown Guild"}"#,
+                ),
+            ],
+        )
         .await
     }
 
@@ -874,10 +907,10 @@ mod tests {
 
     #[tokio::test]
     async fn roles_must_be_below_the_bots_top_role() {
-        let mock = mock(Permissions::empty()).await;
+        let mock = mock(Permissions::MANAGE_ROLES).await;
         let http = mock.client();
         let resolver = PermissionResolver::default();
-        let interaction = slash_interaction(true, 0, Permissions::MANAGE_ROLES.bits());
+        let interaction = slash_interaction(true, 0, 0);
         let manage = manage(&http, &resolver, &interaction);
 
         // ロール 101（位置 3）は、Bot（位置 9）より低いので、付け外しできる。
@@ -890,6 +923,7 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(mock.count("DELETE /guilds/20/members/4/roles/101"), 1);
+        assert_eq!(mock.count("GET /guilds/20/members/4"), 0);
         // Bot と同位のロール 102 と、存在しないロールは、送らずに断る。
         for role in [102, 999] {
             let denied = manage.add_role(user(4), Id::new(role), "理由").await;
@@ -907,10 +941,8 @@ mod tests {
         let mock = mock(Permissions::empty()).await;
         let http = mock.client();
         let resolver = PermissionResolver::default();
-        let all = Permissions::MANAGE_NICKNAMES
-            | Permissions::MOVE_MEMBERS
-            | Permissions::MUTE_MEMBERS
-            | Permissions::DEAFEN_MEMBERS;
+        // 呼び出し元には音声の権限がない。Discord は操作対象の VC で判定する。
+        let all = Permissions::MANAGE_NICKNAMES;
         let interaction = slash_interaction(true, 0, all.bits());
         let manage = manage(&http, &resolver, &interaction);
 
@@ -931,15 +963,27 @@ mod tests {
         assert!(manage.set_voice_deafen(user(4), true, "理由").await.is_ok());
         assert_eq!(mock.count("PATCH /guilds/20/members/4"), 5);
 
-        // 権限が足りなければ、送らずに断る。
-        let weak = slash_interaction(true, 0, Permissions::MOVE_MEMBERS.bits());
-        let weak = Manage::new(Access::for_interaction(&http, &resolver, &weak));
-        let denied = weak.set_voice_mute(user(4), true, "理由").await;
-        assert!(
-            is_bot_missing(&denied, Permissions::MUTE_MEMBERS),
-            "{denied:?}"
-        );
-        assert_eq!(mock.count("PATCH /guilds/20/members/4"), 5);
+        assert_eq!(mock.count("GET /channels/55"), 0);
+    }
+
+    #[tokio::test]
+    async fn voice_management_propagates_discords_permission_denial() {
+        let mock = Mock::start_with_errors(
+            vec![],
+            vec![(
+                "/guilds/20/members/4",
+                "403 Forbidden",
+                r#"{"code":50013,"message":"Missing Permissions"}"#,
+            )],
+        )
+        .await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let interaction = slash_interaction(true, 0, Permissions::ADMINISTRATOR.bits());
+        let manage = manage(&http, &resolver, &interaction);
+        let denied = manage.set_voice_mute(user(4), true, "理由").await;
+        assert!(matches!(denied, Err(Error::Http(_))), "{denied:?}");
+        assert_eq!(mock.count("PATCH /guilds/20/members/4"), 1);
     }
 
     #[tokio::test]
@@ -1049,7 +1093,7 @@ mod tests {
                 .is_ok()
         );
 
-        // 上書きを付けるには、MANAGE_ROLES と、上書きする権限が要る。
+        // 上書き対象の権限が必要。MANAGE_ROLES 自体を上書きするなら管理者が必要。
         let with_overwrite = NewTextChannel::new("b").overwrite(
             OverwriteTarget::Role(Id::new(101)),
             Overwrite::new().deny(Permissions::SEND_MESSAGES),
@@ -1059,7 +1103,7 @@ mod tests {
             matches!(
                 &denied,
                 Err(Error::Check(CheckFailure::BotMissingPermissions(missing)))
-                    if *missing == Permissions::MANAGE_ROLES | Permissions::SEND_MESSAGES
+                    if *missing == Permissions::SEND_MESSAGES
             ),
             "{denied:?}"
         );
@@ -1084,7 +1128,7 @@ mod tests {
     async fn editing_a_channel_sends_only_the_given_fields() {
         use crate::{TextChannelEdit, VoiceChannelEdit};
 
-        let mock = mock(Permissions::empty()).await;
+        let mock = mock(Permissions::MANAGE_CHANNELS | Permissions::VIEW_CHANNEL).await;
         let http = mock.client();
         let resolver = PermissionResolver::default();
         let interaction = slash_interaction(true, 0, Permissions::MANAGE_CHANNELS.bits());
@@ -1138,14 +1182,22 @@ mod tests {
         assert!(
             manage
                 .edit_voice_channel(
-                    Id::new(30),
+                    Id::new(32),
                     VoiceChannelEdit::new().bitrate(96_000).user_limit(5),
                     "理由"
                 )
                 .await
                 .is_ok()
         );
-        assert_eq!(mock.count("PATCH /channels/30"), 2);
+        let wrong_kind = manage
+            .edit_voice_channel(Id::new(30), VoiceChannelEdit::new().name("VC"), "理由")
+            .await;
+        assert!(matches!(
+            wrong_kind,
+            Err(Error::InvalidArgument(InvalidArgument::WrongChannelKind))
+        ));
+        assert_eq!(mock.count("PATCH /channels/30"), 1);
+        assert_eq!(mock.count("PATCH /channels/32"), 1);
 
         // MANAGE_CHANNELS がなければ、変更も削除も、送らずに断る。
         let weak = slash_interaction(true, 0, Permissions::VIEW_CHANNEL.bits());
@@ -1161,6 +1213,34 @@ mod tests {
         assert!(weak.delete_channel(Id::new(30), "理由").await.is_err());
         assert_eq!(mock.count("DELETE /channels/30"), 0);
         assert!(manage.delete_channel(Id::new(30), "理由").await.is_ok());
+        assert_eq!(mock.count("DELETE /channels/30"), 1);
+    }
+
+    #[tokio::test]
+    async fn thread_deletion_checks_manage_threads() {
+        let mock = Mock::start(vec![(
+            "/channels/30".into(),
+            r#"{"id":"30","type":11,"guild_id":"20","parent_id":"31","name":"thread"}"#.into(),
+        )])
+        .await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let thread = Id::new(30);
+        let wrong = slash_interaction(true, 0, Permissions::MANAGE_CHANNELS.bits());
+        assert!(is_bot_missing(
+            &manage(&http, &resolver, &wrong)
+                .delete_channel(thread, "理由")
+                .await,
+            Permissions::MANAGE_THREADS
+        ));
+        assert_eq!(mock.count("DELETE /channels/30"), 0);
+        let right = slash_interaction(true, 0, Permissions::MANAGE_THREADS.bits());
+        assert!(
+            manage(&http, &resolver, &right)
+                .delete_channel(thread, "理由")
+                .await
+                .is_ok()
+        );
         assert_eq!(mock.count("DELETE /channels/30"), 1);
     }
 
@@ -1247,13 +1327,26 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_bot_member_does_not_skip_the_hierarchy_check_for_a_ban() {
-        // Bot 自身のメンバー（3）が取得できない（404）。サーバーにいない相手（99）の BAN 用の
-        // 「相手が 404 なら階層を省く」処理が、これを見逃してはならない。
-        let mock = Mock::start(vec![
-            ("/users/@me".into(), user_json(3)),
-            ("/guilds/20".into(), guild_json_with(Permissions::empty())),
-            ("/guilds/20/bans/99".into(), "{}".into()),
-        ])
+        // 対象の Unknown Member を許しても、Bot 自身の取得エラーは許さない。
+        let mock = Mock::start_with_errors(
+            vec![
+                ("/users/@me".into(), user_json(3)),
+                ("/guilds/20".into(), guild_json_with(Permissions::empty())),
+                ("/guilds/20/bans/99".into(), "{}".into()),
+            ],
+            vec![
+                (
+                    "/guilds/20/members/99",
+                    "404 Not Found",
+                    r#"{"code":10007,"message":"Unknown Member"}"#,
+                ),
+                (
+                    "/guilds/20/members/3",
+                    "404 Not Found",
+                    r#"{"code":10007,"message":"Unknown Member"}"#,
+                ),
+            ],
+        )
         .await;
         let http = mock.client();
         let resolver = PermissionResolver::default();
@@ -1262,5 +1355,17 @@ mod tests {
         let result = manage.ban_member(user(99), Duration::ZERO, "理由").await;
         assert!(matches!(result, Err(Error::Http(_))), "{result:?}");
         assert_eq!(mock.count("PUT /guilds/20/bans/99"), 0);
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_not_found_error_does_not_allow_a_ban() {
+        let mock = mock(Permissions::empty()).await;
+        let http = mock.client();
+        let resolver = PermissionResolver::default();
+        let interaction = slash_interaction(true, 0, Permissions::BAN_MEMBERS.bits());
+        let manage = manage(&http, &resolver, &interaction);
+        let result = manage.ban_member(user(98), Duration::ZERO, "理由").await;
+        assert!(matches!(result, Err(Error::Http(_))), "{result:?}");
+        assert_eq!(mock.count("PUT /guilds/20/bans/98"), 0);
     }
 }

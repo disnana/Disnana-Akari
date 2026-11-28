@@ -156,10 +156,6 @@ impl Overwrite {
         }
     }
 
-    pub(crate) fn touched(&self) -> Permissions {
-        self.allow | self.deny
-    }
-
     /// チャンネルの作成に渡す形にする。
     pub(crate) fn into_model(self, target: OverwriteTarget) -> PermissionOverwrite {
         PermissionOverwrite {
