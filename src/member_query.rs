@@ -332,9 +332,7 @@ impl MemberQuery {
         selection: Selection,
         deadline: Instant,
     ) -> Result<(Registration, oneshot::Receiver<QueryResult>), MemberQueryError> {
-        let id = NEXT_NONCE
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .map_err(|_| MemberQueryError::Busy)?;
+        let id = next_nonce().ok_or(MemberQueryError::Busy)?;
         let payload = selection.request(guild, id)?;
         let (reply, receiver) = oneshot::channel();
         let expired;
@@ -410,6 +408,17 @@ impl MemberQuery {
 pub(crate) struct MemberQueryCommand {
     id: u64,
     payload: RequestGuildMembers,
+}
+
+fn next_nonce() -> Option<u64> {
+    let mut id = NEXT_NONCE.load(Ordering::Relaxed);
+    loop {
+        let next = id.checked_add(1)?;
+        match NEXT_NONCE.compare_exchange_weak(id, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Some(id),
+            Err(current) => id = current,
+        }
+    }
 }
 
 fn parse_nonce(nonce: &str) -> Option<u64> {
