@@ -1,7 +1,9 @@
 use std::fmt::Write as _;
 
-use super::{CommandContext, groups::CommandTree};
-use crate::{Result, validation::MESSAGE_CONTENT_MAX};
+use super::{CommandContext, Commands, groups::CommandTree};
+use crate::{
+    CommandCheckContext, Result, command_check::run_checks, validation::MESSAGE_CONTENT_MAX,
+};
 
 /// ヘルプに表示するテキストコマンドの説明、引数の書式、表示設定です。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -135,49 +137,119 @@ impl<'a> CommandInfo<'a> {
     }
 }
 
-pub(super) async fn reply_help(ctx: CommandContext<'_>) -> Result<()> {
-    let content = format_help(ctx.commands, ctx.prefix(), ctx.args());
+pub(super) async fn reply_help(ctx: CommandContext<'_>, verify_checks: bool) -> Result<()> {
+    let mut view = HelpView::for_query(ctx.commands, ctx.args());
+    if verify_checks && !ctx.commands.checks.is_empty() {
+        view = view.checked(&ctx).await;
+    }
+    let content = view.render(ctx.prefix());
     for page in pages(&content).filter(|page| !page.trim().is_empty()) {
         ctx.reply(page).await?;
     }
     Ok(())
 }
 
-fn format_help(commands: &super::Commands, prefix: &str, query: &str) -> String {
-    let mut message = String::new();
-    let visible = if query.trim().is_empty() {
-        message.push_str("使えるコマンド\n");
-        commands.command_infos()
-    } else if let Some(info) = commands
-        .command_info(query)
-        .filter(|info| !info.is_hidden())
-    {
-        write_usage(&mut message, prefix, &info);
-        if let Some(description) = info.description() {
-            let _ = write!(message, "\n{description}");
+enum HelpView<'a> {
+    Index(Vec<CommandInfo<'a>>),
+    Detail(CommandInfo<'a>, Vec<CommandInfo<'a>>),
+    NotFound,
+}
+
+impl<'a> HelpView<'a> {
+    fn for_query(commands: &'a Commands, query: &str) -> Self {
+        if query.trim().is_empty() {
+            let mut commands = commands.command_infos();
+            commands.retain(|command| !command.is_hidden());
+            return Self::Index(commands);
         }
-        if !info.aliases().is_empty() {
-            let _ = write!(message, "\n別名 {}", info.aliases().join("、"));
-        }
-        let children = info.children();
-        if children.iter().any(|child| !child.is_hidden()) {
-            message.push_str("\n\nサブコマンド\n");
-        }
-        children
-    } else {
-        return "指定されたコマンドが見つかりません。".into();
-    };
-    for info in visible.iter().filter(|info| !info.is_hidden()) {
-        write_usage(&mut message, prefix, info);
-        if let Some(summary) = info
-            .description()
-            .and_then(|description| description.lines().next())
-        {
-            let _ = write!(message, " — {summary}");
-        }
-        message.push('\n');
+        let Some(command) = commands
+            .command_info(query)
+            .filter(|info| !info.is_hidden())
+        else {
+            return Self::NotFound;
+        };
+        let mut children = command.children();
+        children.retain(|child| !child.is_hidden());
+        Self::Detail(command, children)
     }
-    message
+
+    async fn checked(self, ctx: &CommandContext<'_>) -> Self {
+        match self {
+            Self::Index(commands) => Self::Index(check_entries(commands, ctx).await),
+            Self::Detail(command, children) => {
+                if can_show(&command, ctx).await {
+                    Self::Detail(command, check_entries(children, ctx).await)
+                } else {
+                    Self::NotFound
+                }
+            }
+            Self::NotFound => Self::NotFound,
+        }
+    }
+
+    fn render(self, prefix: &str) -> String {
+        let mut message = String::new();
+        let entries = match self {
+            Self::Index(entries) => {
+                message.push_str("使えるコマンド\n");
+                entries
+            }
+            Self::Detail(command, children) => {
+                write_detail(&mut message, prefix, &command);
+                if !children.is_empty() {
+                    message.push_str("\n\nサブコマンド\n");
+                }
+                children
+            }
+            Self::NotFound => return "指定されたコマンドが見つかりません。".into(),
+        };
+        for info in entries {
+            write_usage(&mut message, prefix, &info);
+            if let Some(summary) = info
+                .description()
+                .and_then(|description| description.lines().next())
+            {
+                let _ = write!(message, " — {summary}");
+            }
+            message.push('\n');
+        }
+        message
+    }
+}
+
+async fn check_entries<'a>(
+    entries: Vec<CommandInfo<'a>>,
+    ctx: &CommandContext<'_>,
+) -> Vec<CommandInfo<'a>> {
+    let mut allowed = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if can_show(&entry, ctx).await {
+            allowed.push(entry);
+        }
+    }
+    allowed
+}
+
+async fn can_show(entry: &CommandInfo<'_>, ctx: &CommandContext<'_>) -> bool {
+    let name = entry.qualified_name();
+    // ヘルプ自身は、ハンドラーの呼び出し前に確認済み。
+    name == ctx.qualified_name()
+        || run_checks(
+            &ctx.commands.checks,
+            CommandCheckContext::text(ctx.context(), name),
+        )
+        .await
+        .is_ok()
+}
+
+fn write_detail(message: &mut String, prefix: &str, info: &CommandInfo<'_>) {
+    write_usage(message, prefix, info);
+    if let Some(description) = info.description() {
+        let _ = write!(message, "\n{description}");
+    }
+    if !info.aliases().is_empty() {
+        let _ = write!(message, "\n別名 {}", info.aliases().join("、"));
+    }
 }
 
 fn write_usage(message: &mut String, prefix: &str, info: &CommandInfo<'_>) {
@@ -218,14 +290,45 @@ fn page_end(content: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use crate::{
-        Commands, Context, Error, RegistrationError, access::tests::Mock,
-        commands::tests::command_message, permissions::PermissionResolver, timing::Pending,
+        CheckFailure, CommandCheck, Commands, Context, Error, Needs, RegistrationError,
+        access::tests::Mock, commands::tests::command_message, permissions::PermissionResolver,
+        timing::Pending,
     };
+    use twilight_model::guild::Permissions;
 
     async fn command(_: CommandContext<'_>) -> Result<()> {
         Ok(())
+    }
+
+    fn format_help(commands: &Commands, prefix: &str, query: &str) -> String {
+        HelpView::for_query(commands, query).render(prefix)
+    }
+
+    async fn dispatch_help(commands: &Commands, input: &str) -> Result<String> {
+        let server = Mock::start(vec![("/channels/2/messages".into(), "{}".into())]).await;
+        let http = server.client();
+        let permissions = PermissionResolver::new(None);
+        let message = command_message(input)?;
+        let (_, timing) = Pending::new((), None).begin();
+        commands
+            .dispatch(Context {
+                http: &http,
+                message: &message,
+                timing,
+                permissions: &permissions,
+            })
+            .await?;
+        assert_eq!(server.count("POST /channels/2/messages"), 1);
+        Ok(
+            server.body_of("POST /channels/2/messages").unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        )
     }
 
     #[test]
@@ -297,6 +400,110 @@ mod tests {
         assert!(!visible.contains("admin"));
         let missing = format_help(&commands, "akari.", "missing");
         assert_eq!(format_help(&commands, "akari.", "cfg a erase"), missing);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checked_help_filters_the_index_and_details_without_executing_candidates() -> Result<()>
+    {
+        let mut commands = Commands::new("!")?;
+        commands.register_help("help")?;
+        commands.register_help_with_checks("visible")?;
+        commands.register("staff", command)?;
+        let mut group = commands.group_with_aliases("config", &["cfg"])?;
+        group.subcommand_with_aliases("lock", &["l"], command)?;
+        group.set_child_metadata("lock", CommandMetadata::new().description("管理用"))?;
+        group.subcommand("shadow", command)?;
+        group.set_child_metadata("shadow", CommandMetadata::new().hidden(true))?;
+
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let parsed = Arc::clone(&trace);
+        let invoked = Arc::clone(&trace);
+        group.subcommand_parsed(
+            "show",
+            async move |_: &CommandContext<'_>| -> Result<()> {
+                parsed.lock().unwrap().push("parser".into());
+                Ok(())
+            },
+            async move |_: CommandContext<'_>, ()| -> Result<()> {
+                invoked.lock().unwrap().push("handler".into());
+                Ok(())
+            },
+        )?;
+        let checks = Arc::clone(&trace);
+        commands.add_check(CommandCheck::new(
+            async move |ctx: CommandCheckContext<'_>| {
+                let name = ctx.command_path().collect::<Vec<_>>().join(" ");
+                assert_eq!(ctx.author_id().map(|id| id.get()), Some(3));
+                assert_eq!(ctx.channel_id().map(|id| id.get()), Some(2));
+                let allowed = name != "staff";
+                checks.lock().unwrap().push(name);
+                if allowed {
+                    Ok(())
+                } else {
+                    Err(CheckFailure::Rejected.into())
+                }
+            },
+        ));
+        commands.require("cfg l", Needs::new().author(Permissions::MANAGE_ROLES))?;
+        let before = Arc::clone(&trace);
+        commands.set_before_invoke(async move |ctx: &CommandContext<'_>| {
+            before
+                .lock()
+                .unwrap()
+                .push(format!("before {}", ctx.qualified_name()));
+            Ok(())
+        });
+        let after = Arc::clone(&trace);
+        commands.set_after_invoke(async move |ctx: &CommandContext<'_>, _: Option<&Error>| {
+            after
+                .lock()
+                .unwrap()
+                .push(format!("after {}", ctx.qualified_name()));
+            Ok(())
+        });
+        let take_trace = || std::mem::take(&mut *trace.lock().unwrap());
+
+        let index = dispatch_help(&commands, "!visible").await?;
+        assert!(index.contains("!config") && !index.contains("!staff"));
+        assert_eq!(
+            take_trace(),
+            [
+                "visible",
+                "before visible",
+                "config",
+                "help",
+                "staff",
+                "after visible"
+            ]
+        );
+
+        let detail = dispatch_help(&commands, "!visible cfg").await?;
+        assert!(detail.contains("!config show"));
+        assert!(!detail.contains("!config lock") && !detail.contains("!config shadow"));
+        assert_eq!(
+            take_trace(),
+            [
+                "visible",
+                "before visible",
+                "config",
+                "config lock",
+                "config show",
+                "after visible"
+            ]
+        );
+
+        let denied = dispatch_help(&commands, "!visible cfg l").await?;
+        assert_eq!(
+            take_trace(),
+            ["visible", "before visible", "config lock", "after visible"]
+        );
+        let missing = dispatch_help(&commands, "!visible missing").await?;
+        assert_eq!(denied, missing);
+        assert_eq!(take_trace(), ["visible", "before visible", "after visible"]);
+        let normal = dispatch_help(&commands, "!help cfg l").await?;
+        assert!(normal.contains("!config lock\n管理用"));
+        assert_eq!(take_trace(), ["help", "before help", "after help"]);
         Ok(())
     }
 

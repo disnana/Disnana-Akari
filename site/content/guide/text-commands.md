@@ -100,6 +100,8 @@ async fn show(ctx: CommandContext<'_>) -> Result<()> {
 
 一覧や詳細が長いときは、Discord の本文上限に収まるように分け、複数のメッセージを順番に送ります。
 
+`register_help_with_checks("help")` を使うと、その人がチェックを通過したコマンドだけを表示できます。別名は正式名に解決してからチェックします。各候補の引数変換、実行フック、ハンドラーは呼びません。参照時にも実行されるので、この使い方で共有するチェックは状態を変更しないようにします。 [discord.py の verify_checks](https://discordpy.readthedocs.io/en/v2.7.1/ext/commands/api.html#discord.ext.commands.HelpCommand.verify_checks)
+
 ```rust
 use disnana_akari::{CommandContext, CommandMetadata, Commands, Result};
 

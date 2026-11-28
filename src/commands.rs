@@ -146,12 +146,32 @@ impl Commands {
     /// 1 メッセージに収まらない場合は、行の区切りを優先し、複数の返信に分けて順番に送ります。
     /// 非表示に設定したコマンドとその配下は出しません。ヘルプを実行する際は通常のチェックを行い、
     /// 一覧に表示する各コマンドのチェックは呼びません。利用者に表示したくないコマンドは
-    /// [`CommandMetadata::hidden`] で隠せます。
+    /// [`CommandMetadata::hidden`] で隠せます。表示するコマンドのチェックも行う場合は
+    /// [`register_help_with_checks`](Self::register_help_with_checks) を使います。
     ///
     /// # エラー
     /// 名前が無効、またはすでに使用中の場合に失敗します。
     pub fn register_help(&mut self, name: &str) -> Result<()> {
-        self.register(name, help::reply_help)?;
+        self.register_help_mode(name, false)
+    }
+
+    /// 権限などの実行チェックを通過したコマンドを表示する、標準ヘルプを登録します。
+    ///
+    /// 非表示設定を除いた表示候補ごとに、今の実行者とチャンネルで、正式なコマンド経路のチェックを実行します。
+    /// チェックに失敗した候補は表示しません。表示候補の引数変換、実行フック、コマンド関数は呼びません。
+    /// チェックは通信する場合もあるため、副作用のないチェックを使ってください。
+    ///
+    /// # エラー
+    ///
+    /// 名前が無効、またはすでに使用中の場合に失敗します。
+    pub fn register_help_with_checks(&mut self, name: &str) -> Result<()> {
+        self.register_help_mode(name, true)
+    }
+
+    fn register_help_mode(&mut self, name: &str, verify_checks: bool) -> Result<()> {
+        self.register(name, async move |ctx: CommandContext<'_>| {
+            help::reply_help(ctx, verify_checks).await
+        })?;
         self.set_metadata(
             name,
             CommandMetadata::new()
