@@ -637,6 +637,14 @@ impl<'a> CommandContext<'a> {
         self.ctx.reply_with(content, mentions).await
     }
 
+    /// 元のコマンドに投票を付けて返信します。
+    ///
+    /// # エラー
+    /// 詳細は [`Context::reply_poll`] を参照してください。
+    pub async fn reply_poll(&self, poll: &crate::PollDraft<'_>) -> Result<()> {
+        self.ctx.reply_poll(poll).await
+    }
+
     /// 元のコマンドに Embed やボタンを付けて返信します。
     ///
     /// # エラー

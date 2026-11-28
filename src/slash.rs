@@ -45,6 +45,7 @@ mod followup_message;
 mod invoke;
 mod localizations;
 mod original_response;
+mod poll_response;
 mod settings;
 mod v2_attachments;
 mod validation;

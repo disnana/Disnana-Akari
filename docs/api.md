@@ -104,6 +104,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.require_permissions(perms).await -> Result<()>` | 送り主がすべての権限を持つか確認します。足りないと `Error::Check(CheckFailure::MissingPermissions(不足分))` を返します。`ctx.permissions().await`、`ctx.require_guild()` も使えます。テキストコマンドでは Discord から取得して計算します。`Bot::cache_permissions(ttl)` で保存期間を指定でき、`Intents::GUILDS` を有効にするとロールやチャンネルの変更時に保存を破棄します。 |
 | `ctx.reply_ui(&message).await -> Result<()>` | `UiMessage` を元のメッセージに返信します。 |
 | `ctx.reply_v2(&message).await -> Result<()>` | `ComponentsV2` を元のメッセージに返信します。 |
+| `ctx.reply_poll(&poll).await -> Result<()>` | 元のメッセージに投票を付けて返信します。 |
 
 名前は大文字と小文字を区別します。最初の空白までがコマンド名です。`! ping` のようにプレフィックスの直後が空白の投稿、未登録の名前、通常の投稿は無視されます。
 
@@ -136,6 +137,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.reply_ui(&message).await -> Result<()>` | `UiMessage` を初回応答として返します。遅延応答の後は、公開範囲を維持して元の応答を編集します。 |
 | `ctx.reply_ui_ephemeral(&message).await -> Result<()>` | `UiMessage` を本人にだけ見える初回応答として返します。`defer_ephemeral` の後は、処理中の表示を置き換えます。 |
 | `ctx.reply_v2(&message).await -> Result<()>` | `ComponentsV2` を初回応答として返します。遅延応答の後は、公開範囲を維持して元の応答を編集します。 |
+| `ctx.reply_poll(&poll).await -> Result<()>` | 公開の初回応答、または公開の `defer` 後の待機表示を投票で完成させます。 |
 | `ctx.reply_v2_ephemeral(&message).await -> Result<()>` | `ComponentsV2` を本人にだけ見える初回応答として返します。`defer_ephemeral` の後は、処理中の表示を置き換えます。 |
 | `ctx.show_modal(&form).await -> Result<()>` | コマンドの初回応答として入力フォームを開きます。 |
 | `ctx.reply_ephemeral(content).await -> Result<()>` | 呼び出したユーザーだけに初回応答を送ります。`defer_ephemeral` の後は、その処理中の表示を本文に置き換えます。 |
@@ -192,6 +194,7 @@ Gateway の受信、コマンド、イベントは非同期で並行して進み
 | `ctx.reply(content).await -> Result<()>` | テキストなら元の投稿に返信し、スラッシュなら公開の初回応答を送ります。 |
 | `ctx.reply_ui(&message).await -> Result<()>` | `UiMessage` をテキストコマンドまたはスラッシュコマンドへの返信に使います。 |
 | `ctx.reply_v2(&message).await -> Result<()>` | `ComponentsV2` をテキストコマンドまたはスラッシュコマンドへの返信に使います。 |
+| `ctx.reply_poll(&poll).await -> Result<()>` | テキストとスラッシュの両方で公開の投票を返信します。 |
 
 テキスト側の `text_arg` は、コマンド名の後ろ全体を最初のトップレベルの文字列引数に割り当てます。たとえば `count`（整数）と `text`（文字列）を定義した場合、`!cmd 3 hello` の `text_arg("text")` は `3 hello` 全体を返します。`/cmd count:3 text:hello` では `option("count")` が整数の `3` を返し、`text_arg("text")` は `hello` を返します。テキスト側で整数などの型付き引数が必要な場合は、ハンドラーで `args()` を分割・変換します。
 
@@ -578,7 +581,7 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 
 ## 追加返信の取得・編集・削除
 
-初回応答を済ませたスラッシュ、フォーム、ボタン、セレクトのコンテキストから `ctx.followups()` で `Followups` を取得します。`send`、`send_ui`、`send_v2`、`send_files` が返す `FollowupMessage` の `id()` と `message()` で送信結果を参照できます。`edit`、`edit_ui`、`edit_v2`、`delete` は、その追加返信を対象にします。
+初回応答を済ませたスラッシュ、フォーム、ボタン、セレクトのコンテキストから `ctx.followups()` で `Followups` を取得します。`send`、`send_ui`、`send_v2`、`send_files`、`send_poll` が返す `FollowupMessage` の `id()` と `message()` で送信結果を参照できます。`edit`、`edit_ui`、`edit_v2`、`delete` は、その追加返信を対象にします。`send_poll` は公開表示です。
 
 ## Gateway のメンバー照会
 

@@ -5,10 +5,13 @@ use twilight_http::{
     routing::Route,
 };
 use twilight_model::{
-    channel::{Message, message::AllowedMentions},
+    channel::{
+        Message,
+        message::{AllowedMentions, MessageReference, MessageReferenceType},
+    },
     id::{
         Id,
-        marker::{ChannelMarker, EmojiMarker},
+        marker::{ChannelMarker, EmojiMarker, MessageMarker},
     },
     poll::PollLayoutType,
 };
@@ -36,7 +39,7 @@ impl<'a> PollAnswerInput<'a> {
     }
 }
 
-/// Discord のチャンネルに投稿する、検証済みの投票です。
+/// Discord に投稿する、検証済みの投票です。
 #[derive(Clone, Copy, Debug)]
 #[must_use]
 pub struct PollDraft<'a> {
@@ -113,6 +116,36 @@ impl<'a> PollDraft<'a> {
         http: &Client,
         channel: Id<ChannelMarker>,
     ) -> Result<Message, PollError> {
+        let request = self.channel_request(channel, None)?;
+        let message = http.request::<Message>(request).await?.model().await?;
+        if message.channel_id != channel || message.poll.is_none() {
+            return Err(PollError::InvalidResponse);
+        }
+        Ok(message)
+    }
+
+    pub(crate) fn channel_request(
+        &self,
+        channel: Id<ChannelMarker>,
+        reply_to: Option<Id<MessageMarker>>,
+    ) -> Result<Request, twilight_http::Error> {
+        let mut payload = self.message_payload();
+        payload.message_reference = reply_to.map(|id| MessageReference {
+            kind: MessageReferenceType::Default,
+            channel_id: Some(channel),
+            guild_id: None,
+            message_id: Some(id),
+            fail_if_not_exists: Some(true),
+        });
+        // Twilight 0.18 の CreateMessage::poll は応答用の Poll を受け取る。
+        Request::builder(&Route::CreateMessage {
+            channel_id: channel.get(),
+        })
+        .json(&payload)
+        .build()
+    }
+
+    pub(crate) fn message_payload(&self) -> PollMessagePayload<'_> {
         let poll = PollPayload {
             question: Question {
                 text: self.question,
@@ -131,21 +164,11 @@ impl<'a> PollDraft<'a> {
             allow_multiselect: self.allow_multiselect,
             layout_type: PollLayoutType::Default,
         };
-        // Twilight 0.18 の CreateMessage::poll は応答用の Poll を受け取る。
-        // 作成専用の本体を通常の CreateMessage ルートとレート制限で送る。
-        let request = Request::builder(&Route::CreateMessage {
-            channel_id: channel.get(),
-        })
-        .json(&CreateMessage {
+        PollMessagePayload {
             poll,
             allowed_mentions: AllowedMentions::default(),
-        })
-        .build()?;
-        let message = http.request::<Message>(request).await?.model().await?;
-        if message.channel_id != channel || message.poll.is_none() {
-            return Err(PollError::InvalidResponse);
+            message_reference: None,
         }
-        Ok(message)
     }
 }
 
@@ -154,9 +177,11 @@ fn valid_text(text: &str, max: usize) -> bool {
 }
 
 #[derive(Serialize)]
-struct CreateMessage<'a> {
+pub(crate) struct PollMessagePayload<'a> {
     poll: PollPayload<'a>,
     allowed_mentions: AllowedMentions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_reference: Option<MessageReference>,
 }
 
 #[derive(Serialize)]

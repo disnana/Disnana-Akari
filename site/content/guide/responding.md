@@ -171,3 +171,19 @@ async fn report(ctx: &mut SlashContext<'_>) -> Result<()> {
 `Bot::on_info` の `InfoEvent::InteractionResponseFailed` は、初回応答の HTTP リクエストが失敗したときに届きます。JSON と添付付きのどちらでも、Interaction ID、HTTP ステータス、Discord の数値エラーコード、キュー待ち、REST 待ちを確認できます。トークンとレスポンス本文は含みません。
 
 たとえば、Discord のコード `10062` は Interaction を見つけられなかったことを示します。Bot が受信してからの経過時間を合わせて見れば、Discord が求める3秒の期限と照らし合わせられます。[Discord の応答期限](https://docs.discord.com/developers/interactions/receiving-and-responding#interaction-callback) · [Discord のエラー番号](https://docs.discord.com/developers/topics/opcodes-and-status-codes#json)
+
+## 投票で応答する
+
+スラッシュコマンドでは `reply_poll` で投票を公開します。時間のかかる処理がある場合は、先に公開の `defer()` を呼び、同じ `reply_poll` で待機表示を完成させます。`defer_ephemeral()` の後に投票で応答しようとすると、送信前に `ResponseStateError::PollRequiresPublicResponse` が返ります。 [Discord の応答データ](https://docs.discord.com/developers/interactions/receiving-and-responding#interaction-response-object) · [Discord の非公開投票の扱い](https://github.com/discord/discord-api-docs/issues/6890)
+
+```rust
+use disnana_akari::{Error, PollAnswerInput, PollDraft, Result, SlashContext};
+
+async fn poll(ctx: &mut SlashContext<'_>) -> Result<()> {
+    let answers = [PollAnswerInput::new("土曜日"), PollAnswerInput::new("日曜日")];
+    let poll = PollDraft::new("いつ集まる？", &answers).map_err(Error::handler)?;
+    ctx.reply_poll(&poll).await
+}
+```
+
+テキスト・ハイブリッドコマンドとモーダルのコンテキストにも `reply_poll` があります。モーダルで時間がかかる場合は公開の `defer()` を呼びます。初回応答を済ませた後は `ctx.followups()?.send_poll(&poll).await` で投票を追加でき、戻り値の `message()` から回答 ID を確認できます。

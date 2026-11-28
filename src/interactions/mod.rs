@@ -1094,6 +1094,18 @@ impl<'a> ModalContext<'a> {
         self.send_followup(content, true).await
     }
 
+    /// フォームの送信に公開の投票で応答します。公開の `defer` 後にも使えます。
+    ///
+    /// # エラー
+    /// 非公開の遅延応答、元メッセージの更新を予約した場合、応答済み、
+    /// または Discord が受け付けない場合に失敗します。
+    pub async fn reply_poll(&mut self, poll: &crate::PollDraft<'_>) -> Result<()> {
+        let mut state = self.response.channel_response()?;
+        state.reply_poll(self.initial, poll).await?;
+        self.response = ComponentResponse::OwnResponse(state);
+        Ok(())
+    }
+
     async fn respond(&mut self, content: &str, ephemeral: bool) -> Result<()> {
         let mut state = self.response.channel_response()?;
         state.reply(self.initial, content, ephemeral).await?;

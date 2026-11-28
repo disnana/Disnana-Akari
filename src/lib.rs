@@ -1807,6 +1807,15 @@ impl<'a> Context<'a> {
         channel_ui::send_create_message(self.http, request.try_into_request()?).await
     }
 
+    /// 元のメッセージに投票を付けて返信します。
+    ///
+    /// # エラー
+    /// チャンネルの権限が不足している場合や、Discord が送信を受け付けない場合に失敗します。
+    pub async fn reply_poll(&self, poll: &PollDraft<'_>) -> Result<()> {
+        let request = poll.channel_request(self.message.channel_id, Some(self.message.id))?;
+        channel_ui::send_create_message(self.http, request).await
+    }
+
     /// 元のメッセージに Embed やボタンを付けて返信します。
     ///
     /// # エラー

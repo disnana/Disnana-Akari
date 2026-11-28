@@ -446,6 +446,17 @@ impl<'a> HybridContext<'a> {
         }
     }
 
+    /// テキストとスラッシュの両方で、公開の投票を返信します。
+    ///
+    /// # エラー
+    /// スラッシュの応答状態が合わない場合や、Discord が送信を受け付けない場合に失敗します。
+    pub async fn reply_poll(&mut self, poll: &crate::PollDraft<'_>) -> Result<()> {
+        match &mut self.inner {
+            SourceContext::Text { ctx, .. } => ctx.reply_poll(poll).await,
+            SourceContext::Slash(ctx) => ctx.reply_poll(poll).await,
+        }
+    }
+
     /// テキストとスラッシュの両方で、Embed やボタンを付けて返信します。
     ///
     /// # エラー

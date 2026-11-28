@@ -21,7 +21,7 @@ use twilight_model::{
 };
 
 use crate::{
-    Error, Result,
+    Error, PollDraft, Result,
     ui::{ComponentsV2, UiMessage},
     validation::{self, AttachmentLimits},
 };
@@ -79,6 +79,29 @@ impl<'a> Followups<'a> {
     pub async fn send(&self, content: &str, ephemeral: bool) -> Result<FollowupMessage<'a>> {
         self.send_files(content, &[], AttachmentLimits::default(), ephemeral)
             .await
+    }
+
+    /// 初回応答を完成させた後、公開の投票を追加で送ります。
+    ///
+    /// # エラー
+    /// Discord が受け付けない場合や、返された投票メッセージを読めない場合に失敗します。
+    pub async fn send_poll(&self, poll: &PollDraft<'_>) -> Result<FollowupMessage<'a>> {
+        let request = Request::builder(&Route::ExecuteWebhook {
+            thread_id: None,
+            token: &self.interaction.token,
+            wait: Some(true),
+            with_components: None,
+            webhook_id: self.interaction.application_id.get(),
+        })
+        .use_authorization_token(false)
+        .json(&poll.message_payload())
+        .build()
+        .map_err(safe_http_error)?;
+        let sent = self.track(self.http.request(request).await).await?;
+        if sent.message.poll.is_none() {
+            return Err(Error::handler(crate::PollError::InvalidResponse));
+        }
+        Ok(sent)
     }
 
     /// 本文・埋め込み・従来のコンポーネントを含む追加応答を送ります。

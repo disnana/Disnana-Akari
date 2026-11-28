@@ -207,7 +207,7 @@ async fn first_answer_voters(http: &Client, message: &Message) -> Result<usize> 
 }
 ```
 
-選択肢に絵文字を付けるには `PollAnswerInput::emoji` に `parse_reaction_emoji` で変換した値を渡します。投票者の取得には投稿結果の回答 ID を使います。`send` はチャンネルへの投稿なので、スラッシュコマンドから使う場合はコマンドにも応答してください。
+選択肢に絵文字を付けるには `PollAnswerInput::emoji` に `parse_reaction_emoji` で変換した値を渡します。投票者の取得には投稿結果の回答 ID を使います。コマンドやフォームの応答に投票を付ける場合は、[投票で応答する](responding.md#投票で応答する)を参照してください。
 
 ## 絵文字・投票の終了・有料機能を扱う
 
