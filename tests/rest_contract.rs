@@ -14,6 +14,7 @@ use disnana_akari::{
         channel::Channel,
         id::{Id, marker::ChannelMarker},
     },
+    parse_reaction_emoji,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -264,6 +265,51 @@ async fn fetch_thread_member_preserves_membership_and_checks_identity() {
     };
     timeout(Duration::from_secs(5), async {
         tokio::join!(requests, server)
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn reaction_routes_use_encoded_unicode_and_distinct_actor_targets() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = Client::builder()
+        .token("fixture-rest-token".to_owned())
+        .proxy(listener.local_addr().unwrap().to_string(), true)
+        .build();
+    let unicode = parse_reaction_emoji("❤️").unwrap();
+    let custom = parse_reaction_emoji("<a:wave_1:42>").unwrap();
+    let (channel, message) = (Id::new(2), Id::new(6));
+    let operations = async {
+        client
+            .create_reaction(channel, message, &unicode)
+            .await
+            .unwrap();
+        client
+            .delete_current_user_reaction(channel, message, &unicode)
+            .await
+            .unwrap();
+        client
+            .delete_reaction(channel, message, &custom, Id::new(8))
+            .await
+            .unwrap();
+        client
+            .delete_all_reaction(channel, message, &custom)
+            .await
+            .unwrap();
+    };
+    let server = async {
+        for request in [
+            "PUT /api/v10/channels/2/messages/6/reactions/%E2%9D%A4%EF%B8%8F/@me HTTP/1.1",
+            "DELETE /api/v10/channels/2/messages/6/reactions/%E2%9D%A4%EF%B8%8F/@me HTTP/1.1",
+            "DELETE /api/v10/channels/2/messages/6/reactions/wave_1:42/8 HTTP/1.1",
+            "DELETE /api/v10/channels/2/messages/6/reactions/wave_1:42 HTTP/1.1",
+        ] {
+            respond(&listener, request, "204 No Content", "", "").await;
+        }
+    };
+    timeout(Duration::from_secs(5), async {
+        tokio::join!(operations, server)
     })
     .await
     .unwrap();

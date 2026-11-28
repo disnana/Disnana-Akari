@@ -268,6 +268,46 @@ async fn consume_confirmed_purchase(
 
 消費は、対象 SKU が買い切りの消費型で、今回の利用に対応する権利だとアプリが確認した後に呼びます。Discord が成功を返すと、以降の一覧で `consumed` が `true` になります。 [Discord の購入権利消費 API](https://docs.discord.com/developers/resources/entitlement#consume-an-entitlement)
 
+## メッセージを転送・削除する
+
+`forward_message` は元チャンネルとメッセージの ID を指定して転送し、Discord が作ったメッセージを返します。通知は抑止され、Discord が返したスナップショットは `message_snapshots` から読めます。コマンドで使う場合は、実行者が転送元を閲覧でき、転送先へ投稿できることを確かめます。 [Discord のメッセージ参照](https://docs.discord.com/developers/resources/message#message-reference-object) · [discord.py の転送](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.Message.forward)
+
+`delete_messages` は渡した ID だけを対象にします。空なら通信せず、1件なら通常削除、2〜100件なら一括削除を使います。一括削除はサーバー内で Bot に `MANAGE_MESSAGES` が必要です。重複や作成から14日を超えるメッセージは送信前に拒否します。一括削除に失敗した場合は、その失敗を返します。 [Discord の一括削除仕様](https://docs.discord.com/developers/resources/message#bulk-delete-messages)
+
+```rust
+use disnana_akari::{Error, Result, delete_messages, forward_message, http::Client};
+use disnana_akari::model::id::{Id, marker::{ChannelMarker, MessageMarker}};
+
+async fn copy_to_log(
+    http: &Client, source: Id<ChannelMarker>, message: Id<MessageMarker>, log: Id<ChannelMarker>,
+) -> Result<Id<MessageMarker>> {
+    let copied = forward_message(http, source, message, log).await.map_err(Error::handler)?;
+    Ok(copied.id)
+}
+
+async fn delete_confirmed(
+    http: &Client, channel: Id<ChannelMarker>, confirmed: &[Id<MessageMarker>],
+) -> Result<()> {
+    delete_messages(http, channel, confirmed, Some("確認済みの投稿を整理"))
+        .await.map_err(Error::handler)
+}
+```
+
+## リアクションを付ける・外す
+
+`parse_reaction_emoji` は Unicode 絵文字、`<:name:id>`、`<a:name:id>`、`name:id` を Twilight のリアクション指定に変換します。同じ指定を `ReactionPages` の一覧取得にも使えます。Discord が絵文字を使えるか判定します。Bot 自身のリアクションを外す場合と、他のユーザーのリアクションを消す場合は別の API を使います。 [Discord のリアクション仕様](https://docs.discord.com/developers/resources/message#create-reaction)
+
+```rust
+use disnana_akari::{Error, Result, parse_reaction_emoji, http::Client};
+use disnana_akari::model::channel::Message;
+
+async fn react(http: &Client, message: &Message, emoji: &str) -> Result<()> {
+    let emoji = parse_reaction_emoji(emoji).map_err(Error::handler)?;
+    http.create_reaction(message.channel_id, message.id, &emoji).await?;
+    Ok(())
+}
+```
+
 ## エラーを処理する
 
 読み取りの結果が `404` なら、対象が見つからないという結果にできます。認証、権限、レート制限、レスポンスのデコードに失敗した場合は、エラーを呼び出し元に渡します。

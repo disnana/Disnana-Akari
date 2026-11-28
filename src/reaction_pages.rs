@@ -13,7 +13,7 @@ use twilight_model::{
     user::User,
 };
 
-use crate::rest_pagination::UserPageCursor;
+use crate::{reaction_emoji::valid_reaction_emoji, rest_pagination::UserPageCursor};
 
 /// メッセージの絵文字にリアクションしたユーザーを、ID の小さい順に読み取ります。
 ///
@@ -74,12 +74,17 @@ impl<'a> ReactionPages<'a> {
     ///
     /// # エラー
     ///
-    /// 通信、応答の読み取り、応答の件数または ID の範囲に問題があれば失敗します。
+    /// 種別や絵文字の指定、通信、応答の読み取り、応答の件数や ID の範囲に問題があれば失敗します。
     /// 失敗した場合はカーソルを進めず、同じページから再試行できます。
     pub async fn next_page(&mut self) -> Result<Option<Vec<User>>, ReactionPagesError> {
         let Some(limit) = self.cursor.request_size() else {
             return Ok(None);
         };
+        if !matches!(self.kind, ReactionType::Normal | ReactionType::Burst)
+            || !valid_reaction_emoji(&self.emoji)
+        {
+            return Err(ReactionPagesError::InvalidReaction);
+        }
         let mut request = self
             .http
             .reactions(self.channel, self.message, &self.emoji)
@@ -99,6 +104,9 @@ impl<'a> ReactionPages<'a> {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ReactionPagesError {
+    /// リアクションの種別または絵文字の指定が無効です。
+    #[error("リアクションの種別または絵文字の指定が無効です")]
+    InvalidReaction,
     /// Discord へ取得を要求できませんでした。
     #[error("リアクションの一覧を取得できませんでした")]
     Http(#[from] HttpError),
@@ -194,6 +202,29 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_reaction_configuration_is_rejected_before_http() {
+        let (_listener, http) = local().await;
+        let mut unknown_kind = pages(&http).kind(ReactionType::Unknown(2));
+        let mut invalid_name = ReactionPages::new(
+            &http,
+            Id::new(4),
+            Id::new(6),
+            RequestReactionType::Custom {
+                name: Some("invalid-name"),
+                id: Id::new(8),
+            },
+        );
+        for pages in [&mut unknown_kind, &mut invalid_name] {
+            assert!(matches!(
+                timeout(Duration::from_secs(1), pages.next_page())
+                    .await
+                    .unwrap(),
+                Err(ReactionPagesError::InvalidReaction)
+            ));
+        }
     }
 
     #[tokio::test]

@@ -806,3 +806,6 @@ async fn ready(_event: &Ready) -> Result<()> {
 - `monetization::create_test_entitlement` は `CreateTestEntitlementOwner` で指定した相手にテスト権利を作ります。失敗は `CreateTestEntitlementError` で区別できます。
 - `fetch_thread_member` は指定したユーザーのスレッド参加情報を取得します。`ThreadMemberPages` は参加者を最大100件ずつ取得します。失敗はそれぞれ `ThreadMemberLookupError` と `ThreadMemberPagesError` です。
 - `ForumPost` はフォーラム・メディアチャンネルに投稿し、`ForumThread` で新しいスレッドと最初のメッセージを返します。
+- `forward_message` は指定したメッセージを転送し、新しいメッセージを返します。失敗は `ForwardMessageError` です。
+- `delete_messages` は明示した ID だけを削除します。重複・件数・一括削除できる作成日時を事前に確認し、失敗は `MessageDeletionError` です。
+- `parse_reaction_emoji` は Unicode 絵文字やカスタム絵文字のメンションを Twilight のリアクション指定に変換します。不正な表記は `ReactionEmojiError` です。
