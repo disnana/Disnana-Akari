@@ -16,11 +16,11 @@ const LATE: &str = "2026-01-01T00:00:00.000003Z";
 
 fn pin(id: u64, channel: Id<ChannelMarker>, time: &str) -> Value {
     json!({
-        "pinned_at": time,
+        "pinned_at": time.replace('Z', "+00:00"),
         "message": {
             "id": id.to_string(), "channel_id": channel.to_string(), "type": 0,
             "author": {"id": "4", "username": "fixture", "discriminator": "0"},
-            "content": "", "timestamp": "2025-12-01T00:00:00Z",
+            "content": "", "timestamp": "2025-12-01T00:00:00+00:00",
             "attachments": [], "embeds": [], "mention_everyone": false, "mention_roles": [],
             "mentions": [], "pinned": true, "tts": false
         }
@@ -73,7 +73,10 @@ async fn short_page_with_more_keeps_going_and_retries_invalid_page() {
     let consume = async {
         let items = pages.next_page().await.unwrap().unwrap();
         assert_eq!(items[0].message.id.get(), 8);
-        assert_eq!(items[0].pinned_at, LATE.parse().unwrap());
+        assert_eq!(
+            items[0].pinned_at,
+            Timestamp::parse("2026-01-01T00:00:00.000003+00:00").unwrap()
+        );
         assert!(matches!(
             pages.next_page().await,
             Err(PinPagesError::InvalidPage)
