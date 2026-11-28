@@ -31,13 +31,13 @@ fn raw_forward() -> Value {
     json!({
         "id":"5", "channel_id":"4", "type":0,
         "author":{"id":"6", "username":"bot", "discriminator":"0"},
-        "content":"", "timestamp":"2026-01-01T00:00:00Z",
+        "content":"", "timestamp":"2026-01-01T00:00:00+00:00",
         "attachments":[], "embeds":[], "mention_everyone":false, "mention_roles":[],
         "mentions":[], "pinned":false, "tts":false,
         "message_reference":{"type":1, "channel_id":"2", "message_id":"3"},
         "message_snapshots":[{"message":{
             "type":0, "content":"snapshot", "attachments":[], "embeds":[],
-            "timestamp":"2026-01-01T00:00:00Z"
+            "timestamp":"2026-01-01T00:00:00+00:00"
         }}]
     })
 }
