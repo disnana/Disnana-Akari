@@ -16,6 +16,9 @@ use crate::{
     slash::{interaction_channel_id, interaction_permissions},
 };
 
+#[cfg(test)]
+mod tests;
+
 /// コマンドの実行前に使う、共有可能な非同期チェックです。
 #[derive(Clone)]
 pub struct CommandCheck(Arc<dyn CheckHandler>);
@@ -61,7 +64,17 @@ pub(crate) async fn run_checks(
     checks: &[CommandCheck],
     ctx: CommandCheckContext<'_>,
 ) -> Result<()> {
-    for check in checks {
+    run_invocation_checks(&[], checks, ctx).await
+}
+
+/// 通常のコマンド実行では、Bot 全体の一度限りのチェックを先に行う。
+/// 補完やヘルプの表示候補には `run_checks` を使う。
+pub(crate) async fn run_invocation_checks(
+    once: &[CommandCheck],
+    checks: &[CommandCheck],
+    ctx: CommandCheckContext<'_>,
+) -> Result<()> {
+    for check in once.iter().chain(checks) {
         check.0.call(ctx).await?;
     }
     Ok(())

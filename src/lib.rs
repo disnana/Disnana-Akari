@@ -41,6 +41,7 @@ pub mod soundboard;
 mod startup_readiness;
 mod timing;
 pub mod ui;
+mod ui_sessions;
 pub mod validation;
 pub mod voice_channel;
 mod voice_gateway;
@@ -139,6 +140,10 @@ pub use startup_readiness::{StartupReadiness, StartupReport, StartupShardReport,
 pub use timing::Timing;
 pub use twilight_http as http;
 pub use twilight_model as model;
+pub use ui_sessions::{
+    UiSession, UiSessionActions, UiSessionDraft, UiSessionError, UiSessionLimits, UiSessionOutcome,
+    UiSessions,
+};
 pub use voice_gateway::{
     VoiceConnection, VoiceConnectionInfo, VoiceConnectionStatus, VoiceGateway, VoiceGatewayError,
     VoiceStateChange,
@@ -192,6 +197,7 @@ pub struct Bot {
     voice_gateway: Option<VoiceGateway>,
     event_waiters: Option<EventWaiters>,
     confirmations: Option<Confirmations>,
+    once_checks: Vec<CommandCheck>,
     #[cfg(test)]
     gateway_test_port: Option<u16>,
     #[cfg(test)]
@@ -257,6 +263,7 @@ impl Bot {
             voice_gateway: None,
             event_waiters: None,
             confirmations: None,
+            once_checks: Vec::new(),
             #[cfg(test)]
             gateway_test_port: None,
             #[cfg(test)]
@@ -283,6 +290,17 @@ impl Bot {
     /// Gateway 接続時と実行中のステータスを、共有ハンドルから設定します。
     pub fn with_presence(mut self, presence: PresenceHandle) -> Self {
         self.presence = Some(presence);
+        self
+    }
+
+    /// 登録済みのコマンドを呼び出したとき、一覧のチェックより先に一度だけ実行するチェックを追加します。
+    ///
+    /// テキストでは [`Self::run_commands`] を使います。スラッシュ、コンテキストメニューとハイブリッドにも適用します。
+    /// アプリコマンドで登録時に指定した権限は先に確認します。補完やヘルプが表示候補を調べる
+    /// ときには呼びません。登録順に実行し、拒否またはエラーがあればコマンドは実行しません。
+    #[must_use]
+    pub fn with_command_check_once(mut self, check: CommandCheck) -> Self {
+        self.once_checks.push(check);
         self
     }
 
@@ -624,6 +642,7 @@ impl Bot {
             voice_gateway,
             event_waiters,
             confirmations,
+            once_checks,
             #[cfg(test)]
             gateway_test_port,
             #[cfg(test)]
@@ -640,6 +659,7 @@ impl Bot {
             reporter,
             info,
             messages,
+            once_checks,
             permissions: Arc::new(PermissionResolver::new(permission_cache)),
         };
 
@@ -833,6 +853,7 @@ impl Bot {
         }
         member_query.close();
         confirmations.close();
+        events.close_ui_sessions();
         waiters.close();
         suspend_member_reads(member_cache.as_ref());
         if let Err(error) = stopped {

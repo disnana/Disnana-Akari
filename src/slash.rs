@@ -31,7 +31,7 @@ use crate::{
     CheckFailure, CommandCheck, CommandCheckContext, CommandCheckSource, CommandSyncError, Error,
     ErrorSource, HandlerKind, InfoEvent, RegistrationError, ResponseStateError, Result, Timing,
     autocomplete::{AutocompleteContext, AutocompleteHandler, choice},
-    command_check::run_checks,
+    command_check::run_invocation_checks,
     error::adapt_handler,
     hooks::{Hooks, InfoReporter},
     permissions::check_permissions,
@@ -1398,7 +1398,7 @@ impl ActiveSlashCommands {
         });
         if let Some((route, path, handler)) = handler {
             let checked = self
-                .check_invocation(initial, route, path, CommandCheckSource::Autocomplete)
+                .check_invocation(initial, route, path, CommandCheckSource::Autocomplete, &[])
                 .await;
             let result = match checked {
                 Ok(()) => handler.call(&mut ctx).await,
@@ -1420,14 +1420,16 @@ impl ActiveSlashCommands {
         route: &Route,
         path: &[&str],
         source: CommandCheckSource,
+        once: &[CommandCheck],
     ) -> Result<()> {
-        if !self.checks.is_empty() {
+        if !once.is_empty() || !self.checks.is_empty() {
             let access = crate::Access::for_interaction(
                 initial.http,
                 initial.permissions,
                 initial.interaction,
             );
-            run_checks(
+            run_invocation_checks(
+                once,
                 &self.checks,
                 CommandCheckContext::application(
                     initial.interaction,
@@ -1448,6 +1450,7 @@ impl ActiveSlashCommands {
         route: &Route,
         path: &[&str],
         handler: &dyn SlashHandler,
+        once: &[CommandCheck],
     ) -> Result<()> {
         route.permissions.check(ctx.initial.interaction)?;
         self.check_invocation(
@@ -1455,6 +1458,7 @@ impl ActiveSlashCommands {
             route,
             path,
             CommandCheckSource::Application(route.kind),
+            once,
         )
         .await?;
         handler.call(ctx, &self.invocation_hooks).await
@@ -1507,7 +1511,9 @@ impl ActiveSlashCommands {
             data,
             response_state: &mut response_state,
         };
-        let result = self.call_command(&mut ctx, route, path, handler).await;
+        let result = self
+            .call_command(&mut ctx, route, path, handler, &hooks.once_checks)
+            .await;
         let (check_failed, failed_text) = match result {
             Ok(()) => (false, &hooks.messages.slash_command_failed),
             Err(error) => {
@@ -2666,6 +2672,18 @@ pub(crate) mod tests {
             )
             .build();
         let mut hooks = Hooks::default();
+        let once_calls = std::sync::Arc::clone(&invocations);
+        hooks.once_checks.push(crate::CommandCheck::new(
+            async move |ctx: crate::CommandCheckContext<'_>| {
+                assert!(ctx.command_path().eq(["ping", "advanced", "run"]));
+                assert_eq!(
+                    ctx.source(),
+                    crate::CommandCheckSource::Application(CommandType::ChatInput)
+                );
+                once_calls.lock().unwrap().push("once");
+                Ok(())
+            },
+        ));
         hooks.messages.check_failed = Some("private check failure".into());
         let (_, timing) = crate::timing::Pending::new((), None).begin();
         for (input, expected, absent) in [
@@ -2704,7 +2722,7 @@ pub(crate) mod tests {
                 crate::CommandCheckSource::Autocomplete,
             ]
         );
-        assert_eq!(*invocations.lock().unwrap(), ["before", "after"]);
+        assert_eq!(*invocations.lock().unwrap(), ["once", "before", "after"]);
         Ok(())
     }
 
@@ -2776,6 +2794,7 @@ pub(crate) mod tests {
                 .push(matches!(report.error, Error::Check(CheckFailure::Rejected)));
         });
         let mut hooks = Hooks {
+            once_checks: Vec::new(),
             reporter: hook,
             ..Hooks::default()
         };
@@ -3378,6 +3397,7 @@ pub(crate) mod tests {
         let invalid = Arc::new(Mutex::new(0));
         let notices = Arc::clone(&invalid);
         let mut hooks = Hooks {
+            once_checks: Vec::new(),
             reporter: Reporter::new(move |report| {
                 assert!(matches!(
                     report.error,
@@ -3681,6 +3701,7 @@ pub(crate) mod tests {
         let errors = Arc::new(Mutex::new(Vec::new()));
         let collected_errors = Arc::clone(&errors);
         let mut hooks = Hooks {
+            once_checks: Vec::new(),
             reporter: Reporter::new(move |report| {
                 assert_eq!(report.source, ErrorSource::SlashCommand);
                 assert_eq!(report.name, Some("Inspect"));

@@ -237,6 +237,25 @@ fn register(commands: &mut Commands) -> Result<()> {
 - 両方に対応する → [ハイブリッドコマンド](hybrid-commands.md)
 - 連打を防ぐ → [クールダウン](cooldowns.md)
 
+## 実行時だけ共通のチェックを掛ける
+
+`Bot::with_command_check_once` を使うと、Bot が登録済みのコマンドを実行するときに共通のチェックを一度だけ行えます。テキストとアプリコマンドをまとめて停止したい場合などに使えます。
+
+```rust
+use disnana_akari::{Bot, CheckFailure, CommandCheck, CommandCheckContext};
+
+fn maintenance(bot: Bot, enabled: bool) -> Bot {
+    bot.with_command_check_once(CommandCheck::new(async move |_: CommandCheckContext<'_>| {
+        if enabled {
+            return Err(CheckFailure::Rejected.into());
+        }
+        Ok(())
+    }))
+}
+```
+
+共通チェックはコマンド一覧のチェックより先に呼びます。アプリコマンドで登録時に指定した権限は、共通チェックの前に確認します。補完やチェック付きヘルプが表示候補を調べるときは、共通チェックを実行しません。ヘルプコマンド自体の呼び出しは共通チェックの対象です。`Commands::dispatch` を自分で呼ぶ場合は、一覧に設定したチェックが適用されます。 [discord.py の check_once](https://github.com/Rapptz/discord.py/blob/v2.7.1/discord/ext/commands/bot.py#L417-L455)
+
 ## コマンドの実行前後を処理する
 
 `Commands` に共通の非同期フックを前後1つずつ設定できます。権限チェックと Akari が行う型付き引数の変換を通過したテキスト実行に適用します。ハイブリッドの `!` 側にも適用されます。

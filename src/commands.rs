@@ -27,7 +27,7 @@ use twilight_model::{
 use crate::{
     CommandCheck, CommandCheckContext, Context, Error, ErrorSource, HandlerKind, RegistrationError,
     Result, Timing,
-    command_check::run_checks,
+    command_check::run_invocation_checks,
     hooks::Hooks,
     ui::{ComponentsV2, UiMessage},
 };
@@ -50,9 +50,15 @@ struct Invocation<'a> {
 }
 
 impl<'a> Invocation<'a> {
-    async fn call(&self, ctx: Context<'a>, commands: &'a Commands) -> Result<()> {
-        if !commands.checks.is_empty() {
-            run_checks(
+    async fn call(
+        &self,
+        ctx: Context<'a>,
+        commands: &'a Commands,
+        once: &[CommandCheck],
+    ) -> Result<()> {
+        if !once.is_empty() || !commands.checks.is_empty() {
+            run_invocation_checks(
+                once,
                 &commands.checks,
                 CommandCheckContext::text(&ctx, self.qualified_name),
             )
@@ -411,7 +417,7 @@ impl Commands {
     /// プレフィックスの判定、チェック、コマンド関数のエラーを呼び出し元に伝えます。
     pub async fn dispatch(&self, ctx: Context<'_>) -> Result<()> {
         if let Some(invocation) = self.resolve_message(ctx.message()).await? {
-            invocation.call(ctx, self).await?;
+            invocation.call(ctx, self, &[]).await?;
         }
 
         Ok(())
@@ -449,7 +455,7 @@ impl Commands {
         let Some(invocation) = self.resolve_selected(&ctx.message().content, prefix_len) else {
             return;
         };
-        let Err(error) = invocation.call(ctx, self).await else {
+        let Err(error) = invocation.call(ctx, self, &hooks.once_checks).await else {
             return;
         };
         let name = Some(invocation.qualified_name);
@@ -1036,6 +1042,7 @@ mod tests {
         let names = Arc::new(Mutex::new(Vec::new()));
         let collected = Arc::clone(&names);
         let hooks = Hooks {
+            once_checks: Vec::new(),
             reporter: Reporter::new(move |report| {
                 assert_eq!(report.source, ErrorSource::TextCommand);
                 assert_eq!(report.error.to_string(), "test command failure");

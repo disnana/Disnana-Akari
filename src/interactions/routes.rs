@@ -53,6 +53,17 @@ impl<T: ?Sized> Routes<T> {
         register(&mut self.dynamic, kind, namespace, handler)
     }
 
+    fn ensure_namespace(&self, kind: HandlerKind, namespace: &str) -> Result<()> {
+        if self.dynamic.contains_key(namespace) {
+            return Err(RegistrationError::Duplicate {
+                kind,
+                name: namespace.to_owned(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     pub(super) fn resolve<'a>(&self, id: &'a str) -> Option<(&T, Option<DynamicIdRef<'a>>)> {
         if let Some(handler) = self.exact.get(id) {
             return Some((handler.as_ref(), None));
@@ -99,6 +110,22 @@ macro_rules! register_dynamic {
 }
 
 impl super::InteractionHandlers {
+    pub(crate) fn ensure_ui_session_namespace(&self, namespace: &str) -> Result<()> {
+        self.buttons
+            .ensure_namespace(HandlerKind::Button, namespace)?;
+        self.selects
+            .ensure_namespace(HandlerKind::Select, namespace)?;
+        self.user_selects
+            .ensure_namespace(HandlerKind::UserSelect, namespace)?;
+        self.role_selects
+            .ensure_namespace(HandlerKind::RoleSelect, namespace)?;
+        self.channel_selects
+            .ensure_namespace(HandlerKind::ChannelSelect, namespace)?;
+        self.mentionable_selects
+            .ensure_namespace(HandlerKind::MentionableSelect, namespace)?;
+        self.modals.ensure_namespace(HandlerKind::Modal, namespace)
+    }
+
     register_dynamic!(register_dynamic_button, buttons, Button, ButtonContext);
     register_dynamic!(register_dynamic_select, selects, Select, SelectContext);
     register_dynamic!(

@@ -295,8 +295,8 @@ mod tests {
     use super::*;
     use crate::{
         CheckFailure, CommandCheck, Commands, Context, Error, Needs, RegistrationError,
-        access::tests::Mock, commands::tests::command_message, permissions::PermissionResolver,
-        timing::Pending,
+        access::tests::Mock, commands::tests::command_message, hooks::Hooks,
+        permissions::PermissionResolver, timing::Pending,
     };
     use twilight_model::guild::Permissions;
 
@@ -308,20 +308,24 @@ mod tests {
         HelpView::for_query(commands, query).render(prefix)
     }
 
-    async fn dispatch_help(commands: &Commands, input: &str) -> Result<String> {
+    async fn dispatch_help(commands: &Commands, input: &str, hooks: &Hooks) -> Result<String> {
         let server = Mock::start(vec![("/channels/2/messages".into(), "{}".into())]).await;
         let http = server.client();
         let permissions = PermissionResolver::new(None);
         let message = command_message(input)?;
         let (_, timing) = Pending::new((), None).begin();
         commands
-            .dispatch(Context {
-                http: &http,
-                message: &message,
-                timing,
-                permissions: &permissions,
-            })
-            .await?;
+            .dispatch_with_feedback(
+                Context {
+                    http: &http,
+                    message: &message,
+                    timing,
+                    permissions: &permissions,
+                },
+                "!".len(),
+                hooks,
+            )
+            .await;
         assert_eq!(server.count("POST /channels/2/messages"), 1);
         Ok(
             server.body_of("POST /channels/2/messages").unwrap()["content"]
@@ -464,11 +468,25 @@ mod tests {
         });
         let take_trace = || std::mem::take(&mut *trace.lock().unwrap());
 
-        let index = dispatch_help(&commands, "!visible").await?;
+        let once = Arc::clone(&trace);
+        let hooks = Hooks {
+            once_checks: vec![CommandCheck::new(
+                async move |ctx: CommandCheckContext<'_>| {
+                    once.lock().unwrap().push(format!(
+                        "once {}",
+                        ctx.command_path().collect::<Vec<_>>().join(" ")
+                    ));
+                    Ok(())
+                },
+            )],
+            ..Hooks::default()
+        };
+        let index = dispatch_help(&commands, "!visible", &hooks).await?;
         assert!(index.contains("!config") && !index.contains("!staff"));
         assert_eq!(
             take_trace(),
             [
+                "once visible",
                 "visible",
                 "before visible",
                 "config",
@@ -478,12 +496,13 @@ mod tests {
             ]
         );
 
-        let detail = dispatch_help(&commands, "!visible cfg").await?;
+        let detail = dispatch_help(&commands, "!visible cfg", &hooks).await?;
         assert!(detail.contains("!config show"));
         assert!(!detail.contains("!config lock") && !detail.contains("!config shadow"));
         assert_eq!(
             take_trace(),
             [
+                "once visible",
                 "visible",
                 "before visible",
                 "config",
@@ -493,17 +512,29 @@ mod tests {
             ]
         );
 
-        let denied = dispatch_help(&commands, "!visible cfg l").await?;
+        let denied = dispatch_help(&commands, "!visible cfg l", &hooks).await?;
         assert_eq!(
             take_trace(),
-            ["visible", "before visible", "config lock", "after visible"]
+            [
+                "once visible",
+                "visible",
+                "before visible",
+                "config lock",
+                "after visible"
+            ]
         );
-        let missing = dispatch_help(&commands, "!visible missing").await?;
+        let missing = dispatch_help(&commands, "!visible missing", &hooks).await?;
         assert_eq!(denied, missing);
-        assert_eq!(take_trace(), ["visible", "before visible", "after visible"]);
-        let normal = dispatch_help(&commands, "!help cfg l").await?;
+        assert_eq!(
+            take_trace(),
+            ["once visible", "visible", "before visible", "after visible"]
+        );
+        let normal = dispatch_help(&commands, "!help cfg l", &hooks).await?;
         assert!(normal.contains("!config lock\n管理用"));
-        assert_eq!(take_trace(), ["help", "before help", "after help"]);
+        assert_eq!(
+            take_trace(),
+            ["once help", "help", "before help", "after help"]
+        );
         Ok(())
     }
 

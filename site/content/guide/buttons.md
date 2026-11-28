@@ -357,6 +357,49 @@ async fn show_pages(ctx: &mut SlashContext<'_>, pages: &Pagers) -> Result<Pager>
 
 各ページの形式は Classic または Components V2 のどちらかに揃えます。Akari が移動ボタンの行を末尾に追加するため、その一行分を空けてください。期限より先に操作を終了する場合は `Pager::stop` を使います。ページ切り替えは、Discord がメッセージ編集を受け付けた時点で確定します。
 
+## 同じメッセージで複数の操作を扱う
+
+`UiSessions` に登録した画面では、ボタン、各種セレクト、ボタンなどから開くモーダルを同じセッションで扱えます。操作を許可するユーザーを `begin` で指定し、画面を送ったあとに `bind` で元メッセージを登録します。
+
+```rust
+use disnana_akari::{ButtonContext, Error, Events, Result, SelectContext, SlashContext};
+use disnana_akari::{UiSession, UiSessionActions, UiSessionLimits, UiSessions};
+use disnana_akari::ui::{Button, SelectOption, StringSelect, UiMessage};
+use std::time::Duration;
+
+fn register_sessions(events: &mut Events) -> Result<UiSessions> {
+    let sessions = UiSessions::new(UiSessionLimits::default()).map_err(Error::handler)?;
+    sessions.register(events)?;
+    Ok(sessions)
+}
+
+async fn profile(ctx: &mut SlashContext<'_>, sessions: &UiSessions) -> Result<UiSession> {
+    let owner = ctx.author_id().ok_or_else(|| Error::msg("実行者が分かりません"))?;
+    let mut actions = UiSessionActions::new();
+    actions.on_select("color", async |ctx: &mut SelectContext<'_>, _: UiSession| {
+        ctx.reply_ephemeral(&format!("選択した色は {:?}", ctx.values())).await
+    }).map_err(Error::handler)?;
+    actions.on_button("finish", async |ctx: &mut ButtonContext<'_>, session: UiSession| {
+        ctx.reply_ephemeral("操作を終了します。").await?;
+        session.finish();
+        Ok(())
+    }).map_err(Error::handler)?;
+    let draft = sessions.begin(ctx.interaction_id(), owner, Duration::from_secs(60), actions)
+        .map_err(Error::handler)?;
+    let ui = UiMessage::new()
+        .content("色を選んでください。")
+        .select(StringSelect::new(draft.custom_id("color").map_err(Error::handler)?, vec![
+            SelectOption::new("青", "blue"),
+            SelectOption::new("緑", "green"),
+        ]))
+        .buttons(vec![Button::secondary(draft.custom_id("finish").map_err(Error::handler)?, "終了")]);
+    ctx.reply_ui_ephemeral(&ui).await?;
+    draft.bind(ctx.guild_id(), &ctx.original_response().await?).map_err(Error::handler)
+}
+```
+
+同じメッセージの操作は1件ずつ処理します。`subscribe` で確定した終了理由を取得でき、期限到達や Bot の停止時にも通知されます。期限は `begin` からの経過時間で、操作しても延長されません。操作が実行中の場合、その操作は終了通知のあとに完了することがあります。再起動後も使う画面は、動的 ID とアプリが保存した状態で管理します。 [discord.py の View](https://discordpy.readthedocs.io/en/v2.7.1/interactions/api.html#discord.ui.View)
+
 ## 受け取れる情報
 
 | メソッド | 返す値 |

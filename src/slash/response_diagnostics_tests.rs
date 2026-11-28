@@ -165,6 +165,7 @@ async fn dispatch_does_not_repeat_an_expired_or_acknowledged_callback() -> Resul
         let reports = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&reports);
         let hooks = Hooks {
+            once_checks: Vec::new(),
             reporter: Reporter::new(move |report| {
                 assert_eq!(report.source, ErrorSource::SlashCommand);
                 observed.fetch_add(1, Ordering::Relaxed);

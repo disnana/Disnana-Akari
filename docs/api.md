@@ -779,3 +779,8 @@ async fn ready(_event: &Ready) -> Result<()> {
 
 - `Bot::with_startup_readiness` は全シャードの初期情報をまとめる `StartupReadiness` を返します。`StartupReport` から各 `StartupShardReport` と、メンバー追加取得の `StartupWarmup` を確認できます。起動後の接続状態は `GatewayStatusHandle` で継続して監視できます。
 - `resolve_member`、`resolve_role`、`resolve_channel` はサーバーを指定して名前、ID またはメンションを解決します。候補の重複、対象なし、入力や通信の失敗を `ArgumentResolutionError` で区別します。
+
+## 期限付き UI と実行時の共通チェック
+
+- `UiSessions` は `UiSessionLimits` の範囲で実行者と元メッセージに紐づく操作を管理します。`UiSessionActions` で操作を登録し、`UiSessionDraft` を画面に紐づけて `UiSession` を作ります。準備や登録の失敗は `UiSessionError`、終了は `UiSessionOutcome` で判別できます。
+- `Bot::with_command_check_once` は実際に呼び出されたコマンドの実行前に `CommandCheck` を一度だけ実行します。補完やヘルプの候補を調べる処理には適用しません。

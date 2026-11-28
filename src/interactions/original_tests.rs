@@ -629,6 +629,7 @@ async fn failed_initial_component_callbacks_do_not_send_automatic_replies() -> R
             let reports = Arc::new(AtomicUsize::new(0));
             let seen = Arc::clone(&reports);
             let hooks = Hooks {
+                once_checks: Vec::new(),
                 reporter: Reporter::new(move |report| {
                     assert_eq!(report.source, source);
                     seen.fetch_add(1, Ordering::Relaxed);

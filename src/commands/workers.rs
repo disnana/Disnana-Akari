@@ -279,6 +279,7 @@ mod tests {
         let reports = Arc::new(Mutex::new(Vec::new()));
         let reported = Arc::clone(&reports);
         let mut hooks = Hooks {
+            once_checks: Vec::new(),
             reporter: Reporter::new(move |report| {
                 assert_eq!(report.source, ErrorSource::QueueFull);
                 assert!(matches!(
@@ -376,6 +377,7 @@ mod tests {
         let reports = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&reports);
         let mut hooks = Hooks {
+            once_checks: Vec::new(),
             reporter: Reporter::new(move |report| {
                 assert_eq!(report.name, None);
                 assert_eq!(report.error.to_string(), "prefix provider unavailable");

@@ -606,6 +606,7 @@ async fn dispatches_modal_file_upload_and_checkbox_submissions() {
         })
         .unwrap();
     let hooks = crate::hooks::Hooks {
+        once_checks: Vec::new(),
         messages: Messages {
             modal_accepted: None,
             modal_failed: None,
@@ -693,6 +694,7 @@ async fn dispatches_modal_select_values_with_typed_ids_and_resolved_mentions() {
         })
         .unwrap();
     let hooks = crate::hooks::Hooks {
+        once_checks: Vec::new(),
         messages: Messages {
             modal_accepted: None,
             modal_failed: None,
@@ -752,6 +754,7 @@ async fn dispatches_modal_checkbox_group_values_and_distinguishes_empty_fields()
         })
         .unwrap();
     let hooks = crate::hooks::Hooks {
+        once_checks: Vec::new(),
         messages: Messages {
             modal_accepted: None,
             modal_failed: None,
@@ -966,6 +969,7 @@ async fn dispatches_radio_group_values_from_the_gateway_without_replacing_other_
         })
         .unwrap();
     let hooks = crate::hooks::Hooks {
+        once_checks: Vec::new(),
         messages: Messages {
             modal_accepted: None,
             modal_failed: None,

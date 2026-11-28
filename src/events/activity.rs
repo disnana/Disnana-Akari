@@ -210,6 +210,7 @@ mod tests {
         let errors = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&errors);
         let hooks = Hooks {
+            once_checks: Vec::new(),
             reporter: Reporter::new(move |report| {
                 assert_eq!(report.source, ErrorSource::QueueFull);
                 assert!(matches!(report.error, Error::QueueFull(QueueKind::Event)));

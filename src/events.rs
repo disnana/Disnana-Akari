@@ -11,6 +11,7 @@ mod cached_messages;
 mod dynamic_interactions;
 mod gateway;
 mod reactions;
+mod ui_sessions;
 mod voice_notifications;
 pub(crate) use activity::ActivityEvent;
 use activity::ActivityHandlers;
@@ -55,6 +56,7 @@ pub struct Events {
     gateway: GatewayHandlers,
     voice_notifications: VoiceNotificationHandlers,
     pub(crate) interaction_handlers: InteractionHandlers,
+    ui_session_lifetime: Option<ui_sessions::UiSessionLifetime>,
 }
 
 impl std::fmt::Debug for Events {
