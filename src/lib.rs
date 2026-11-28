@@ -69,6 +69,7 @@ pub mod validation;
 pub mod voice_channel;
 mod voice_gateway;
 mod voice_state_cache;
+mod webhook_message;
 mod webhook_post;
 mod work_queue;
 
@@ -192,6 +193,7 @@ pub use voice_gateway::{
     VoiceStateChange,
 };
 pub use voice_state_cache::{VoiceStateSnapshot, VoiceStateTransition};
+pub use webhook_message::{WebhookMessageEdit, WebhookMessageRef};
 pub use webhook_post::{WebhookPost, WebhookSendError};
 
 /// 権限やフラグを名前で調べる拡張トレイトと、設定の日本語名をまとめて取り込みます。

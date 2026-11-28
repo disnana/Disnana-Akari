@@ -111,7 +111,9 @@ impl<'a> WebhookPost<'a> {
     ///
     /// 入力が無効、Discord が拒否した、応答を読み取れない、または応答の Webhook ID や
     /// 指定したスレッドが一致しない場合に失敗します。応答の失敗時も投稿済みの場合があります。
-    /// Discord エラーの本文とリクエストパスは返さず、トークンを含む Twilight の通信ログも抑止します。
+    /// Discord エラーの本文とリクエストパスを返さず、リクエスト自身の Twilight スパンを抑止します。
+    /// 別タスクの Twilight レートリミッターにはパスが含まれる場合があります。ログ購読では
+    /// `twilight_http_ratelimiting` を対象外にしてください。
     pub async fn send(
         &self,
         http: &Client,
@@ -119,17 +121,7 @@ impl<'a> WebhookPost<'a> {
         token: &str,
     ) -> Result<Message, WebhookSendError> {
         let request = self.request(webhook, token)?;
-        // Twilight 0.18 の HTTP スパンはパスに含まれる Webhook トークンを記録する。
-        let message = async {
-            http.request::<Message>(request)
-                .await
-                .map_err(WebhookSendError::from_http)?
-                .model()
-                .await
-                .map_err(|_| WebhookSendError::InvalidResponse)
-        }
-        .with_subscriber(Dispatch::none())
-        .await?;
+        let message = read_webhook_message(http, request).await?;
         if message.webhook_id != Some(webhook)
             || matches!(self.destination, Destination::Thread(thread) if message.channel_id != thread)
             || (self.poll.is_some() && message.poll.is_none())
@@ -144,13 +136,7 @@ impl<'a> WebhookPost<'a> {
         webhook: Id<WebhookMarker>,
         token: &str,
     ) -> Result<Request, WebhookSendError> {
-        if token.is_empty()
-            || !token
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            return Err(WebhookSendError::InvalidToken);
-        }
+        validate_token(token)?;
         self.validate()?;
         let (thread_id, thread_name, applied_tags) = match self.destination {
             Destination::Channel => (None, None, &[][..]),
@@ -251,10 +237,10 @@ pub enum WebhookSendError {
     #[error(transparent)]
     InvalidPost(#[from] Error),
     /// Discord へのリクエストを作成・送信できませんでした。
-    #[error("Discord へ Webhook 投稿を送信できませんでした")]
+    #[error("Discord の Webhook API と通信できませんでした")]
     Request,
     /// Discord がリクエストを拒否しました。
-    #[error("Discord が Webhook 投稿を拒否しました（HTTP {status}、コード {code:?}）")]
+    #[error("Discord が Webhook の操作を拒否しました（HTTP {status}、コード {code:?}）")]
     Rejected {
         /// HTTP のステータスコードです。
         status: u16,
@@ -267,7 +253,7 @@ pub enum WebhookSendError {
 }
 
 impl WebhookSendError {
-    fn from_http(error: twilight_http::Error) -> Self {
+    pub(crate) fn from_http(error: twilight_http::Error) -> Self {
         match error.kind() {
             ErrorType::Response { status, error, .. } => Self::Rejected {
                 status: status.get(),
@@ -283,6 +269,43 @@ impl WebhookSendError {
             _ => Self::Request,
         }
     }
+}
+
+pub(crate) fn validate_token(token: &str) -> Result<(), WebhookSendError> {
+    if token.is_empty()
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(WebhookSendError::InvalidToken);
+    }
+    Ok(())
+}
+
+pub(crate) async fn request_with_webhook_token<T: Unpin>(
+    http: &Client,
+    request: Request,
+) -> Result<twilight_http::Response<T>, WebhookSendError> {
+    // Twilight 0.18 の HTTP スパンはパスに含まれる Webhook トークンを記録する。
+    async {
+        http.request::<T>(request)
+            .await
+            .map_err(WebhookSendError::from_http)
+    }
+    .with_subscriber(Dispatch::none())
+    .await
+}
+
+pub(crate) async fn read_webhook_message(
+    http: &Client,
+    request: Request,
+) -> Result<Message, WebhookSendError> {
+    request_with_webhook_token::<Message>(http, request)
+        .await?
+        .model()
+        .with_subscriber(Dispatch::none())
+        .await
+        .map_err(|_| WebhookSendError::InvalidResponse)
 }
 
 #[cfg(test)]

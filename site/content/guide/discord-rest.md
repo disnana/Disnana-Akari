@@ -123,7 +123,9 @@ async fn single_use_invite(http: &Client, channel: Id<ChannelMarker>) -> Result<
 
 ## Webhook を使ってメッセージを送る
 
-Webhook の ID と専用トークンを `WebhookPost::send` に渡すと、Discord が投稿を確認し、作成されたメッセージを返します。メンション通知を抑止し、この送信経路の Twilight の通信ログにトークンが入らないようにします。クライアントの既定ヘッダーに `Authorization` を設定しないでください。
+Webhook の ID と専用トークンを `WebhookPost::send` に渡すと、Discord が投稿を確認し、作成されたメッセージを返します。メンション通知を抑止します。クライアントの既定ヘッダーに `Authorization` を設定しないでください。
+
+Akari はこの操作の HTTP リクエストのスパンを抑止します。Twilight のレート制限を担当する別タスクはトークンを含むパスを記録することがあります。ログの対象を Akari に絞るか、購読側で `twilight_http_ratelimiting=off` を指定してください。 [ログの設定](logging.md)
 
 ```rust
 use disnana_akari::{Error, Result, WebhookPost, http::Client};
@@ -153,6 +155,29 @@ async fn publish_forum_update(
 ```
 
 本文・Embed・添付・投票は組み合わせて使えます。`in_thread` は指定した既存スレッドへ投稿し、必要に応じて Discord がアーカイブを解除します。`new_thread` は Forum または Media にスレッドを作成します。同じ送信が受理されたか分からない場合は、再送でメッセージが重複する可能性があります。 [Discord の Webhook API](https://docs.discord.com/developers/resources/webhook#execute-webhook) · [discord.py の Webhook.send](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.Webhook.send)
+
+### 投稿を取得・編集・削除する
+
+投稿時の Webhook ID と、返されたメッセージの ID から `WebhookMessageRef` を作ります。投稿がスレッドにある場合は `in_thread` にメッセージの `channel_id` を渡します。編集項目を指定しなければ元の値を保持します。`content(None)` で本文を、`embeds(&[])` で Embed を消せます。添付を編集するときは、残す添付 ID と追加するファイルの両方を指定します。
+
+```rust
+use disnana_akari::{Result, Error, WebhookMessageEdit, WebhookMessageRef, http::Client};
+use disnana_akari::model::{
+    channel::Message,
+    id::{Id, marker::{ChannelMarker, MessageMarker, WebhookMarker}},
+};
+
+async fn update_report(
+    http: &Client, token: &str, webhook: Id<WebhookMarker>,
+    message: Id<MessageMarker>, thread: Id<ChannelMarker>,
+) -> Result<Message> {
+    let target = WebhookMessageRef::new(webhook, message).in_thread(thread);
+    let edit = WebhookMessageEdit::new().content(Some("集計が確定しました。"));
+    target.edit(http, token, &edit).await.map_err(Error::handler)
+}
+```
+
+同じ参照の `fetch(http, token)` で現在の投稿を取得し、`delete(http, token)` で削除できます。 [Discord の Webhook メッセージ操作](https://docs.discord.com/developers/resources/webhook#get-webhook-message) · [discord.py の WebhookMessage](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.WebhookMessage)
 
 ## サーバー外の予定を登録する
 

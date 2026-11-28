@@ -37,7 +37,7 @@ discord.py 2.7.1 は pytest、pytest-asyncio、pytest-mock とカバレッジを
 
 ## 送信前検証の残り
 
-`WebhookPost` は既存スレッドへの送信と Forum／Media の新規投稿に対応し、本文・Embed・添付・投票を検証します。Webhook 専用トークンだけで投稿し、通信エラーでは HTTP ステータスと Discord の数値コードを使います。Webhook メッセージの取得・編集・削除は Twilight の REST API から呼べます。 [Discord の Webhook API](https://docs.discord.com/developers/resources/webhook)
+`WebhookPost` は既存スレッドへの送信と Forum／Media の新規投稿に対応し、本文・Embed・添付・投票を検証します。`WebhookMessageRef` で通常の投稿とスレッド内の投稿を取得・部分編集・削除できます。新しい添付を追加するときは、現在の添付から残す ID を指定します。通信エラーは HTTP ステータスと Discord の数値コードを保持します。 [Discord の Webhook API](https://docs.discord.com/developers/resources/webhook)
 
 `PollDraft` は質問・選択肢・期間を検証してから、チャンネル投稿、コマンド返信、モーダルの公開応答、公開の遅延応答と追加返信に使えます。Discord が割り当てた回答 ID は `PollVoterPages` に渡せます。投稿から投票・終了までの実機試験は残っています。 [Discord の投票 API](https://docs.discord.com/developers/resources/poll)
 
