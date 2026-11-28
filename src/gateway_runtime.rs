@@ -109,6 +109,12 @@ pub(crate) struct GatewaySet {
 }
 
 impl GatewaySet {
+    pub(crate) fn initialize_startup(&self, tracker: Option<&mut crate::StartupTracker>) {
+        if let Some(tracker) = tracker {
+            tracker.initialize(self.sessions.iter().map(GatewaySession::id));
+        }
+    }
+
     pub(crate) fn configure_event_trackers(&mut self, events: &Events) {
         let lifecycle = events.has_guild_lifecycle_handlers();
         let voice_states = events.voice_state_capacity();

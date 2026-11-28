@@ -30,6 +30,7 @@ mod confirmations;
 mod member_queries;
 mod pagers;
 mod permissions_on_reconnect;
+mod startup;
 mod voice_handshake;
 mod voice_transitions;
 
@@ -655,11 +656,17 @@ async fn recommended_shards_launch_in_waves_and_resume_independently() {
         .unwrap()
         .with_recommended_shards()
         .add_intents(
-            Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT | Intents::GUILD_VOICE_STATES,
+            Intents::GUILDS
+                | Intents::GUILD_MESSAGES
+                | Intents::MESSAGE_CONTENT
+                | Intents::GUILD_VOICE_STATES,
         )
         .with_events(events)
         .with_presence(PresenceHandle::new(Presence::new(Status::Idle)))
         .with_shutdown();
+    let (bot, startup) = bot
+        .with_startup_readiness(Duration::from_secs(12), false)
+        .unwrap();
     let (bot, status) = bot.with_gateway_status();
     let (mut bot, voice) = bot.with_voice_gateway();
     bot.gateway_test_port = Some(gateway_address.port());
@@ -675,7 +682,7 @@ async fn recommended_shards_launch_in_waves_and_resume_independently() {
         tokio::join!(
             client,
             respond_to_discovery(&http, 1),
-            mock_shards(gateway, &url, received, shutdown, &status, &voice)
+            mock_shards(gateway, &url, received, shutdown, &status, &voice, &startup)
         )
     })
     .await
@@ -732,6 +739,7 @@ async fn mock_shards(
     shutdown: ShutdownHandle,
     status: &GatewayStatusHandle,
     voice: &VoiceGateway,
+    startup: &crate::StartupReadiness,
 ) {
     let mut first = accept(&gateway).await;
     assert_eq!(
@@ -757,6 +765,7 @@ async fn mock_shards(
         Some(ShardObservation::Ready(Some(0)))
     ));
 
+    assert!(startup.snapshot().is_none());
     let mut second = accept(&gateway).await;
     assert!(
         timeout(Duration::from_millis(25), receive_opcode(&mut second, 2))
@@ -776,6 +785,19 @@ async fn mock_shards(
         observations.recv().await,
         Some(ShardObservation::Ready(Some(1)))
     ));
+
+    let initial = timeout(Duration::from_secs(1), startup.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!initial.timed_out());
+    assert_eq!(initial.shards().len(), 2);
+    assert!(
+        initial
+            .shards()
+            .iter()
+            .all(|shard| shard.received_ready() && shard.connected())
+    );
     observe_voice_request(
         voice,
         &mut second,

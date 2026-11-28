@@ -81,6 +81,12 @@ pub enum Error {
     /// 同時処理枠か待ち行列がいっぱいです。
     #[error("{}", .0.message())]
     QueueFull(QueueKind),
+    /// 初期接続の準備を待つ制限時間が無効です。
+    #[error("起動準備の制限時間が無効です")]
+    InvalidStartupTimeout,
+    /// 起動時に待つ対象として、メンバーキャッシュの追加取得が設定されていません。
+    #[error("起動準備でメンバー取得を待つには、メンバーキャッシュの追加取得を設定してください")]
+    StartupMemberBootstrapRequired,
     /// Gateway が終了し、Bot の処理が止まりました。
     #[error("Discord Gateway の接続が終了しました")]
     GatewayEnded,

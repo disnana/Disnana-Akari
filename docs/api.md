@@ -774,3 +774,8 @@ async fn ready(_event: &Ready) -> Result<()> {
 - `Pagers` は `PagerLimits` の範囲で期限付きページ切り替えを管理します。各 `PagerPage` を渡して作成した `PagerDraft` を送信したメッセージに紐づけると `Pager` で現在位置の確認と停止ができます。作成と紐づけのエラーは `PagerError` です。
 - `DiscordArgument` は Discord の表記を型に変換する規則です。`Arguments::parse_discord` は引数の読み取りと変換を続けて行い、変換できないときは `InvalidDiscordArgument` を含むエラーを返します。
 - `MemberQuery::query_all` と `query_all_with_presences` は、上限を指定して全件を取得します。`MemberQueryResult::presences` は Discord が返したプレゼンスを参照します。
+
+## 起動準備と名前の解決
+
+- `Bot::with_startup_readiness` は全シャードの初期情報をまとめる `StartupReadiness` を返します。`StartupReport` から各 `StartupShardReport` と、メンバー追加取得の `StartupWarmup` を確認できます。起動後の接続状態は `GatewayStatusHandle` で継続して監視できます。
+- `resolve_member`、`resolve_role`、`resolve_channel` はサーバーを指定して名前、ID またはメンションを解決します。候補の重複、対象なし、入力や通信の失敗を `ArgumentResolutionError` で区別します。

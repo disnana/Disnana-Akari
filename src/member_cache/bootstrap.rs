@@ -61,12 +61,17 @@ impl Bootstrap {
             worker: BootstrapWorker {
                 cache,
                 wake: Arc::default(),
+                progress: Arc::default(),
             },
         }
     }
 
     pub(super) fn worker(&self) -> BootstrapWorker {
         self.worker.clone()
+    }
+
+    pub(super) fn attach_progress(&self, cache: &mut MemberCache) {
+        cache.bootstrap.1 = Some(Arc::clone(&self.worker.progress));
     }
 
     pub(super) fn wake(&self) {
@@ -99,6 +104,7 @@ impl Bootstrap {
             },
         );
         self.wake();
+        cache.bootstrap.notify_progress();
     }
 }
 
@@ -139,11 +145,21 @@ impl Request {
 }
 
 #[derive(Default)]
-pub(super) struct Pending(HashMap<Id<GuildMarker>, Request>);
+pub(super) struct Pending(HashMap<Id<GuildMarker>, Request>, Option<Arc<Notify>>);
 
 impl Pending {
+    fn notify_progress(&self) {
+        if let Some(progress) = &self.1 {
+            progress.notify_one();
+        }
+    }
+
     pub(super) fn cancel_shard(&mut self, shard: ShardId) {
+        let count = self.0.len();
         self.0.retain(|_, request| request.job.shard != shard);
+        if count != self.0.len() {
+            self.notify_progress();
+        }
     }
 
     pub(super) fn pause_shard(&mut self, shard: ShardId) {
@@ -167,6 +183,7 @@ impl Pending {
             .is_some_and(|request| request.job.shard == shard)
         {
             self.0.remove(&guild);
+            self.notify_progress();
         }
     }
 
@@ -179,6 +196,7 @@ impl Pending {
         {
             // 変化の多いサーバーでも、取得候補と同じ件数までしか競合履歴を保存しません。
             self.0.remove(&guild);
+            self.notify_progress();
         }
     }
 
@@ -204,9 +222,23 @@ impl Pending {
 pub(crate) struct BootstrapWorker {
     cache: MemberCacheHandle,
     wake: Arc<Notify>,
+    progress: Arc<Notify>,
 }
 
 impl BootstrapWorker {
+    pub(crate) async fn changed(&self) {
+        self.progress.notified().await;
+    }
+
+    pub(crate) fn has_pending(&self) -> bool {
+        self.cache
+            .0
+            .read()
+            .ok()
+            .and_then(|cache| cache.as_ref().map(|state| !state.bootstrap.0.is_empty()))
+            .unwrap_or_default()
+    }
+
     pub(crate) async fn drive<F: Future>(
         worker: Option<Self>,
         http: &Client,
@@ -251,7 +283,10 @@ impl BootstrapWorker {
         let cache = cache.as_mut()?;
         if cache.order.len() >= cache.capacity.get() {
             // この追加取得は空いているキャッシュだけに使い、満杯時は次のサーバー参加を待ちます。
-            cache.bootstrap.0.clear();
+            if !cache.bootstrap.0.is_empty() {
+                cache.bootstrap.0.clear();
+                cache.bootstrap.notify_progress();
+            }
             return None;
         }
         cache.bootstrap.claim(&cache.suspended)
@@ -288,6 +323,7 @@ impl BootstrapWorker {
         {
             cache.bootstrap.0.insert(job.guild, next);
         }
+        cache.bootstrap.notify_progress();
         true
     }
 }

@@ -332,6 +332,36 @@ async fn main() -> Result<()> {
 
 `on_ready`、`on_message`、メッセージの raw イベントは、**受信した順に 1 件ずつ** 処理されます。処理が遅いと、あとのイベントが待たされます。重い処理は、コマンドやボタンのハンドラー（並行して実行されます）に置くか、`tokio::spawn` で切り分けてください。詳しくは [Akari の動き方](how-it-works.md) を参照してください。
 
+## 全シャードの起動準備を待つ
+
+`Bot::with_startup_readiness` が返すハンドルで、全シャードの接続と初期サーバーの通知を待てます。`Events::on_ready` は引き続きシャードごとに Gateway の `READY` を通知します。
+
+```rust
+use disnana_akari::{Bot, Result, StartupReadiness};
+use disnana_akari::model::gateway::Intents;
+use std::time::Duration;
+
+fn configure_startup(bot: Bot) -> Result<(Bot, StartupReadiness)> {
+    bot.add_intents(Intents::GUILDS)
+        .with_startup_readiness(Duration::from_secs(15), false)
+}
+
+async fn print_initial_state(readiness: &StartupReadiness) {
+    if let Some(report) = readiness.wait().await {
+        for shard in report.shards() {
+            println!("シャード {:?} で利用可能なサーバーは {} 件", shard.shard(), shard.available_guilds());
+        }
+        if report.timed_out() {
+            println!("一部の初期通知が制限時間までに揃いませんでした");
+        }
+    }
+}
+```
+
+Discord が初期サーバーの利用不能を通知した場合は `unavailable_guilds()`、制限時間までに状態が分からない場合は `unresolved_guilds()` で確認できます。Discord から退出の通知を受けたものは `removed_guilds()` に入ります。起動中に接続を失ったシャードは再開または新しい `READY` を待ちます。Bot が結果を出す前に終了した場合は `wait()` が `None` になります。運転中の状態を追うには Gateway 接続状態のハンドルを使います。
+
+既存のメンバーキャッシュ追加取得を設定し、第2引数を `true` にすると、初期サーバーの通知に加えて、設定済みの取得も同じ期限で待ちます。`StartupWarmup::Settled` は追加取得の作業が解消したことを示します。取得件数の上限や通信エラーにより、キャッシュに全員が揃うとは限りません。 [Discord の Gateway READY](https://docs.discord.com/developers/events/gateway-events#ready)
+
 ## 起動時に指定サーバーのメンバーを補う
 
 `with_member_cache_bootstrap` を使うと、明示したサーバーが利用可能になったときに、メンバーをバックグラウンドで取得します。件数はサーバーごとの指定上限とキャッシュ容量の小さい方までで、REST の各ページは最大1,000件です。Gateway の再開時には途中のページから続けます。`on_ready` は取得完了を待たないので、初回から必要なメンバーがいる場合は、キャッシュに見つからなかったときの処理も用意します。`GUILDS` と特権 Intent の `GUILD_MEMBERS` を設定します。

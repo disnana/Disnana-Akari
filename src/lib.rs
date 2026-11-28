@@ -1,6 +1,7 @@
 #![doc = include_str!("../docs/api.md")]
 
 mod access;
+mod argument_resolution;
 mod autocomplete;
 mod channel_ui;
 mod command_check;
@@ -37,6 +38,7 @@ mod presence;
 mod shutdown;
 mod slash;
 pub mod soundboard;
+mod startup_readiness;
 mod timing;
 pub mod ui;
 pub mod validation;
@@ -55,6 +57,7 @@ use member_cache::{
 };
 use message_cache::{MessageCacheRoute, MessageCacheRuntime};
 use message_events::{GatewayDecodeOptions, IncomingEvent};
+use startup_readiness::StartupTracker;
 use tokio::sync::mpsc;
 use twilight_gateway::{ConfigBuilder, Event, EventTypeFlags, Intents, ShardId};
 use twilight_http::{Client, request::TryIntoRequest};
@@ -72,6 +75,9 @@ use twilight_model::{
 };
 
 pub use access::{Access, Needs, PermissionSnapshot};
+pub use argument_resolution::{
+    ArgumentResolutionError, resolve_channel, resolve_member, resolve_role,
+};
 pub use autocomplete::AutocompleteContext;
 pub use command_check::{CommandCheck, CommandCheckContext, CommandCheckSource};
 pub use commands::{
@@ -129,6 +135,7 @@ pub use slash::{
     CommandGroup, CommandOptionLocalizations, CommandSettings, FollowupMessage, Followups,
     SlashCommands, SlashContext, UserMenuTarget,
 };
+pub use startup_readiness::{StartupReadiness, StartupReport, StartupShardReport, StartupWarmup};
 pub use timing::Timing;
 pub use twilight_http as http;
 pub use twilight_model as model;
@@ -181,6 +188,7 @@ pub struct Bot {
     shutdown: Option<ShutdownHandle>,
     recommended_shards: bool,
     gateway_status: Option<GatewayStatusHandle>,
+    startup: Option<StartupTracker>,
     voice_gateway: Option<VoiceGateway>,
     event_waiters: Option<EventWaiters>,
     confirmations: Option<Confirmations>,
@@ -245,6 +253,7 @@ impl Bot {
             shutdown: None,
             recommended_shards: false,
             gateway_status: None,
+            startup: None,
             voice_gateway: None,
             event_waiters: None,
             confirmations: None,
@@ -299,6 +308,27 @@ impl Bot {
             .get_or_insert_with(GatewayStatusHandle::new)
             .clone();
         (self, status)
+    }
+
+    /// 全シャードの接続と初期サーバーの読み込みを待つハンドルを取得します。
+    ///
+    /// `wait_for_member_bootstrap` が真なら、設定済みのメンバーキャッシュの追加取得も待ちます。
+    /// この待機には Gateway の受信とコマンドの処理を続けながら、指定した制限時間を適用します。
+    ///
+    /// # エラー
+    ///
+    /// 制限時間がゼロまたは扱える範囲を超える場合は失敗します。起動時には `GUILDS` Intent が必要です。
+    pub fn with_startup_readiness(
+        mut self,
+        timeout: Duration,
+        wait_for_member_bootstrap: bool,
+    ) -> Result<(Self, StartupReadiness)> {
+        if timeout.is_zero() || std::time::Instant::now().checked_add(timeout).is_none() {
+            return Err(Error::InvalidStartupTimeout);
+        }
+        let (tracker, readiness) = StartupTracker::new(timeout, wait_for_member_bootstrap);
+        self.startup = Some(tracker);
+        Ok((self, readiness))
     }
 
     /// 正常終了を要求できるハンドルを取得します。複数回呼ぶと同じ終了要求を共有します。
@@ -590,6 +620,7 @@ impl Bot {
             shutdown,
             recommended_shards,
             gateway_status,
+            mut startup,
             voice_gateway,
             event_waiters,
             confirmations,
@@ -641,6 +672,7 @@ impl Bot {
             None => http,
         };
         let permissions = Arc::clone(&hooks.permissions);
+        let bootstrap = configured_bootstrap(startup.as_ref(), member_cache.as_ref())?;
         let event_types = gateway_event_types(
             needs_messages,
             slash.is_some()
@@ -648,6 +680,7 @@ impl Bot {
                 || confirmations.0.is_some(),
             permission_cache_events(needs_messages && permissions.cache_enabled(), intents),
         ) | handler_events
+            | startup_event_types(startup.as_ref(), intents)?
             | waiters.event_types()
             | message_cache
                 .as_ref()
@@ -683,6 +716,7 @@ impl Bot {
             member_query.0.as_ref(),
         );
         gateways.configure_event_trackers(&events);
+        gateways.initialize_startup(startup.as_mut());
         let (event_tx, event_queue) = mpsc::channel(limits.queue_capacity);
         let (text_ingress, handle_text) =
             commands::text_workers(text_commands, limits, &http, &permissions, &hooks);
@@ -738,10 +772,16 @@ impl Bot {
                 capture_member_fields: member_cache.is_some(),
                 voice_notifications,
             },
-            |shard| gateway_lost(shard, &permissions, member_cache.as_ref()),
+            |shard| {
+                if let Some(startup) = &startup {
+                    startup.disconnect(shard);
+                }
+                gateway_lost(shard, &permissions, member_cache.as_ref());
+            },
             |gateway, event| {
                 waiters.observe_reaction(&event);
                 let shard = gateway.id();
+                observe_startup(startup.as_ref(), shard, &event);
                 let derived = gateway.observe_derived_gateway_event(&event);
                 let cache = message_cache.as_ref().map(|cache| cache.shard(shard));
                 let Some((event, radio)) = route_gateway_event(
@@ -759,37 +799,14 @@ impl Bot {
                 ) else {
                     return;
                 };
-                let gateway_rtt = gateway.gateway_rtt();
-                match event {
-                    Event::Ready(ready) => {
-                        gateway.ready(ready.user.id);
-                        hooks.info.report(InfoEvent::GatewayReady);
-                        queue_event(
-                            &event_tx,
-                            MessageEvent::Ready(Box::new(ready)),
-                            "READY",
-                            &hooks.reporter,
-                        );
-                    }
-                    Event::Resumed => {
-                        gateway.replay_presence();
-                        hooks.info.report(InfoEvent::GatewayResumed);
-                    }
-                    Event::MessageCreate(message) => {
-                        message_ingress.route(message.message, gateway.own_id(), gateway_rtt, cache)
-                    }
-                    Event::InteractionCreate(interaction) => {
-                        interaction_ingress.route(interaction.0, radio, gateway_rtt)
-                    }
-                    Event::GatewayClose(Some(frame)) => {
-                        hooks.reporter.report(
-                            ErrorSource::Gateway,
-                            None,
-                            &Error::GatewayClose(frame.code),
-                        );
-                    }
-                    _ => {}
-                }
+                dispatch_gateway_event(
+                    gateway,
+                    event,
+                    radio,
+                    cache,
+                    &message_ingress,
+                    &interaction_ingress,
+                );
             },
         );
 
@@ -803,15 +820,17 @@ impl Bot {
             );
         };
         tokio::pin!(workers);
-        let stopped = BootstrapWorker::drive(
-            member_cache
-                .as_ref()
-                .and_then(MemberCacheRuntime::bootstrap_worker),
+        let stopped = drive_bootstrap(
+            startup.as_ref(),
+            bootstrap,
             &http,
-            &hooks.reporter,
+            &hooks,
             shutdown::drive(receive, workers.as_mut(), &mut shutdown),
         )
         .await;
+        if let Some(startup) = &startup {
+            startup.close();
+        }
         member_query.close();
         confirmations.close();
         waiters.close();
@@ -826,6 +845,118 @@ impl Bot {
         drop((event_tx, text_ingress, interactions, busy, confirmation_tx));
         shutdown::finish(gateways.close(), workers).await;
         Ok(())
+    }
+}
+
+fn dispatch_gateway_event(
+    gateway: &mut gateway_runtime::GatewaySession,
+    event: Event,
+    radio: Vec<RadioSubmission>,
+    cache: Option<MessageCacheRoute<'_>>,
+    messages: &GatewayMessageIngress<'_>,
+    interactions: &GatewayInteractionIngress<'_>,
+) {
+    let gateway_rtt = gateway.gateway_rtt();
+    match event {
+        Event::Ready(ready) => {
+            gateway.ready(ready.user.id);
+            messages.hooks.info.report(InfoEvent::GatewayReady);
+            queue_event(
+                messages.events,
+                MessageEvent::Ready(Box::new(ready)),
+                "READY",
+                &messages.hooks.reporter,
+            );
+        }
+        Event::Resumed => {
+            gateway.replay_presence();
+            messages.hooks.info.report(InfoEvent::GatewayResumed);
+        }
+        Event::MessageCreate(message) => {
+            messages.route(message.message, gateway.own_id(), gateway_rtt, cache)
+        }
+        Event::InteractionCreate(interaction) => {
+            interactions.route(interaction.0, radio, gateway_rtt)
+        }
+        Event::GatewayClose(Some(frame)) => {
+            messages.hooks.reporter.report(
+                ErrorSource::Gateway,
+                None,
+                &Error::GatewayClose(frame.code),
+            );
+        }
+        _ => {}
+    }
+}
+
+fn configured_bootstrap(
+    startup: Option<&StartupTracker>,
+    cache: Option<&MemberCacheRuntime>,
+) -> Result<Option<BootstrapWorker>> {
+    let bootstrap = cache.and_then(MemberCacheRuntime::bootstrap_worker);
+    if bootstrap.is_none() && startup.is_some_and(StartupTracker::waits_for_bootstrap) {
+        return Err(Error::StartupMemberBootstrapRequired);
+    }
+    Ok(bootstrap)
+}
+
+fn startup_event_types(
+    startup: Option<&StartupTracker>,
+    intents: Intents,
+) -> Result<EventTypeFlags> {
+    if startup.is_none() {
+        return Ok(EventTypeFlags::empty());
+    }
+    if !intents.contains(Intents::GUILDS) {
+        return Err(Error::MissingEventIntents {
+            any_of: Intents::GUILDS,
+        });
+    }
+    Ok(startup_readiness::STARTUP_EVENTS)
+}
+
+fn observe_startup(
+    startup: Option<&StartupTracker>,
+    shard: ShardId,
+    event: &Result<IncomingEvent>,
+) {
+    let Some(tracker) = startup else {
+        return;
+    };
+    match event {
+        Ok(IncomingEvent::Standard(event)) => tracker.observe(shard, event),
+        Err(error)
+            if message_events::lost_gateway_event(error, startup_readiness::STARTUP_EVENTS) =>
+        {
+            tracker.invalidate(shard);
+        }
+        _ => {}
+    }
+}
+
+async fn drive_bootstrap<F: Future>(
+    startup: Option<&StartupTracker>,
+    bootstrap: Option<BootstrapWorker>,
+    http: &Client,
+    hooks: &Hooks,
+    drive: F,
+) -> F::Output {
+    let worker = BootstrapWorker::drive(bootstrap.clone(), http, &hooks.reporter, drive);
+    let Some(startup) = startup else {
+        return worker.await;
+    };
+    let startup_progress = startup.run(
+        || bootstrap.as_ref().is_some_and(BootstrapWorker::has_pending),
+        async || match bootstrap.as_ref() {
+            Some(worker) => worker.changed().await,
+            None => std::future::pending().await,
+        },
+    );
+    tokio::pin!(worker);
+    tokio::select! {
+        biased;
+        result = &mut worker => result,
+        () = startup_progress => worker.await,
     }
 }
 

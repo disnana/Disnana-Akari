@@ -5,6 +5,7 @@ mod groups;
 mod help;
 mod invoke;
 mod prefix;
+mod resolution;
 mod workers;
 pub use arguments::{
     ArgumentError, ArgumentValueError, Arguments, DiscordArgument, InvalidDiscordArgument,

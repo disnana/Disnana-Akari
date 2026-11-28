@@ -305,6 +305,24 @@ async fn check(ctx: CommandContext<'_>) -> Result<()> {
 
 引数が無ければ `Ok(None)`、表記が無効なら変換エラーです。自分の型にも `DiscordArgument` を実装できます。
 
+### 名前からメンバー・ロール・チャンネルを探す
+
+`CommandContext` の `resolve_member`、`resolve_role`、`resolve_channel` は、コマンドが実行されたサーバーで ID・メンション・名前を解決します。名前は完全一致で比較し、同名の異なる候補があると `ArgumentResolutionError::Ambiguous` を返します。空白を含む名前は引用符で囲めます。
+
+```rust
+use disnana_akari::{CommandContext, Error, Result};
+
+async fn role_info(ctx: CommandContext<'_>) -> Result<()> {
+    let Some(name) = ctx.arguments().next().transpose().map_err(Error::handler)? else {
+        return ctx.reply("ロール名かメンションを指定してください。").await;
+    };
+    let role = ctx.resolve_role(&name).await.map_err(Error::handler)?;
+    ctx.reply(&format!("ロール ID は {} です。", role.id)).await
+}
+```
+
+メンバー名はユーザー名またはニックネームを Discord の検索結果から調べます。メンバーキャッシュを渡した場合は ID とメンションの照会に使います。スレッドは ID またはメンションで指定します。取得範囲は Bot 自身のアクセス権に従います。実行者の権限を確認する処理は、操作や返信の前にコマンド側で行います。ハイブリッドコマンドで自由入力の文字列を解決する場合は、クレート直下の同名関数へ `ctx.http()` とサーバー ID を渡せます。 [discord.py の変換処理](https://github.com/Rapptz/discord.py/blob/v2.7.1/discord/ext/commands/converter.py) · [Discord のメンバー検索](https://docs.discord.com/developers/resources/guild#search-guild-members)
+
 ### 引数変換を実行前フックより先に行う
 
 `register_parsed` に変換関数とハンドラーを渡すと、両方のフックが有効でも、変換を通過した呼び出しだけが実行前フックへ進みます。変換関数は非同期なので、必要ならアプリのデータを照会できます。ハンドラーに渡す変換結果には `String` などの所有型を使います。

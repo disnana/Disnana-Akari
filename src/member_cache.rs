@@ -148,7 +148,10 @@ impl MemberCacheRuntime {
             }
             None => (handle, None),
         };
-        let cache = MemberCache::new(capacity);
+        let mut cache = MemberCache::new(capacity);
+        if let Some(bootstrap) = &bootstrap {
+            bootstrap.attach_progress(&mut cache);
+        }
         let cache = match handle {
             Some(handle) => {
                 if let Ok(mut shared) = handle.0.write() {
