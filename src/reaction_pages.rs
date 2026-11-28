@@ -132,72 +132,111 @@ pub enum ReactionPagesError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::TcpListener,
+        time::timeout,
+    };
+
     use super::*;
-    use crate::access::tests::Mock;
 
-    const ROUTE: &str = "/channels/4/messages/6/reactions/%E2%9D%A4";
+    const ROUTE: &str = "/api/v10/channels/4/messages/6/reactions/%E2%9D%A4";
 
-    fn users(ids: &[u64]) -> String {
-        serde_json::Value::Array(
-            ids.iter()
-                .map(|id| {
-                    serde_json::json!({
-                        "id":id.to_string(), "username":"fixture", "discriminator":"0"
-                    })
+    async fn local() -> (TcpListener, Client) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http = Client::builder()
+            .proxy(listener.local_addr().unwrap().to_string(), true)
+            .build();
+        (listener, http)
+    }
+
+    async fn reply(listener: &TcpListener, query: &str, ids: &[u64]) {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut line = String::new();
+        socket.read_line(&mut line).await.unwrap();
+        assert_eq!(line.trim_end(), format!("GET {ROUTE}?{query} HTTP/1.1"));
+        while !line.trim_end().is_empty() {
+            line.clear();
+            assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+        }
+        let users: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id":id.to_string(), "username":"fixture", "discriminator":"0"
                 })
-                .collect(),
+            })
+            .collect();
+        let body = serde_json::to_string(&users).unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket
+            .get_mut()
+            .write_all(response.as_bytes())
+            .await
+            .unwrap();
+    }
+
+    fn pages(http: &Client) -> ReactionPages<'_> {
+        ReactionPages::new(
+            http,
+            Id::new(4),
+            Id::new(6),
+            RequestReactionType::Unicode { name: "❤" },
         )
-        .to_string()
+        .after(Id::new(10))
     }
 
     #[tokio::test]
     async fn pages_sort_each_response_and_forward_cursor_kind_and_total_limit() {
-        let first = format!("{ROUTE}?after=10&limit=2&type=1");
-        let second = format!("{ROUTE}?after=12&limit=1&type=1");
-        let mock = Mock::start(vec![
-            (first.clone(), users(&[12, 11])),
-            (second.clone(), users(&[15])),
-        ])
-        .await;
-        let http = mock.client();
-        let mut pages = ReactionPages::new(
-            &http,
-            Id::new(4),
-            Id::new(6),
-            RequestReactionType::Unicode { name: "❤" },
-        )
-        .kind(ReactionType::Burst)
-        .after(Id::new(10))
-        .page_size(NonZeroU16::new(2).unwrap())
-        .limit(3);
-        assert_eq!(mock.count(&first), 0);
-        let page = pages.next_page().await.unwrap().unwrap();
-        assert!(page.iter().map(|user| user.id.get()).eq([11, 12]));
-        assert_eq!(pages.next_page().await.unwrap().unwrap()[0].id.get(), 15);
-        assert!(pages.next_page().await.unwrap().is_none());
-        assert_eq!(mock.count(&first), 1);
-        assert_eq!(mock.count(&second), 1);
+        let (listener, http) = local().await;
+        let mut pages = pages(&http)
+            .kind(ReactionType::Burst)
+            .page_size(NonZeroU16::new(2).unwrap())
+            .limit(3);
+        let server = async {
+            reply(&listener, "after=10&limit=2&type=1", &[12, 11]).await;
+            reply(&listener, "after=12&limit=1&type=1", &[15]).await;
+        };
+        let read = async {
+            let page = pages.next_page().await.unwrap().unwrap();
+            assert!(page.iter().map(|user| user.id.get()).eq([11, 12]));
+            assert_eq!(pages.next_page().await.unwrap().unwrap()[0].id.get(), 15);
+            assert!(pages.next_page().await.unwrap().is_none());
+        };
+        timeout(Duration::from_secs(5), async {
+            tokio::join!(server, read);
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn invalid_pages_do_not_mutate_the_cursor_or_remaining_size() {
-        let route = format!("{ROUTE}?after=10&limit=2&type=0");
-        let mock = Mock::start(vec![(route.clone(), users(&[10, 11]))]).await;
-        let http = mock.client();
-        let mut pages = ReactionPages::new(
-            &http,
-            Id::new(4),
-            Id::new(6),
-            RequestReactionType::Unicode { name: "❤" },
-        )
-        .after(Id::new(10))
-        .limit(2);
-        for count in 1..=2 {
+        let (listener, http) = local().await;
+        let mut pages = pages(&http).limit(2);
+        let server = async {
+            for ids in [[10, 11], [11, 12]] {
+                reply(&listener, "after=10&limit=2&type=0", &ids).await;
+            }
+        };
+        let read = async {
             assert!(matches!(
                 pages.next_page().await,
                 Err(ReactionPagesError::InvalidPage)
             ));
-            assert_eq!(mock.count(&route), count);
-        }
+            assert_eq!(pages.next_page().await.unwrap().unwrap().len(), 2);
+            assert!(pages.next_page().await.unwrap().is_none());
+        };
+        timeout(Duration::from_secs(5), async {
+            tokio::join!(server, read);
+        })
+        .await
+        .unwrap();
     }
 }
