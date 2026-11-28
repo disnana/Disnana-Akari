@@ -20,7 +20,7 @@ async fn local() -> (TcpListener, Client) {
 }
 
 fn raw(user: u64) -> Value {
-    json!({"id": "2", "user_id": user.to_string(), "join_timestamp": "2024-04-15T12:00:00Z", "flags": 0})
+    json!({"id": "2", "user_id": user.to_string(), "join_timestamp": "2024-04-15T12:00:00+00:00", "flags": 0})
 }
 
 fn full(user: u64, guild_user: u64) -> Value {
