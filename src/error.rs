@@ -508,9 +508,6 @@ pub enum ResponseStateError {
     /// この操作では、元のメッセージを更新できません。
     #[error("この操作では元のメッセージを更新できません")]
     CannotUpdate,
-    /// モーダルを開いたメッセージが送信データに含まれていません。
-    #[error("更新できる元のメッセージがありません")]
-    SourceMessageUnavailable,
     /// Components V2 のメッセージの更新には、`update_v2` を使う必要があります。
     #[error("Components V2 のメッセージには update_v2 を使ってください")]
     UseUpdateV2,
@@ -523,6 +520,9 @@ pub enum ResponseStateError {
     /// 指定した編集方法と、元の応答のコンポーネント形式が一致しません。
     #[error("元の応答の形式に合う編集方法を使ってください")]
     OriginalResponseFormatMismatch,
+    /// モーダルを開いたメッセージが送信データに含まれていません。
+    #[error("更新できる元のメッセージがありません")]
+    SourceMessageUnavailable,
 }
 
 /// Discord が送った選択内容を、読み取れなかった理由です。
