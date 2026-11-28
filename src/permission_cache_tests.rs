@@ -119,8 +119,8 @@ async fn gateway_updates_refresh_only_the_needed_rest_entries() {
             assert_eq!(role.guild_id, Id::new(10));
             let held = handler_resolver
                 .resolve(&handler_http, &handler_message)
-                .await?;
-            handler_checked.store(!held.intersects(allowed), Ordering::Relaxed);
+                .await;
+            handler_checked.store(permissions_unavailable(held), Ordering::Relaxed);
             Ok(())
         });
         let hooks = Hooks::default();
@@ -149,12 +149,14 @@ async fn gateway_updates_refresh_only_the_needed_rest_entries() {
         )
         .await;
         assert!(checked.load(Ordering::Relaxed));
-        let held = resolver.resolve(&http, &message).await.unwrap();
-        assert!(!held.intersects(allowed));
+        assert!(permissions_unavailable(
+            resolver.resolve(&http, &message).await
+        ));
 
         update_permission_cache(&resolver, &Event::Resumed, twilight_gateway::ShardId::ONE);
-        let held = resolver.resolve(&http, &message).await.unwrap();
-        assert!(!held.intersects(allowed));
+        assert!(permissions_unavailable(
+            resolver.resolve(&http, &message).await
+        ));
     };
     tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(commands, server);
@@ -181,9 +183,12 @@ async fn role_delete_during_rest_fetch_prevents_using_the_old_permissions() {
     let commands = async {
         let mut message = message(&http).await;
         message.channel_id = Id::new(11);
-        let held = resolver.resolve(&http, &message).await.unwrap();
-        assert!(!held.contains(Permissions::MANAGE_MESSAGES));
-        assert_eq!(resolver.resolve(&http, &message).await.unwrap(), held);
+        assert!(permissions_unavailable(
+            resolver.resolve(&http, &message).await
+        ));
+        assert!(permissions_unavailable(
+            resolver.resolve(&http, &message).await
+        ));
     };
     tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(commands, server);
@@ -272,19 +277,24 @@ async fn malformed_role_update_invalidates_only_its_shard() {
                 .unwrap()
                 .contains(allowed)
         );
-        assert!(
-            !resolver
-                .resolve(&http, &first)
-                .await
-                .unwrap()
-                .contains(allowed)
-        );
+        assert!(permissions_unavailable(
+            resolver.resolve(&http, &first).await
+        ));
     };
     tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(checks, server);
     })
     .await
     .unwrap();
+}
+
+fn permissions_unavailable(held: Result<Permissions>) -> bool {
+    matches!(
+        held,
+        Err(crate::Error::Check(
+            crate::CheckFailure::PermissionsUnavailable
+        ))
+    )
 }
 
 fn role_deleted(guild: u64) -> Event {

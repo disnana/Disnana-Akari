@@ -51,14 +51,25 @@ cargo package --offline --list
 
 `--include-bots` で別の Bot と Webhook の投稿から `!ping` が起動するかは未確認です。
 
+## 0.3.1 の管理操作を確認する
+
+ローカル HTTP テストで、別サーバーのチャンネルへの変更が送信されないこと、同じ位置のロールが ID 順になること、BAN で対象の Unknown Member だけを特例にすること、VC 操作が Discord の拒否を返すことを確認します。
+
+Discord 実機の結果はローカルの結果と区別して記録します。実機では専用サーバーと試験用アカウントを使い、作成したロール、チャンネル、タイムアウト、BAN を試験後に元へ戻します。
+
+- [ ] 同じ位置の異なるロールと、まったく同じロールで階層の判定を比較する。
+- [ ] 管理者に対するタイムアウトの拒否と、一般メンバーの設定・解除を確認する。
+- [ ] Bot の対象 VC に対する権限を変え、テキスト経由で移動・切断・ミュート・スピーカーミュートを確認する。
+- [ ] チャンネルの上書きと、試験用チャンネル・ロールの作成、編集、削除を確認する。
+
 ## 公開 API の互換性を確認する
 
-Rust CI の `Public API compatibility` は、公開済みのタグ `v0.2.1` と現在の公開 API を比較します。新しい API の追加を許し、既存の公開関数や型の削除などの互換性を壊す変更は検出します。
+Rust CI の `Public API compatibility` は、公開済みのタグ `v0.3.0` と現在の公開 API を比較します。新しい API の追加を許し、既存の公開関数や型の削除などの互換性を壊す変更は検出します。
 
 同じ検査を手元で実行する場合は、Rust 1.90.0 と cargo-semver-checks 0.46.0 を使います。Akari の最小対応 Rust は、別のパッケージ検証ジョブで確認します。
 
 ```sh
-cargo +1.90.0 semver-checks check-release --baseline-rev v0.2.1 --release-type minor
+cargo +1.90.0 semver-checks check-release --baseline-rev v0.3.0 --release-type minor
 ```
 
 互換性の基準を次の公開版へ移す場合は、CI のタグとこの手順を一緒に変更します。[cargo-semver-checks の公式ドキュメント](https://github.com/obi1kenobi/cargo-semver-checks)
@@ -96,8 +107,8 @@ cargo publish --locked --registry crates-io
 次の版では `Cargo.toml` と `Cargo.lock` のバージョンを更新し、変更履歴を揃えて `main` に反映します。公開対象のコミットに、その版と一致する `v` 付きタグを作って push します。たとえば、`0.2.1` を公開する場合は次のように実行します。
 
 ```sh
-git tag -a v0.2.1 -m "Release v0.2.1"
-git push origin refs/tags/v0.2.1
+git tag -a v0.3.1 -m "Release v0.3.1"
+git push origin refs/tags/v0.3.1
 ```
 
 GitHub Actions はタグ名と `Cargo.toml` のバージョン、公開対象コミットが `main` の履歴に含まれることを確認します。CI と RustSec 監査の成功後、GitHub の OIDC で取得した短期トークンを使って公開します。Actions の **Run workflow** では検証だけ実行できます。[Publish to crates.io](https://github.com/disnana/Disnana-Akari/actions/workflows/publish.yml) · [Trusted Publishing の公式ガイド](https://crates.io/docs/trusted-publishing)

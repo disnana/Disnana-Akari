@@ -11,9 +11,9 @@
 - `Access::require_can_moderate` で、ロールの階層から、対象のメンバーを操作できるかを確認できます。所有者、自分自身、Bot 自身、最上位ロールが同じか上の相手は拒否します。`CheckFailure` に `BotMissingPermissions`、`NotGuildOwner`、`MissingRole`、`Hierarchy` を追加しました。
 - `Needs` と `Commands::require`、`SlashCommands::require` で、必要な権限を登録時に宣言できます。ハンドラーの前に、実行者、Bot の順に確認します。登録されていない名前は、登録の時点で失敗します。独自のチェックからは `CommandCheckContext::access()` を使えます。
 - チャンネルの権限の上書きを、`Overwrite`、`Tri`、`OverwriteTarget` で読み書きできます（`overwrite_of`、`set_overwrite`、`delete_overwrite`）。ロールの権限は `role_permissions`、`set_role_permissions` です。送る前に、Bot の権限とロールの位置を確認します。
-- `ctx.manage()` で、メンバー（キック、BAN、BAN の解除、タイムアウト、ニックネーム、ロールの付け外し）と VC（移動、ミュート、スピーカーミュート）を管理できます。送る前に、Bot の権限とロールの階層を確認し、足りなければ通信せずに失敗します。範囲外の値は `InvalidArgument` で失敗します。
+- `ctx.manage()` で、メンバー（キック、BAN、BAN の解除、タイムアウト、ニックネーム、ロールの付け外し）と VC（移動、ミュート、スピーカーミュート）を管理できます。メンバー操作は事前に Bot の権限と階層を確認し、VC 操作は Discord が操作先の権限を判定します。範囲外の値は `InvalidArgument` で失敗します。
 - チャンネルとロールの作成、編集、削除を、種類ごとの型で行えます（`NewTextChannel`、`NewVoiceChannel`、`NewCategory`、`TextChannelEdit`、`VoiceChannelEdit`、`NewRole`、`RoleEdit`）。名前やトピックなどの範囲は、送る前に検証します。
-- 管理操作は、実行した人が操作してよいかを確認しません。呼ぶ前に `require_permissions` と `require_can_moderate` で確認してください。
+- 管理操作をコマンドから呼ぶ場合、実行者はアプリ側で認可します。操作対象のチャンネルやサーバー全体の権限を使い、メンバー操作では必要に応じて `require_can_moderate` で階層も確認します。
 
 ## 0.3.0
 
