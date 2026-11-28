@@ -28,9 +28,11 @@ pub(crate) struct GatewaySet {
 }
 
 impl GatewaySet {
-    pub(crate) fn enable_guild_lifecycle(&mut self) {
-        for session in &mut self.sessions {
-            session.guild_lifecycle = Some(GuildLifecycleTracker::new(session.id()));
+    pub(crate) fn configure_guild_lifecycle(&mut self, enabled: bool) {
+        if enabled {
+            for session in &mut self.sessions {
+                session.guild_lifecycle = Some(GuildLifecycleTracker::new(session.id()));
+            }
         }
     }
 

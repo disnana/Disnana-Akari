@@ -606,9 +606,7 @@ impl Bot {
         };
         let mut gateways = plan.prepare(config, presence.as_ref())?;
         gateways.install_handles(gateway_status.as_ref(), voice_gateway.as_ref());
-        if events.has_guild_lifecycle_handlers() {
-            gateways.enable_guild_lifecycle();
-        }
+        gateways.configure_guild_lifecycle(events.has_guild_lifecycle_handlers());
         let (event_tx, event_queue) = mpsc::channel(limits.queue_capacity);
         let (text_ingress, handle_text) =
             commands::text_workers(text_commands, limits, &http, &permissions, &hooks);
@@ -1259,10 +1257,11 @@ fn handler_event_types(events: &Events, intents: Intents) -> Result<EventTypeFla
         Intents::GUILD_MESSAGE_TYPING | Intents::DIRECT_MESSAGE_TYPING,
     )?;
     let gateway = events.gateway_types(intents)?;
-    let guild_lifecycle = events
-        .has_guild_lifecycle_handlers()
-        .then_some(guild_lifecycle::LIFECYCLE_EVENTS)
-        .unwrap_or_else(EventTypeFlags::empty);
+    let guild_lifecycle = if events.has_guild_lifecycle_handlers() {
+        guild_lifecycle::LIFECYCLE_EVENTS
+    } else {
+        EventTypeFlags::empty()
+    };
     check_event_intents(intents, guild_lifecycle, Intents::GUILDS)?;
     Ok(message_lifecycle | reactions | activity | gateway | guild_lifecycle)
 }
