@@ -528,7 +528,7 @@ async fn dispatches_raw_then_cached_in_fifo_and_keeps_raw_cache_misses() {
             &tx,
             &hooks.reporter,
             ShardId::ONE,
-            (None, Some(route)),
+            (None, Some(route), None),
         );
     }
     drop(tx);

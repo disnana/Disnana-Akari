@@ -460,7 +460,7 @@ mod tests {
                     &tx,
                     &hooks.reporter,
                     twilight_gateway::ShardId::ONE,
-                    (None, None),
+                    (None, None, None),
                 )
                 .is_none()
             );

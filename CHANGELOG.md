@@ -1,5 +1,12 @@
 # 変更履歴
 
+## Unreleased
+
+### 追加
+
+- `Events::on_guild_lifecycle` で、起動時の読み込み、新しいサーバーへの参加、一時停止、復旧、退出を区別できます。
+- `Commands::register_parsed` と `TextCommandGroup::subcommand_parsed` で、テキストコマンド専用の非同期引数変換を実行前フックより先に行えます。どちらも別名付きで登録できます。
+
 ## 0.3.1
 
 権限の確認と、チャンネル、ロール、メンバーの管理を、数値やビットを書かずに、安全に行えるようにしました。0.3.0 から更新する場合は、`disnana-akari = "0.3"` のまま `cargo update` で更新できます。公開 API は追加だけです。

@@ -384,7 +384,7 @@ mod tests {
                 &tx,
                 &Hooks::default().reporter,
                 first,
-                (Some(runtime.shard(first)), None),
+                (Some(runtime.shard(first)), None, None),
             )
             .is_none()
         );
@@ -461,7 +461,7 @@ mod tests {
                     &tx,
                     &hooks.reporter,
                     shard,
-                    (Some(cache), None),
+                    (Some(cache), None, None),
                 )
                 .is_none()
             );

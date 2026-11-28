@@ -9,7 +9,8 @@ use twilight_gateway::{ConfigBuilder, Event, EventTypeFlags, Shard, ShardId, Sha
 use twilight_model::id::{Id, marker::UserMarker};
 
 use crate::{
-    Error, GatewayShardState, GatewayStatusHandle, PresenceHandle, Result,
+    Error, GatewayShardState, GatewayStatusHandle, GuildLifecycleEvent, PresenceHandle, Result,
+    guild_lifecycle::{GuildLifecycleTracker, LIFECYCLE_EVENTS},
     message_events::{self, GatewayDecodeOptions, IncomingEvent},
     presence::PresenceUpdates,
     shutdown,
@@ -27,6 +28,12 @@ pub(crate) struct GatewaySet {
 }
 
 impl GatewaySet {
+    pub(crate) fn enable_guild_lifecycle(&mut self) {
+        for session in &mut self.sessions {
+            session.guild_lifecycle = Some(GuildLifecycleTracker::new(session.id()));
+        }
+    }
+
     pub(crate) fn install_handles(
         &mut self,
         status: Option<&GatewayStatusHandle>,
@@ -117,6 +124,7 @@ pub(crate) struct GatewaySession {
     own_id: Option<Id<UserMarker>>,
     status: Option<GatewayStatusHandle>,
     voice: Option<VoiceIngress>,
+    guild_lifecycle: Option<GuildLifecycleTracker>,
 }
 
 impl GatewaySession {
@@ -135,6 +143,22 @@ impl GatewaySession {
             own_id: None,
             status: None,
             voice: None,
+            guild_lifecycle: None,
+        }
+    }
+
+    pub(crate) fn observe_guild_lifecycle(
+        &mut self,
+        incoming: &Result<IncomingEvent>,
+    ) -> Option<GuildLifecycleEvent> {
+        let tracker = self.guild_lifecycle.as_mut()?;
+        match incoming {
+            Ok(IncomingEvent::Standard(event)) => tracker.observe(event),
+            Err(error) if message_events::lost_gateway_event(error, LIFECYCLE_EVENTS) => {
+                tracker.reset();
+                None
+            }
+            _ => None,
         }
     }
 

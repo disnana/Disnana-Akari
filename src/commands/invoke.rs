@@ -2,8 +2,11 @@ use std::{future::Future, panic::AssertUnwindSafe, pin::Pin};
 
 use futures_util::FutureExt as _;
 
-use super::CommandContext;
-use crate::{Error, Result, error::panic_error};
+use super::{CommandContext, CommandHandler, PreparedTextHandler};
+use crate::{
+    Error, Result,
+    error::{handler_error, panic_error},
+};
 
 type HookFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
 
@@ -58,7 +61,27 @@ impl<'a> CommandContext<'a> {
     }
 }
 
-async fn catch_result(future: impl Future<Output = Result<()>>) -> Result<()> {
+pub(super) fn parsed_handler<T, P, E>(
+    parse: impl AsyncFn(&CommandContext<'_>) -> std::result::Result<T, P> + Send + Sync + 'static,
+    handler: impl for<'a> AsyncFn(CommandContext<'a>, T) -> std::result::Result<(), E>
+    + Send
+    + Sync
+    + 'static,
+) -> Box<dyn CommandHandler>
+where
+    T: 'static,
+    P: Into<Box<dyn std::error::Error + Send + Sync>>,
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    Box::new(PreparedTextHandler(async move |ctx: CommandContext<'_>| {
+        let parsed = catch_result(async { parse(&ctx).await.map_err(handler_error) }).await?;
+        let handler = &handler;
+        ctx.invoke_prepared(async move |ctx| handler(ctx, parsed).await.map_err(handler_error))
+            .await
+    }))
+}
+
+async fn catch_result<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
     match AssertUnwindSafe(future).catch_unwind().await {
         Ok(result) => result,
         Err(payload) => Err(panic_error(payload)),
@@ -200,6 +223,106 @@ mod tests {
                 ("after_panic".into(), false),
             ]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parsed_text_checks_and_converts_before_running_hooks() -> Result<()> {
+        let mut commands = Commands::new("!")?;
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let checks = Arc::clone(&trace);
+        commands.add_check(CommandCheck::new(
+            async move |ctx: CommandCheckContext<'_>| {
+                if ctx.command_path().eq(["stop"]) {
+                    return Err(CheckFailure::Rejected.into());
+                }
+                checks.lock().unwrap().push("check");
+                Ok(())
+            },
+        ));
+        let before = Arc::clone(&trace);
+        commands.set_before_invoke(async move |ctx: &CommandContext<'_>| {
+            assert_eq!(ctx.qualified_name(), "計算 倍");
+            assert_eq!(ctx.invoked_with(), "x");
+            before.lock().unwrap().push("before");
+            Ok(())
+        });
+        let after = Arc::clone(&trace);
+        commands.set_after_invoke(async move |_: &CommandContext<'_>, error: Option<&Error>| {
+            after.lock().unwrap().push(if error.is_some() {
+                "after error"
+            } else {
+                "after success"
+            });
+            Ok(())
+        });
+        let parse = Arc::clone(&trace);
+        let body = Arc::clone(&trace);
+        commands
+            .group_with_aliases("計算", &["calc"])?
+            .subcommand_parsed_with_aliases(
+                "倍",
+                &["x"],
+                async move |ctx: &CommandContext<'_>| {
+                    tokio::task::yield_now().await;
+                    parse.lock().unwrap().push("parse");
+                    ctx.arguments().parse_required::<u32>()
+                },
+                async move |_: CommandContext<'_>, value| -> Result<()> {
+                    body.lock().unwrap().push("body");
+                    match value {
+                        42 => Ok(()),
+                        43 => Err(Error::msg("callback failure")),
+                        _ => panic!("unexpected converted value"),
+                    }
+                },
+            )?;
+        commands.register_parsed(
+            "stop",
+            async |_: &CommandContext<'_>| -> Result<()> { panic!("denied parser ran") },
+            async |_: CommandContext<'_>, ()| -> Result<()> { panic!("denied callback ran") },
+        )?;
+
+        assert!(matches!(
+            dispatch(&commands, "!stop").await,
+            Err(Error::Check(CheckFailure::Rejected))
+        ));
+        assert!(trace.lock().unwrap().is_empty());
+        assert!(matches!(
+            dispatch(&commands, "!calc x nope").await,
+            Err(Error::Handler(_))
+        ));
+        assert_eq!(*trace.lock().unwrap(), ["check", "parse"]);
+        trace.lock().unwrap().clear();
+        dispatch(&commands, "!calc x 「42」").await?;
+        assert_eq!(
+            *trace.lock().unwrap(),
+            ["check", "parse", "before", "body", "after success"]
+        );
+        trace.lock().unwrap().clear();
+        assert!(matches!(
+            dispatch(&commands, "!calc x 43").await,
+            Err(Error::Handler(_))
+        ));
+        assert_eq!(
+            *trace.lock().unwrap(),
+            ["check", "parse", "before", "body", "after error"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parsed_text_does_not_register_any_name_when_an_alias_conflicts() -> Result<()> {
+        let mut commands = Commands::new("!")?;
+        let parse = async |ctx: &CommandContext<'_>| ctx.arguments().parse_required::<u32>();
+        let handler = async |_: CommandContext<'_>, _: u32| -> Result<()> { Ok(()) };
+        commands.register_parsed_with_aliases("first", &["n"], parse, handler)?;
+        let conflict =
+            commands.register_parsed_with_aliases("second", &["other", "n"], parse, handler);
+        assert!(conflict.is_err());
+        assert_eq!(commands.command_info("n").unwrap().name(), "first");
+        assert!(commands.command_info("second").is_none());
+        assert!(commands.command_info("other").is_none());
         Ok(())
     }
 

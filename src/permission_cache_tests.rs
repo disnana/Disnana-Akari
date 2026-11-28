@@ -134,7 +134,7 @@ async fn gateway_updates_refresh_only_the_needed_rest_entries() {
                 &tx,
                 &hooks.reporter,
                 twilight_gateway::ShardId::ONE,
-                (None, None),
+                (None, None, None),
             )
             .is_none()
         );
@@ -256,7 +256,7 @@ async fn malformed_role_update_invalidates_only_its_shard() {
                     &tx,
                     &hooks.reporter,
                     ShardId::new(0, 2),
-                    (None, None)
+                    (None, None, None)
                 )
                 .is_none()
             );

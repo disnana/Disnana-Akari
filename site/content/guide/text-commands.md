@@ -269,6 +269,29 @@ async fn count(ctx: CommandContext<'_>) -> Result<()> {
 }
 ```
 
+### 引数変換を実行前フックより先に行う
+
+`register_parsed` に変換関数とハンドラーを渡すと、両方のフックが有効でも、変換を通過した呼び出しだけが実行前フックへ進みます。変換関数は非同期なので、必要ならアプリのデータを照会できます。ハンドラーに渡す変換結果には `String` などの所有型を使います。
+
+```rust
+use disnana_akari::{CommandContext, Commands, Error, Result};
+
+fn configure(commands: &mut Commands) -> Result<()> {
+    commands.register_parsed("count", parse_count, count)?;
+    Ok(())
+}
+
+async fn parse_count(ctx: &CommandContext<'_>) -> Result<u32> {
+    ctx.arguments().parse_required::<u32>().map_err(Error::handler)
+}
+
+async fn count(ctx: CommandContext<'_>, value: u32) -> Result<()> {
+    ctx.reply(&format!("{value} 件")).await
+}
+```
+
+実行順はコマンドのチェック、引数変換、実行前フック、ハンドラー、実行後フックです。引数変換が失敗すると、フックとハンドラーを実行せず、コマンドのエラー処理に渡します。別名付きの登録には `register_parsed_with_aliases`、グループ内には `subcommand_parsed` と `subcommand_parsed_with_aliases` を使えます。 [discord.py の実行前フック](https://discordpy.readthedocs.io/en/v2.7.1/ext/commands/api.html#discord.ext.commands.Bot.before_invoke)
+
 ## コマンド名の英字の大小を区別しない
 
 `Commands::enable_case_insensitive()` を呼ぶと、コマンド名と別名にある ASCII 英字の大小を区別しなくなります。`!Ping` と `!ping` は同じ処理を呼びます。プレフィックスの照合は従来どおりで、正式名と入力された名前はそれぞれ保持されます。登録済みの名前が衝突する場合は設定が失敗し、元の状態が残ります。

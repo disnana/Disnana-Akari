@@ -12,6 +12,7 @@ mod events;
 mod flags;
 mod gateway_runtime;
 mod gateway_status;
+mod guild_lifecycle;
 mod hooks;
 mod hybrid;
 mod interactions;
@@ -85,6 +86,7 @@ pub use events::{
 pub use gateway_status::{
     GatewayShardState, GatewayShardStatus, GatewayStatusHandle, GatewayStatusUpdates,
 };
+pub use guild_lifecycle::{GuildLifecycleEvent, GuildLifecycleKind};
 pub use hooks::{ErrorReport, ErrorSource, InfoEvent, Messages};
 pub use hybrid::{
     CommandSource, HybridArgumentError, HybridArguments, HybridCommandGroup, HybridContext,
@@ -604,6 +606,9 @@ impl Bot {
         };
         let mut gateways = plan.prepare(config, presence.as_ref())?;
         gateways.install_handles(gateway_status.as_ref(), voice_gateway.as_ref());
+        if events.has_guild_lifecycle_handlers() {
+            gateways.enable_guild_lifecycle();
+        }
         let (event_tx, event_queue) = mpsc::channel(limits.queue_capacity);
         let (text_ingress, handle_text) =
             commands::text_workers(text_commands, limits, &http, &permissions, &hooks);
@@ -643,6 +648,7 @@ impl Bot {
             |shard| gateway_lost(shard, &permissions, member_cache.as_ref()),
             |gateway, event| {
                 let shard = gateway.id();
+                let lifecycle = gateway.observe_guild_lifecycle(&event);
                 let cache = message_cache.as_ref().map(|cache| cache.shard(shard));
                 let Some((event, radio)) = route_gateway_event(
                     event,
@@ -651,7 +657,11 @@ impl Bot {
                     &event_tx,
                     &hooks.reporter,
                     shard,
-                    (cache, member_cache.as_ref().map(|cache| cache.shard(shard))),
+                    (
+                        cache,
+                        member_cache.as_ref().map(|cache| cache.shard(shard)),
+                        lifecycle,
+                    ),
                 ) else {
                     return;
                 };
@@ -885,6 +895,7 @@ fn update_permission_cache(permissions: &PermissionResolver, event: &Event, shar
 
 enum MessageEvent {
     Ready(Box<Ready>),
+    GuildLifecycle(GuildLifecycleEvent, Option<Box<Event>>),
     Message(Pending<Arc<Message>>),
     Update(Box<MessageUpdate>, Option<CachedMessageEdit>),
     Delete(MessageDelete, Option<Arc<Message>>),
@@ -947,7 +958,11 @@ fn route_gateway_event(
     queue: &mpsc::Sender<MessageEvent>,
     reporter: &Reporter,
     shard: ShardId,
-    (cache, members): (Option<MessageCacheRoute<'_>>, Option<MemberCacheRoute<'_>>),
+    (cache, members, lifecycle): (
+        Option<MessageCacheRoute<'_>>,
+        Option<MemberCacheRoute<'_>>,
+        Option<GuildLifecycleEvent>,
+    ),
 ) -> Option<(Event, Vec<RadioSubmission>)> {
     let event = match members {
         Some(members) => route_cached_member(event, members, events, queue, reporter)?,
@@ -977,7 +992,18 @@ fn route_gateway_event(
     if permissions.cache_enabled() {
         update_permission_cache(permissions, &event, shard);
     }
-    if let Some(name) = events.gateway_event_name(&event) {
+    let name = events.gateway_event_name(&event);
+    if let Some(lifecycle) = lifecycle {
+        let raw = name.map(|_| Box::new(event));
+        queue_event(
+            queue,
+            MessageEvent::GuildLifecycle(lifecycle, raw),
+            "GUILD_LIFECYCLE",
+            reporter,
+        );
+        return None;
+    }
+    if let Some(name) = name {
         queue_event(
             queue,
             MessageEvent::Gateway(Box::new(event)),
@@ -1103,6 +1129,12 @@ async fn dispatch_events(
     while let Some(event) = queue.recv().await {
         match event {
             MessageEvent::Ready(ready) => events.ready(&ready, &hooks.reporter).await,
+            MessageEvent::GuildLifecycle(event, raw) => {
+                if let Some(raw) = raw {
+                    events.gateway(&raw, &hooks.reporter).await;
+                }
+                events.guild_lifecycle(&event, &hooks.reporter).await;
+            }
             MessageEvent::Update(update, cached) => {
                 events.message_update(&update, &hooks.reporter).await;
                 if let Some(cached) = cached {
@@ -1227,7 +1259,12 @@ fn handler_event_types(events: &Events, intents: Intents) -> Result<EventTypeFla
         Intents::GUILD_MESSAGE_TYPING | Intents::DIRECT_MESSAGE_TYPING,
     )?;
     let gateway = events.gateway_types(intents)?;
-    Ok(message_lifecycle | reactions | activity | gateway)
+    let guild_lifecycle = events
+        .has_guild_lifecycle_handlers()
+        .then_some(guild_lifecycle::LIFECYCLE_EVENTS)
+        .unwrap_or_else(EventTypeFlags::empty);
+    check_event_intents(intents, guild_lifecycle, Intents::GUILDS)?;
+    Ok(message_lifecycle | reactions | activity | gateway | guild_lifecycle)
 }
 
 fn check_reaction_intents(intents: Intents, events: EventTypeFlags) -> Result<()> {

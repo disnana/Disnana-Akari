@@ -46,6 +46,38 @@ async fn on_message(message: &Message) -> Result<()> {
 > [!NOTE]
 > `on_message` には、`GUILD_MESSAGES` と `MESSAGE_CONTENT` の Intent が必要です。Akari は自動では追加しないので、`add_intents` で指定してください（足りないときは、接続前にエラーになります）。Developer Portal の **Message Content Intent** も有効にします。[Intent の設定](intents.md)
 
+## サーバーへの参加と復旧を区別する
+
+`GUILD_CREATE` は、新しく追加されたときに加え、起動直後の読み込みと一時停止からの復旧にも届きます。参加時だけ初期設定を案内するには、`on_guild_lifecycle` の `Joined` を使います。
+
+```rust
+use disnana_akari::{Bot, Events, GuildLifecycleEvent, GuildLifecycleKind, Result};
+use disnana_akari::model::gateway::Intents;
+
+fn configure() -> Result<Bot> {
+    let mut events = Events::new();
+    events.on_guild_lifecycle(on_guild_lifecycle);
+    Ok(Bot::from_env()?.add_intents(Intents::GUILDS).with_events(events))
+}
+
+async fn on_guild_lifecycle(event: &GuildLifecycleEvent) -> Result<()> {
+    if event.kind() == GuildLifecycleKind::Joined {
+        println!("新しく参加したサーバー {}", event.guild_id());
+    }
+    Ok(())
+}
+```
+
+| 種類 | 届くとき |
+| --- | --- |
+| `InitialAvailable` | `Ready` で通知されたサーバーを、この接続で初めて利用できたとき |
+| `Joined` | Bot が新しいサーバーに参加し、利用できるようになったとき |
+| `Available` | 利用中のサーバーが一時停止から復旧したとき |
+| `Unavailable` | 利用中のサーバーが一時的に利用できなくなったとき |
+| `Removed` | Bot がサーバーから退出したとき |
+
+状態はシャードごとに管理します。再開（Resume）では状態を引き継ぎ、新しい `Ready` で読み込みをやり直します。関連する Gateway ペイロードの解釈に失敗すると、そのシャードの分類は次の `Ready` まで停止します。サーバーの詳しいデータも必要なら、`on_gateway` で `GuildCreate` や `GuildDelete` をあわせて受け取れます。 [Discord の Gateway イベント](https://docs.discord.com/developers/events/gateway-events#guild-create) · [discord.py のサーバーイベント](https://discordpy.readthedocs.io/en/v2.7.1/api.html#discord.on_guild_join)
+
 ## 編集・削除を受け取る
 
 キャッシュに依存しない、discord.py の raw イベントに対応しています。

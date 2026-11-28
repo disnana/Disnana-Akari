@@ -259,7 +259,7 @@ async fn voice_soundboard_and_list_payloads_reach_the_ordered_event_worker() {
                 &queue,
                 &hooks.reporter,
                 ShardId::ONE,
-                (None, None)
+                (None, None, None)
             )
             .is_none()
         );

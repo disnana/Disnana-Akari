@@ -5,7 +5,7 @@ use std::{
 
 use super::{
     CommandContext, CommandHandler, CommandInfo, CommandMetadata, Invocation, duplicate_command,
-    plain_handler,
+    parsed_handler, plain_handler,
 };
 use crate::{RegistrationError, Result};
 
@@ -78,6 +78,54 @@ impl TextCommandGroup<'_> {
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
         self.subcommand_handler(name, aliases, plain_handler!(handler))
+    }
+
+    /// グループ内に、引数を変換してから実行するテキストコマンドを登録します。
+    ///
+    /// チェック、引数変換、実行前フック、コマンド関数、実行後フックの順に進みます。
+    /// 変換に失敗した場合は、フックとコマンド関数を呼びません。
+    ///
+    /// # エラー
+    ///
+    /// 無効な名前や、このグループ内で既に使用中の名前を拒否します。
+    pub fn subcommand_parsed<T, P, E>(
+        &mut self,
+        name: &str,
+        parse: impl AsyncFn(&CommandContext<'_>) -> std::result::Result<T, P> + Send + Sync + 'static,
+        handler: impl for<'a> AsyncFn(CommandContext<'a>, T) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        T: 'static,
+        P: Into<Box<dyn std::error::Error + Send + Sync>>,
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.subcommand_parsed_with_aliases(name, &[], parse, handler)
+    }
+
+    /// [`subcommand_parsed`](Self::subcommand_parsed) と同じコマンドを、正式名と別名で登録します。
+    ///
+    /// # エラー
+    ///
+    /// 無効な名前や同じ階層の重複を拒否します。失敗するとコマンドも別名も登録しません。
+    pub fn subcommand_parsed_with_aliases<T, P, E>(
+        &mut self,
+        name: &str,
+        aliases: &[&str],
+        parse: impl AsyncFn(&CommandContext<'_>) -> std::result::Result<T, P> + Send + Sync + 'static,
+        handler: impl for<'a> AsyncFn(CommandContext<'a>, T) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        T: 'static,
+        P: Into<Box<dyn std::error::Error + Send + Sync>>,
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.subcommand_handler(name, aliases, parsed_handler(parse, handler))
     }
 
     pub(crate) fn subcommand_handler(

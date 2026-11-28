@@ -559,6 +559,12 @@ async fn double(ctx: CommandContext<'_>) -> Result<(), Box<dyn std::error::Error
 
 `Commands::set_before_invoke` と `set_after_invoke` は、チェックと型付き引数の変換が通ったテキスト実行の前後に呼ばれます。実行後フックにはハンドラーのエラーが渡ります。ハイブリッドのテキスト実行にも適用します。
 
+`Commands::register_parsed` は、`&CommandContext` を受け取る非同期変換関数と、変換済みの所有値を受け取るハンドラーを登録します。`register_parsed_with_aliases` で別名を登録でき、グループでは `TextCommandGroup::subcommand_parsed` と `subcommand_parsed_with_aliases` を使えます。チェックまたは変換に失敗した呼び出しでは、どちらのフックも実行しません。
+
+## サーバーの参加と利用可能状態
+
+`Events::on_guild_lifecycle` で `GuildLifecycleEvent` を受け取ります。イベントには `guild_id()`、`shard()`、`kind()` があります。`GuildLifecycleKind` は初回読み込み、参加、一時停止、復旧、退出を区別します。必要な Intent は `model::gateway::Intents::GUILDS` です。
+
 ## 送信前の検証
 
 `validation::message_content`、`attachment_count`、`attachment_sizes` で、本文の文字数、保持分を含む添付件数、Discord が通知した1ファイルのバイト上限を確認します。本文は上限超過を検出した時点で走査を打ち切ります。 `AttachmentLimits` では、保持分を含む件数、1 ファイルのサイズ、新規送信分の合計サイズにアプリ独自の上限を設定できます。値を `None` にすると、その項目のアプリ独自の検査を外します。`ComponentsV2::attachment_limits` で返信と編集に適用できます。`UiMessage::validate`、`ComponentsV2::validate`、`Modal::validate` は各ビルダーの構成を検証します。

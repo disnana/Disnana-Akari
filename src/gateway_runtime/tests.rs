@@ -11,14 +11,17 @@ use tokio::{
 use tokio_websockets::{Message as Frame, ServerBuilder, WebSocketStream};
 use twilight_gateway::{Intents, ShardId, ShardState};
 use twilight_model::{
-    gateway::{payload::incoming::VoiceServerUpdate, presence::Status},
+    gateway::{
+        payload::incoming::{GuildCreate, GuildDelete, VoiceServerUpdate},
+        presence::Status,
+    },
     id::Id,
 };
 
 use crate::{
-    Bot, CachedMessageEdit, Context, Events, GatewayShardState, GatewayStatusHandle, MessageUpdate,
-    Presence, PresenceHandle, Ready, ShutdownHandle, VoiceGateway, VoiceGatewayError,
-    VoiceStateChange,
+    Bot, CachedMessageEdit, Context, Error, Events, GatewayShardState, GatewayStatusHandle,
+    GuildLifecycleEvent, GuildLifecycleKind, MessageUpdate, Presence, PresenceHandle, Ready,
+    ShutdownHandle, VoiceGateway, VoiceGatewayError, VoiceStateChange,
 };
 
 use super::lost_gateway_session;
@@ -122,6 +125,133 @@ async fn loopback_gateway_identifies_resumes_and_closes_cleanly() {
     .await
     .expect("gateway fixture completed");
     assert!(result.is_ok(), "{result:?}");
+}
+
+#[tokio::test]
+async fn guild_lifecycle_requires_explicit_guilds_before_connecting() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut events = Events::new();
+    events.on_guild_lifecycle(async |_: &GuildLifecycleEvent| Ok::<(), Error>(()));
+    let mut bot = Bot::new(FIXTURE_TOKEN)
+        .unwrap()
+        .with_intents(Intents::empty())
+        .with_events(events);
+    bot.gateway_test_port = Some(listener.local_addr().unwrap().port());
+
+    let result = timeout(Duration::from_secs(1), bot.start())
+        .await
+        .expect("Intent validation completed before connecting");
+    assert!(matches!(
+        result,
+        Err(Error::MissingEventIntents { any_of }) if any_of == Intents::GUILDS
+    ));
+    assert!(
+        timeout(Duration::from_millis(25), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn loopback_gateway_dispatches_guild_lifecycle_and_raw_events() {
+    use GuildLifecycleKind::{Available, InitialAvailable, Joined, Removed, Unavailable};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (derived, mut lifecycle) = mpsc::unbounded_channel();
+    let (raw, mut raw_events) = mpsc::unbounded_channel();
+    let raw_create = raw.clone();
+    let mut events = Events::new();
+    events.on_guild_lifecycle(async move |event: &GuildLifecycleEvent| {
+        derived.send((event.kind(), event.guild_id().get()))
+    });
+    events
+        .on_gateway(async move |event: &GuildCreate| raw_create.send(("create", event.id().get())));
+    events.on_gateway(async move |event: &GuildDelete| raw.send(("delete", event.id.get())));
+    let (mut bot, shutdown) = Bot::new(FIXTURE_TOKEN)
+        .unwrap()
+        .with_intents(Intents::GUILDS)
+        .with_events(events)
+        .with_shutdown();
+    bot.gateway_test_port = Some(address.port());
+    let gateway = async {
+        let mut socket = accept(&listener).await;
+        let identify = receive_opcode(&mut socket, 2).await;
+        assert_eq!(identify["d"]["intents"], Intents::GUILDS.bits());
+        send_ready_with_guilds(
+            &mut socket,
+            &format!("ws://{address}"),
+            "guild-lifecycle",
+            [0, 1],
+            json!([{"id":"4", "unavailable":true}]),
+        )
+        .await;
+        for (sequence, (event, payload, raw_kind, kind, id)) in [
+            (
+                "GUILD_CREATE",
+                available_guild_payload(4),
+                "create",
+                InitialAvailable,
+                4,
+            ),
+            ("GUILD_CREATE", guild_payload(5), "create", Joined, 5),
+            (
+                "GUILD_DELETE",
+                json!({"id":"5", "unavailable":true}),
+                "delete",
+                Unavailable,
+                5,
+            ),
+            (
+                "GUILD_CREATE",
+                available_guild_payload(5),
+                "create",
+                Available,
+                5,
+            ),
+            ("GUILD_DELETE", json!({"id":"5"}), "delete", Removed, 5),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            send_dispatch(&mut socket, sequence + 2, event, payload).await;
+            assert_eq!(lifecycle.recv().await, Some((kind, id)));
+            assert_eq!(raw_events.recv().await, Some((raw_kind, id)));
+        }
+
+        // 型に変換できない所属イベントの後は、次の Ready まで推測した通知を出さない。
+        send_dispatch(&mut socket, 7, "GUILD_CREATE", json!({"id":"6"})).await;
+        send_dispatch(&mut socket, 8, "GUILD_CREATE", guild_payload(7)).await;
+        assert_eq!(raw_events.recv().await, Some(("create", 7)));
+        // 後続の raw イベントまで処理されると、先行する同じキューの通知も処理済み。
+        send_dispatch(&mut socket, 9, "GUILD_DELETE", json!({"id":"7"})).await;
+        assert_eq!(raw_events.recv().await, Some(("delete", 7)));
+        assert!(lifecycle.try_recv().is_err());
+        assert!(raw_events.try_recv().is_err());
+        shutdown.request();
+        expect_close(&mut socket, 1000).await;
+    };
+    let (result, ()) = timeout(Duration::from_secs(10), async {
+        tokio::join!(bot.start(), gateway)
+    })
+    .await
+    .expect("guild lifecycle gateway fixture completed");
+    assert!(result.is_ok(), "{result:?}");
+}
+
+fn guild_payload(id: u64) -> Value {
+    json!({
+        "id":id.to_string(), "owner_id":"2", "name":"fixture", "afk_timeout":60,
+        "default_message_notifications":0, "explicit_content_filter":0, "features":[],
+        "mfa_level":0, "nsfw_level":0, "preferred_locale":"ja", "roles":[],
+        "system_channel_flags":0, "premium_progress_bar_enabled":false, "verification_level":0
+    })
+}
+
+fn available_guild_payload(id: u64) -> Value {
+    let mut payload = guild_payload(id);
+    payload["unavailable"] = false.into();
+    payload
 }
 
 async fn mock_gateway(
@@ -478,18 +608,37 @@ async fn send_ready(
     session_id: &str,
     shard: [u32; 2],
 ) {
+    send_ready_with_guilds(socket, url, session_id, shard, json!([])).await;
+}
+
+async fn send_ready_with_guilds(
+    socket: &mut WebSocketStream<TcpStream>,
+    url: &str,
+    session_id: &str,
+    shard: [u32; 2],
+    guilds: Value,
+) {
     let payload = json!({
         "application": {"id": "1", "flags": 0},
-        "guilds": [],
+        "guilds": guilds,
         "resume_gateway_url": url,
         "session_id": session_id,
         "shard": shard,
         "user": {"id": "2", "username": "fixture", "discriminator": "0", "mfa_enabled": false, "bot": true},
         "v": 10,
     });
+    send_dispatch(socket, 1, "READY", payload).await;
+}
+
+async fn send_dispatch(
+    socket: &mut WebSocketStream<TcpStream>,
+    sequence: usize,
+    kind: &str,
+    payload: Value,
+) {
     socket
         .send(Frame::text(format!(
-            r#"{{"op":0,"s":1,"t":"READY","d":{payload}}}"#
+            r#"{{"op":0,"s":{sequence},"t":"{kind}","d":{payload}}}"#
         )))
         .await
         .unwrap();

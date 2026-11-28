@@ -31,15 +31,17 @@ pub use voice_notifications::{
 pub(crate) use voice_notifications::{VoiceNotification, VoiceNotificationTypes};
 
 use crate::{
-    ButtonContext, CachedMessageEdit, ChannelSelectContext, ErrorSource, MentionableSelectContext,
-    MessageUpdate, ModalContext, Result, RoleSelectContext, SelectContext, UserSelectContext,
-    error::adapt_handler, hooks::Reporter, interactions::InteractionHandlers,
+    ButtonContext, CachedMessageEdit, ChannelSelectContext, ErrorSource, GuildLifecycleEvent,
+    MentionableSelectContext, MessageUpdate, ModalContext, Result, RoleSelectContext,
+    SelectContext, UserSelectContext, error::adapt_handler, hooks::Reporter,
+    interactions::InteractionHandlers,
 };
 
 /// Gateway イベントごとに非同期ハンドラーを登録します。
 #[derive(Default)]
 pub struct Events {
     ready: Vec<Box<dyn Handler<Ready>>>,
+    guild_lifecycle: Vec<Box<dyn Handler<GuildLifecycleEvent>>>,
     message: Vec<Box<dyn Handler<Message>>>,
     message_update: Vec<Box<dyn Handler<MessageUpdate>>>,
     message_delete: Vec<Box<dyn Handler<MessageDelete>>>,
@@ -57,6 +59,7 @@ impl std::fmt::Debug for Events {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Events")
             .field("ready_handlers", &self.ready.len())
+            .field("guild_lifecycle_handlers", &self.guild_lifecycle.len())
             .field("message_handlers", &self.message.len())
             .field("message_update_handlers", &self.message_update.len())
             .field("message_delete_handlers", &self.message_delete.len())
@@ -89,6 +92,28 @@ impl Events {
     {
         self.ready
             .push(Box::new(adapt_handler!(handler, event: &Ready)));
+    }
+
+    /// Bot のサーバーへの参加・退出と、接続直後の読み込み・一時停止・復旧を区別して受け取ります。
+    ///
+    /// `GUILDS` Intent が必要です。元の Discord ペイロードも必要なら
+    /// [`on_gateway`](Self::on_gateway) を併用できます。
+    pub fn on_guild_lifecycle<E>(
+        &mut self,
+        handler: impl AsyncFn(&GuildLifecycleEvent) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.guild_lifecycle.push(Box::new(
+            adapt_handler!(handler, event: &GuildLifecycleEvent),
+        ));
+    }
+
+    pub(crate) fn has_guild_lifecycle_handlers(&self) -> bool {
+        !self.guild_lifecycle.is_empty()
     }
 
     /// サーバーで人が送信した新着メッセージを受け取る関数を追加します。
@@ -385,6 +410,10 @@ impl Events {
 
     pub(crate) async fn ready(&self, event: &Ready, reporter: &Reporter) {
         dispatch(&self.ready, event, "READY", reporter).await;
+    }
+
+    pub(crate) async fn guild_lifecycle(&self, event: &GuildLifecycleEvent, reporter: &Reporter) {
+        dispatch(&self.guild_lifecycle, event, "GUILD_LIFECYCLE", reporter).await;
     }
 
     pub(crate) async fn message(&self, event: &Message, reporter: &Reporter) {

@@ -10,7 +10,7 @@ pub use arguments::{ArgumentError, ArgumentValueError, Arguments};
 use groups::CommandTree;
 pub use groups::TextCommandGroup;
 pub use help::{CommandInfo, CommandMetadata};
-use invoke::InvocationHooks;
+use invoke::{InvocationHooks, parsed_handler};
 pub use prefix::CommandPrefixes;
 use prefix::PrefixPolicy;
 pub(crate) use workers::text_workers;
@@ -277,6 +277,55 @@ impl Commands {
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
         self.register_handler(name, aliases, plain_handler!(handler))
+    }
+
+    /// テキスト専用のコマンドに、引数を変換する関数と、変換済みの値を受け取る関数を登録します。
+    ///
+    /// 変換はコマンドのチェック後、実行前フックの前に行います。変換に失敗した場合は、
+    /// フックとコマンド関数を呼びません。変換には [`CommandContext::arguments`] を使えます。
+    /// コマンド関数へ渡す値が入力の文字列なら、`String` などの所有型に変換します。
+    ///
+    /// # エラー
+    ///
+    /// 名前が空、空白を含む、または既に登録済みの場合に失敗します。
+    pub fn register_parsed<T, P, E>(
+        &mut self,
+        name: &str,
+        parse: impl AsyncFn(&CommandContext<'_>) -> std::result::Result<T, P> + Send + Sync + 'static,
+        handler: impl for<'a> AsyncFn(CommandContext<'a>, T) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        T: 'static,
+        P: Into<Box<dyn std::error::Error + Send + Sync>>,
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.register_parsed_with_aliases(name, &[], parse, handler)
+    }
+
+    /// [`register_parsed`](Self::register_parsed) と同じコマンドを、正式名と別名で登録します。
+    ///
+    /// # エラー
+    ///
+    /// 無効な名前や重複がある場合は失敗し、正式名も別名も登録しません。
+    pub fn register_parsed_with_aliases<T, P, E>(
+        &mut self,
+        name: &str,
+        aliases: &[&str],
+        parse: impl AsyncFn(&CommandContext<'_>) -> std::result::Result<T, P> + Send + Sync + 'static,
+        handler: impl for<'a> AsyncFn(CommandContext<'a>, T) -> std::result::Result<(), E>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<()>
+    where
+        T: 'static,
+        P: Into<Box<dyn std::error::Error + Send + Sync>>,
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.register_handler(name, aliases, parsed_handler(parse, handler))
     }
 
     pub(crate) fn register_handler(
